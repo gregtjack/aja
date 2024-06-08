@@ -1,6 +1,9 @@
 use std::iter::Peekable;
 
-use crate::{ast::{Expr, Prog}, lexer::token::Token};
+use crate::{
+    ast::{Expr, Prog},
+    lexer::token::Token,
+};
 
 #[derive(Debug)]
 enum ParseError {
@@ -12,8 +15,7 @@ where
     T: Iterator<Item = Token>,
 {
     iter: Peekable<T>,
-    current: u32
-
+    current: u32,
 }
 
 impl<T> Parser<T>
@@ -33,6 +35,4 @@ where
     }
 }
 
-pub fn parse(tokens: Vec<Token>) -> Result<Expr, ParseError> {
-   
-}
+pub fn parse(tokens: Vec<Token>) -> Result<Expr, ParseError> {}

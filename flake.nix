@@ -3,7 +3,9 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
     flake-utils.url = "github:numtide/flake-utils";
+    
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs = {
@@ -21,7 +23,9 @@
           pkgs = import nixpkgs {
             inherit system overlays;
           };
-          rustTools = pkgs.rust-bin.stable.latest.default;
+          rustTools = (pkgs.rust-bin.stable.latest.default.override {
+            extensions = ["rust-src"];
+          });
         in
         with pkgs;
         {
@@ -34,10 +38,7 @@
               just
               eza
               fd
-              clang
               openssl.dev
-              strace
-              valgrind
             ];
           };
         }
