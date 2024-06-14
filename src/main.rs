@@ -1,26 +1,33 @@
-use clap::Parser;
-use std::{fs::read_to_string, path::PathBuf};
 use anyhow::Result;
+use lexer::token::Token;
+use std::{fs::read_to_string, path::PathBuf};
 
-use crate::lexer::tokenize;
+use crate::{interp::interp_expr, lexer::Lexer};
+use parse::Parser;
 mod lexer;
 mod ast;
 mod parse;
+mod interp;
 
-#[derive(Parser, Debug)]
+#[derive(clap::Parser)]
 #[command(version, about, long_about = None)]
-struct Cli {
+struct AjaCli {
     /// source file
-    script: Option<PathBuf>,
+    filename: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
-    let cli: Cli = Cli::parse();
+    let cli = <AjaCli as clap::Parser>::parse();
 
-    let script = read_to_string(cli.script.unwrap())?;
-    let tokens = tokenize(script)?;
+    let script = read_to_string(cli.filename.unwrap())?;
+    let lexer = Lexer::new(script.chars());
+        
+    // println!("{:#?}", lexer.collect::<Vec<Token>>());
+    let mut parser = Parser::new(lexer);
+    let ast = parser.parse()?;
+    let res = interp_expr(ast)?;
 
-    println!("{:#?}", tokens);
+    println!("{:?}", res);
 
     Ok(())
 }

@@ -1,39 +1,16 @@
-#[derive(Debug)]
-pub struct Position {
-    pub line: u32,
-    pub col: u32,
-    pub pos: u32,
-}
+use ecow::EcoString;
 
-impl Position {
-    pub fn new(pos: u32, line: u32, col: u32) -> Self {
-        Position { line, col, pos }
-    }
-}
+use crate::ast::Location;
 
-#[derive(Debug)]
-pub struct Spanning(Position, Position);
+/// Token(start, type, end)
+#[derive(Debug, Clone)]
+pub struct Token(pub Location, pub TokenType, pub Location);
 
-#[derive(Debug)]
-pub struct Token {
-    pub token: TokenType,
-    pub span: Spanning, 
-}
-
-impl Token {
-    pub fn new(t_type: TokenType, from: Position, to: Position) -> Self {
-        Token { token: t_type, span: Spanning(from, to) }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
     Eof,
-    Empty, 
-    // Items
-    Ident(String),
-    Int(i32),
-    String(String),
+    Empty,
+    Literal(Literal),
     // Delimiters
     LeftParen,
     RightParen,
@@ -50,8 +27,8 @@ pub enum TokenType {
     // Operators
     Minus,
     Plus,
-    Asterisk, 
-    Slash,
+    Mult, 
+    Div,
     Equal, 
     EqualEqual,
     Bang,
@@ -61,12 +38,25 @@ pub enum TokenType {
     LessThan,
     LessEqual,
     // Keywords
-    Let,
+    Keyword(Keyword),
+    Ident(EcoString),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Literal {
+    Int(i32),
+    String(EcoString),
     True,
-    False,
+    False
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Keyword {
+    Let,
+    Var,
     Fn,
     If,
     Else,
+    Match,
     Return,
-    Macro,
 }
