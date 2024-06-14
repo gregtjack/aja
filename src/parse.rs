@@ -2,7 +2,7 @@ use std::{error::Error, fmt, iter::Peekable};
 
 use crate::{
     ast::{self, Expr, Literal, Prog},
-    lexer::token::{self, Keyword, Token, TokenType},
+    token::{self, Keyword, Token, TokenType},
 };
 
 #[derive(Debug)]
@@ -17,11 +17,13 @@ pub enum ParseError {
 
 impl std::error::Error for ParseError {}
 
-impl fmt::Display for ParseError { 
+impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidToken { line, col, message } => write!(f, "[line {}:{}]: {}", line, col, message),
-            _ => write!(f, "unknown error")
+            Self::InvalidToken { line, col, message } => {
+                write!(f, "[line {}:{}]: {}", line, col, message)
+            }
+            _ => write!(f, "unknown error"),
         }
     }
 }
@@ -53,15 +55,14 @@ where
     fn parse_expr(&mut self) -> ParseResult<Expr> {
         // TODO: include src spans
         match self.peek() {
-            // if expression
             Some(Token(_, TokenType::Keyword(Keyword::If), _)) => self.parse_if(),
+            Some(Token(_, TokenType::Keyword(Keyword::Let), _)) => self.parse_let(),
             // all other exprs
             Some(_) => self.parse_equality(),
             None => Err(self.error(self.prev_token.clone(), "idk".to_string())),
         }
     }
 
-    
     fn parse_if(&mut self) -> ParseResult<Expr> {
         self.consume(TokenType::Keyword(Keyword::If), "Expected 'if'".to_string())?;
         let e1 = self.parse_expr()?;
@@ -70,13 +71,45 @@ where
         self.consume(TokenType::RightBrace, "expected '}'".to_string())?;
 
         // TODO: make else optional
-        self.consume(TokenType::Keyword(Keyword::Else), "Expected 'else'".to_string())?;
+        self.consume(
+            TokenType::Keyword(Keyword::Else),
+            "Expected 'else'".to_string(),
+        )?;
 
         self.consume(TokenType::LeftBrace, "Expected '{'".to_string())?;
         let e3 = self.parse_expr()?;
         self.consume(TokenType::RightBrace, "expected '}'".to_string())?;
 
         Ok(Expr::If(Box::new(e1), Box::new(e2), Box::new(e3)))
+    }
+
+    fn parse_let(&mut self) -> ParseResult<Expr> {
+        self.consume(
+            TokenType::Keyword(Keyword::Let),
+            "Expected 'if'".to_string(),
+        )?;
+        let e1 = self.parse_primary()?;
+
+        match e1 {
+            Expr::Var(id) => {
+                self.consume(TokenType::Equal, "Expected '='".to_string())?;
+                let e2 = self.parse_expr()?;
+                self.consume(
+                    TokenType::Keyword(Keyword::In),
+                    "expected keyword in".to_string(),
+                )?;
+
+                self.consume(TokenType::LeftBrace, "Expected '{'".to_string())?;
+                let e3 = self.parse_expr()?;
+                self.consume(TokenType::RightBrace, "expected '}'".to_string())?;
+
+                Ok(Expr::Let(id, Box::new(e2), Box::new(e3)))
+            }
+            _ => Err(self.error(
+                self.prev_token.clone(),
+                "variable declaration must be an identifier".to_string(),
+            )),
+        }
     }
 
     fn parse_equality(&mut self) -> ParseResult<Expr> {
@@ -88,11 +121,7 @@ where
         ) {
             let op = self.next().unwrap();
             let right = self.parse_comparison()?;
-            expr = Expr::BinOp(
-                Box::new(expr),
-                op.1,
-                Box::new(right),
-            )
+            expr = Expr::BinOp(Box::new(expr), op.1, Box::new(right))
         }
 
         Ok(expr)
@@ -111,11 +140,7 @@ where
         ) {
             let op = self.next().unwrap();
             let right = self.parse_term()?;
-            expr = Expr::BinOp(
-                Box::new(expr),
-                op.1,
-                Box::new(right),
-            )
+            expr = Expr::BinOp(Box::new(expr), op.1, Box::new(right))
         }
 
         Ok(expr)
@@ -127,16 +152,11 @@ where
         // TODO: include src spans
         while matches!(
             self.peek(),
-            Some(&Token(_, TokenType::Plus, _))
-                | Some(&Token(_, TokenType::Minus, _))
+            Some(&Token(_, TokenType::Plus, _)) | Some(&Token(_, TokenType::Minus, _))
         ) {
             let op = self.next().unwrap();
             let right = self.parse_factor()?;
-            expr = Expr::BinOp(
-                Box::new(expr),
-                op.1,
-                Box::new(right),
-            )
+            expr = Expr::BinOp(Box::new(expr), op.1, Box::new(right))
         }
 
         Ok(expr)
@@ -148,27 +168,24 @@ where
         // TODO: include src spans
         while matches!(
             self.peek(),
-            Some(&Token(_, TokenType::Mult, _))
-                | Some(&Token(_, TokenType::Div, _))
+            Some(&Token(_, TokenType::Mult, _)) | Some(&Token(_, TokenType::Div, _))
         ) {
             let op = self.next().unwrap();
             let right = self.parse_unary()?;
-            expr = Expr::BinOp(
-                Box::new(expr),
-                op.1,
-                Box::new(right),
-            )
+            expr = Expr::BinOp(Box::new(expr), op.1, Box::new(right))
         }
 
         Ok(expr)
     }
 
     fn parse_unary(&mut self) -> ParseResult<Expr> {
-        if matches!(self.peek(), Some(&Token(_, TokenType::Bang, _))
-        | Some(&Token(_, TokenType::Minus, _))) {
+        if matches!(
+            self.peek(),
+            Some(&Token(_, TokenType::Bang, _)) | Some(&Token(_, TokenType::Minus, _))
+        ) {
             let op = self.next().unwrap();
             let right = self.parse_unary()?;
-            return Ok(Expr::Unary(op.1, Box::new(right)))
+            return Ok(Expr::Unary(op.1, Box::new(right)));
         }
 
         self.parse_primary()
@@ -177,16 +194,28 @@ where
     fn parse_primary(&mut self) -> ParseResult<Expr> {
         if let Some(next_tok) = self.next() {
             match next_tok {
-                Token(_, TokenType::Literal(token::Literal::True), _) => Ok(Expr::Literal(Literal::Bool(true))),
-                Token(_, TokenType::Literal(token::Literal::False), _) => Ok(Expr::Literal(Literal::Bool(false))),
-                Token(_, TokenType::Literal(token::Literal::Int(i)), _) => Ok(Expr::Literal(Literal::Int(i))),
-                Token(_, TokenType::Literal(token::Literal::String(s)), _) => Ok(Expr::Literal(Literal::String(s))),
+                Token(_, TokenType::Literal(token::Literal::True), _) => {
+                    Ok(Expr::Literal(Literal::Bool(true)))
+                }
+                Token(_, TokenType::Literal(token::Literal::False), _) => {
+                    Ok(Expr::Literal(Literal::Bool(false)))
+                }
+                Token(_, TokenType::Literal(token::Literal::Int(i)), _) => {
+                    Ok(Expr::Literal(Literal::Int(i)))
+                }
+                Token(_, TokenType::Literal(token::Literal::String(s)), _) => {
+                    Ok(Expr::Literal(Literal::String(s)))
+                }
+                Token(_, TokenType::Ident(v), _) => Ok(Expr::Var(v)),
                 Token(_, TokenType::LeftParen, _) => {
                     let expr = self.parse_expr()?;
-                    self.consume(TokenType::RightParen, "Expected ')' after expression.".to_string())?;
+                    self.consume(
+                        TokenType::RightParen,
+                        "Expected ')' after expression.".to_string(),
+                    )?;
                     Ok(Expr::Grouping(Box::new(expr)))
                 }
-                tok => Err(self.error(Some(tok), "unimplemented primary token".to_string()))
+                tok => Err(self.error(Some(tok), "unimplemented primary token".to_string())),
             }
         } else {
             Err(self.error(self.prev_token.clone(), "??? what".to_string()))
@@ -196,7 +225,7 @@ where
     fn consume(&mut self, t: TokenType, msg: String) -> ParseResult<()> {
         if self.check(t) {
             self.next();
-            return Ok(())
+            return Ok(());
         }
         let tok = self.peek().unwrap().clone();
         Err(self.error(Some(tok), msg))
@@ -224,13 +253,21 @@ where
         match tok {
             Some(Token(start, TokenType::Eof, end)) => {
                 eprintln!("[{} at end]: {}", start.line, msg);
-                ParseError::InvalidToken { line: start.line, col: start.col, message: msg }
-            },
-            Some(Token(start, tok, end)) => { 
-                eprintln!("[{}:{} at '{:?}']: {}", start.line, start.col, tok, msg);
-                ParseError::InvalidToken { line: start.line, col: start.col, message: msg }
+                ParseError::InvalidToken {
+                    line: start.line,
+                    col: start.col,
+                    message: msg,
+                }
             }
-            None => { 
+            Some(Token(start, tok, end)) => {
+                eprintln!("[{}:{} at '{:?}']: {}", start.line, start.col, tok, msg);
+                ParseError::InvalidToken {
+                    line: start.line,
+                    col: start.col,
+                    message: msg,
+                }
+            }
+            None => {
                 eprintln!("[error]: {}", msg);
                 ParseError::Unknown
             }

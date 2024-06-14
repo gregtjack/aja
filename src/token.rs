@@ -27,9 +27,9 @@ pub enum TokenType {
     // Operators
     Minus,
     Plus,
-    Mult, 
+    Mult,
     Div,
-    Equal, 
+    Equal,
     EqualEqual,
     Bang,
     BangEqual,
@@ -47,12 +47,13 @@ pub enum Literal {
     Int(i32),
     String(EcoString),
     True,
-    False
+    False,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Keyword {
     Let,
+    In,
     Var,
     Fn,
     If,

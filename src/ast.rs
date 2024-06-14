@@ -1,6 +1,6 @@
 use ecow::EcoString;
 
-use crate::lexer::token::TokenType;
+use crate::token::TokenType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Location {
@@ -18,12 +18,12 @@ impl Location {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Span(Location, Location);
 
-type Id = EcoString;
+pub type Id = EcoString;
+pub type Op = TokenType;
 
 #[derive(Debug)]
 pub struct Prog {
     pub ds: Vec<Defn>,
-    pub e: Expr,
 }
 
 #[derive(Debug)]
@@ -36,10 +36,12 @@ pub struct Defn {
 #[derive(Debug)]
 pub enum Expr {
     Literal(Literal),
-    BinOp(Box<Expr>, TokenType, Box<Expr>),
-    Unary(TokenType, Box<Expr>),
+    BinOp(Box<Expr>, Op, Box<Expr>),
+    Unary(Op, Box<Expr>),
     Grouping(Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
+    Let(Id, Box<Expr>, Box<Expr>),
+    Var(Id),
 }
 
 #[derive(Debug)]

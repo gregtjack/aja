@@ -1,6 +1,7 @@
-if ((16 * 4) > (256 * 8 / 16)) {
-  ((16 * 4) > (256 * 8 / 16)) 
-} else {
-  // this is a comment
-  (256 * 8) / 16 
+let bruh = true in {
+    if bruh {
+        "building..."
+    } else {
+        "stopping"
+    }
 }

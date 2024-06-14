@@ -1,12 +1,9 @@
+use crate::token::{Keyword, Literal, Token, TokenType};
 use core::panic;
-use std::{error::Error, fmt, fs::File, iter::Peekable};
 use ecow::EcoString;
-use token::{Literal, Token, TokenType};
+use std::{error::Error, fmt, fs::File, iter::Peekable};
 
 use crate::ast::Location;
-
-use self::token::Keyword;
-pub mod token;
 
 #[derive(Debug)]
 pub struct LexicalError {
@@ -27,8 +24,8 @@ impl LexicalError {
     }
 }
 
-impl fmt::Display for LexicalError { 
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { 
+impl fmt::Display for LexicalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[line {}:{}]: {}", self.line, self.col, self.message)
     }
 }
@@ -36,10 +33,10 @@ impl fmt::Display for LexicalError {
 type LexResult<T> = Result<T, LexicalError>;
 
 pub struct Lexer<T>
-where 
-    T: Iterator<Item = char> 
+where
+    T: Iterator<Item = char>,
 {
-    inner: Peekable<T>, 
+    inner: Peekable<T>,
     position: u32,
     line: u32,
     col: u32,
@@ -48,13 +45,13 @@ where
 
 impl<T> Lexer<T>
 where
-    T: Iterator<Item = char>
+    T: Iterator<Item = char>,
 {
     pub fn new(input: T) -> Self {
-        Lexer { 
+        Lexer {
             inner: input.peekable(),
             position: 0,
-            line: 1, 
+            line: 1,
             col: 1,
             eof: false,
         }
@@ -67,79 +64,63 @@ where
         // main loop
         while let Some(c) = self.inner_next() {
             match c {
-                '(' => {
-                    return Ok(Token(start, TokenType::LeftParen, self.pos()))
-                },
-                ')' => {
-                    return Ok(Token(start, TokenType::RightParen, self.pos()))
-                }
-                '{' => {
-                    return Ok(Token(start, TokenType::LeftBrace, self.pos()))
-                }
-                '}' => { 
-                    return Ok(Token(start, TokenType::RightBrace, self.pos()))
-                }
-                ',' => {
-                    return Ok(Token(start, TokenType::Comma, self.pos()))
-                }
-                '.' => {
-                    return Ok(Token( start, TokenType::Dot, self.pos()))
-                }
-                ':' => {
-                    return Ok(Token(start, TokenType::Colon, self.pos()))
-                }
-                ';' => {
-                    return Ok(Token(start, TokenType::Semicolon, self.pos()))
-                }
-                '"' => { 
+                '(' => return Ok(Token(start, TokenType::LeftParen, self.pos())),
+                ')' => return Ok(Token(start, TokenType::RightParen, self.pos())),
+                '{' => return Ok(Token(start, TokenType::LeftBrace, self.pos())),
+                '}' => return Ok(Token(start, TokenType::RightBrace, self.pos())),
+                ',' => return Ok(Token(start, TokenType::Comma, self.pos())),
+                '.' => return Ok(Token(start, TokenType::Dot, self.pos())),
+                ':' => return Ok(Token(start, TokenType::Colon, self.pos())),
+                ';' => return Ok(Token(start, TokenType::Semicolon, self.pos())),
+                '"' => {
                     let tok = self.tok_str(start)?;
-                    return Ok(tok)
+                    return Ok(tok);
                 }
-                '+' => {
-                    return Ok(Token(start, TokenType::Plus, self.pos()))
-                }
+                '+' => return Ok(Token(start, TokenType::Plus, self.pos())),
                 '-' => {
                     if self.match_number() {
                         let c = self.inner_next().expect("should be number");
                         let num = self.tok_number(c, start, true);
-                        return Ok(num)
+                        return Ok(num);
                     } else if self.match_advance('>') {
-                        return Ok(Token(start, TokenType::RightArrow, self.pos()))
+                        return Ok(Token(start, TokenType::RightArrow, self.pos()));
                     } else {
-                        return Ok(Token(start, TokenType::Minus, self.pos()))
+                        return Ok(Token(start, TokenType::Minus, self.pos()));
                     }
                 }
-                '*' => {
-                    return Ok(Token(start, TokenType::Mult, self.pos()))
-                }
+                '*' => return Ok(Token(start, TokenType::Mult, self.pos())),
                 '!' | '=' | '>' | '<' => {
                     let op = self.tok_op(c, start)?;
-                    return Ok(op)
+                    return Ok(op);
                 }
                 '/' => {
                     if self.match_advance('/') {
                         self.tok_comment();
                     } else {
-                        return Ok(Token( start, TokenType::Div, self.pos()))
+                        return Ok(Token(start, TokenType::Div, self.pos()));
                     }
                 }
                 '0'..='9' => {
                     let num = self.tok_number(c, start, false);
-                    return Ok(num)
+                    return Ok(num);
                 }
                 'a'..='z' | 'A'..='Z' => {
                     let res = self.tok_keyword_or_ident(c, start);
-                    return Ok(res)
+                    return Ok(res);
                 }
                 // ignore whitespace
-                ' ' | '\t' | '\r' => {},
-                '\n' => {
-                    self.advance_line()
+                ' ' | '\t' | '\r' => {}
+                '\n' => self.advance_line(),
+                _ => {
+                    return Err(LexicalError::new(
+                        self.pos().line,
+                        self.pos().col - 1,
+                        format!("Unrecognized char: '{}'", c),
+                    ))
                 }
-                _ => return Err(LexicalError::new(self.pos().line, self.pos().col - 1, format!("Unrecognized char: '{}'", c))),
             }
         }
-        
+
         self.eof = true;
         Ok(Token(start, TokenType::Eof, self.pos()))
     }
@@ -163,11 +144,13 @@ where
     fn match_advance(&mut self, expect: char) -> bool {
         match self.inner_peek() {
             None => false,
-            Some(&c) => if c == expect {
-                self.inner_next();
-                true
-            } else {
-                false
+            Some(&c) => {
+                if c == expect {
+                    self.inner_next();
+                    true
+                } else {
+                    false
+                }
             }
         }
     }
@@ -176,57 +159,75 @@ where
     fn match_number(&mut self) -> bool {
         match self.inner_peek() {
             None => false,
-            Some(&c) => c.is_ascii_digit(), 
+            Some(&c) => c.is_ascii_digit(),
         }
     }
-    
+
     fn pos(&self) -> Location {
-        Location { line: self.line, col: self.col, pos: self.position }
+        Location {
+            line: self.line,
+            col: self.col,
+            pos: self.position,
+        }
     }
 
-    fn tok_comment(&mut self) { 
+    fn tok_comment(&mut self) {
         while let Some(c) = self.inner_next() {
             if c == '\n' {
                 return;
             }
         }
     }
-    
+
     fn tok_op(&mut self, c: char, start: Location) -> LexResult<Token> {
         match c {
-            '!' => if self.match_advance('=') {
-                Ok(Token(start, TokenType::BangEqual, self.pos()))
-            } else {
-                Ok(Token(start, TokenType::Bang, self.pos()))
+            '!' => {
+                if self.match_advance('=') {
+                    Ok(Token(start, TokenType::BangEqual, self.pos()))
+                } else {
+                    Ok(Token(start, TokenType::Bang, self.pos()))
+                }
             }
-            '=' => if self.match_advance('=') {
-                Ok(Token(start, TokenType::EqualEqual, self.pos()))
-            } else {
-                Ok(Token(start, TokenType::Equal, self.pos()))
+            '=' => {
+                if self.match_advance('=') {
+                    Ok(Token(start, TokenType::EqualEqual, self.pos()))
+                } else {
+                    Ok(Token(start, TokenType::Equal, self.pos()))
+                }
             }
-            '>' => if self.match_advance('=') {
-                Ok(Token(start, TokenType::GreaterEqual, self.pos()))
-            } else {
-                Ok(Token(start, TokenType::GreaterThan, self.pos()))
+            '>' => {
+                if self.match_advance('=') {
+                    Ok(Token(start, TokenType::GreaterEqual, self.pos()))
+                } else {
+                    Ok(Token(start, TokenType::GreaterThan, self.pos()))
+                }
             }
-            '<' => if self.match_advance('=') {
-                Ok(Token(start, TokenType::LessEqual, self.pos()))
-            } else if self.match_advance('-') {
-                Ok(Token(start, TokenType::LeftArrow, self.pos()))
-            } else {
-                Ok(Token(start, TokenType::LessThan, self.pos()))
+            '<' => {
+                if self.match_advance('=') {
+                    Ok(Token(start, TokenType::LessEqual, self.pos()))
+                } else if self.match_advance('-') {
+                    Ok(Token(start, TokenType::LeftArrow, self.pos()))
+                } else {
+                    Ok(Token(start, TokenType::LessThan, self.pos()))
+                }
             }
-            _ => Err(LexicalError::new(self.line, self.col, "Invalid delimiter".to_string()).into())
+            _ => {
+                Err(LexicalError::new(self.line, self.col, "Invalid delimiter".to_string()).into())
+            }
         }
     }
-    
+
     fn tok_str(&mut self, start: Location) -> LexResult<Token> {
         let mut literal = EcoString::new();
         while let Some(&c) = self.inner_peek() {
             match c {
                 '"' => {
                     self.inner_next();
-                    return Ok(Token(start, TokenType::Literal(Literal::String(literal)), self.pos()));
+                    return Ok(Token(
+                        start,
+                        TokenType::Literal(Literal::String(literal)),
+                        self.pos(),
+                    ));
                 }
                 '\n' => {
                     self.inner_next();
@@ -239,17 +240,24 @@ where
                 }
             };
         }
-    
-        Err(LexicalError::new(self.line, self.col, "Unterminated string".to_string()))
+
+        Err(LexicalError::new(
+            self.line,
+            self.col,
+            "Unterminated string".to_string(),
+        ))
     }
-    
+
     fn tok_number(&mut self, c: char, start: Location, negative: bool) -> Token {
-        let mut number = c.to_string().parse::<i32>().expect("The caller should have passed a digit");
+        let mut number = c
+            .to_string()
+            .parse::<i32>()
+            .expect("The caller should have passed a digit");
         while let Some(Ok(digit)) = self.inner_peek().map(|c| c.to_string().parse::<i32>()) {
             number = number * 10 + digit;
             self.inner_next();
         }
-    
+
         if negative {
             Token(start, TokenType::Literal(Literal::Int(-number)), self.pos())
         } else {
@@ -269,15 +277,16 @@ where
                 _ => break,
             }
         }
-        
+
         let keyword = match raw.as_str() {
-            "let" => Some(TokenType::Keyword(token::Keyword::Let)),
-            "var" => Some(TokenType::Keyword(token::Keyword::Var)),
-            "fn" => Some(TokenType::Keyword(token::Keyword::Fn)),
-            "if" => Some(TokenType::Keyword(token::Keyword::If)),
-            "else" => Some(TokenType::Keyword(token::Keyword::Else)),
-            "match" => Some(TokenType::Keyword(token::Keyword::Match)),
-            "return" => Some(TokenType::Keyword(token::Keyword::Return)),
+            "let" => Some(TokenType::Keyword(Keyword::Let)),
+            "in" => Some(TokenType::Keyword(Keyword::In)),
+            "var" => Some(TokenType::Keyword(Keyword::Var)),
+            "fn" => Some(TokenType::Keyword(Keyword::Fn)),
+            "if" => Some(TokenType::Keyword(Keyword::If)),
+            "else" => Some(TokenType::Keyword(Keyword::Else)),
+            "match" => Some(TokenType::Keyword(Keyword::Match)),
+            "return" => Some(TokenType::Keyword(Keyword::Return)),
             // boolean literal
             "true" => Some(TokenType::Literal(Literal::True)),
             "false" => Some(TokenType::Literal(Literal::False)),
