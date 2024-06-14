@@ -1,7 +1,7 @@
-use std::{error::Error, fmt, iter::Peekable};
+use std::{fmt, iter::Peekable};
 
 use crate::{
-    ast::{self, Expr, Literal, Prog},
+    ast::{Defn, Expr, Id, Literal, Program},
     token::{self, Keyword, Token, TokenType},
 };
 
@@ -48,38 +48,88 @@ where
         }
     }
 
-    pub fn parse(&mut self) -> ParseResult<Expr> {
-        self.parse_expr()
+    pub fn parse(&mut self) -> ParseResult<Program> {
+        let d = self.parse_defn()?;
+        Ok(Program {
+            ds: vec![d]
+        })
+    }
+
+    fn parse_defn(&mut self) -> ParseResult<Defn> {
+        match self.next() {
+            Some(Token(_, TokenType::Keyword(Keyword::Fn), _)) => self.parse_fn(),
+            tok => Err(self.error(tok, "unsupported defn".to_string()))
+        }
+    }
+
+    fn parse_fn(&mut self) -> ParseResult<Defn> {
+        let ident = self.parse_var()?;
+        match ident {
+            Expr::Var(id) => {
+                // parse arguments
+                let es = self.parse_expr_seq(TokenType::LeftParen, TokenType::Comma, TokenType::RightParen)?;
+                let mut xs: Vec<Id> = vec![];
+
+                for e in es {
+                    match e {
+                        Expr::Var(id) => xs.push(id),
+                        _ => return Err(self.error(self.prev_token.clone(), "invalid function argument".to_string())),
+                    }
+                }
+
+                let e = self.parse_block()?;
+
+                Ok(Defn {
+                    f: id,
+                    xs,
+                    e,
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn parse_expr_seq(&mut self, open: TokenType, sep: TokenType, close: TokenType) -> ParseResult<Vec<Expr>> {
+        let mut xs = Vec::new();
+        self.consume(open.clone(), format!("expected '{:?}'", open).to_string())?;
+        if !self.check(TokenType::RightParen) {
+            loop {
+                let e = self.parse_expr()?;
+                xs.push(e);
+                match self.peek() {
+                    Some(Token(_, tt, _)) if *tt == sep => { self.next(); },
+                    _ => self.consume(sep.clone(), format!("expected '{:?}'", open).to_string())?,
+                }
+            }
+        }
+        self.consume(close.clone(), format!("expected '{:?}'", open).to_string())?;
+        Ok(xs)
     }
 
     fn parse_expr(&mut self) -> ParseResult<Expr> {
         // TODO: include src spans
         match self.peek() {
+            Some(Token(_, TokenType::Eof, _)) => Ok(Expr::Eof),
             Some(Token(_, TokenType::Keyword(Keyword::If), _)) => self.parse_if(),
             Some(Token(_, TokenType::Keyword(Keyword::Let), _)) => self.parse_let(),
+            Some(Token(_, TokenType::Ident(var), _)) => self.parse_var(),
             // all other exprs
             Some(_) => self.parse_equality(),
-            None => Err(self.error(self.prev_token.clone(), "idk".to_string())),
+            None => Err(self.error(self.prev_token.clone(), "No tokens provided.".to_string())),
         }
     }
 
     fn parse_if(&mut self) -> ParseResult<Expr> {
         self.consume(TokenType::Keyword(Keyword::If), "Expected 'if'".to_string())?;
         let e1 = self.parse_expr()?;
-        self.consume(TokenType::LeftBrace, "Expected '{'".to_string())?;
-        let e2 = self.parse_expr()?;
-        self.consume(TokenType::RightBrace, "expected '}'".to_string())?;
-
+        let e2 = self.parse_block()?; 
         // TODO: make else optional
         self.consume(
             TokenType::Keyword(Keyword::Else),
             "Expected 'else'".to_string(),
         )?;
 
-        self.consume(TokenType::LeftBrace, "Expected '{'".to_string())?;
-        let e3 = self.parse_expr()?;
-        self.consume(TokenType::RightBrace, "expected '}'".to_string())?;
-
+        let e3 = self.parse_block()?; 
         Ok(Expr::If(Box::new(e1), Box::new(e2), Box::new(e3)))
     }
 
@@ -88,9 +138,9 @@ where
             TokenType::Keyword(Keyword::Let),
             "Expected 'if'".to_string(),
         )?;
-        let e1 = self.parse_primary()?;
+        let ident = self.parse_primary()?;
 
-        match e1 {
+        match ident {
             Expr::Var(id) => {
                 self.consume(TokenType::Equal, "Expected '='".to_string())?;
                 let e2 = self.parse_expr()?;
@@ -110,6 +160,17 @@ where
                 "variable declaration must be an identifier".to_string(),
             )),
         }
+    }
+
+    // For now, blocks are just expressions wrapped in braces
+    fn parse_block(&mut self) -> ParseResult<Expr> {
+        let mut e = Expr::Empty;
+        self.consume(TokenType::LeftBrace, "Expected '{'".to_string())?;
+        if self.check(TokenType::RightBrace) {
+            e = self.parse_expr()?;
+        }
+        self.consume(TokenType::RightBrace, "expected '}'".to_string())?;
+        Ok(e)
     }
 
     fn parse_equality(&mut self) -> ParseResult<Expr> {
@@ -206,7 +267,6 @@ where
                 Token(_, TokenType::Literal(token::Literal::String(s)), _) => {
                     Ok(Expr::Literal(Literal::String(s)))
                 }
-                Token(_, TokenType::Ident(v), _) => Ok(Expr::Var(v)),
                 Token(_, TokenType::LeftParen, _) => {
                     let expr = self.parse_expr()?;
                     self.consume(
@@ -219,6 +279,13 @@ where
             }
         } else {
             Err(self.error(self.prev_token.clone(), "??? what".to_string()))
+        }
+    }
+
+    fn parse_var(&mut self) -> ParseResult<Expr> {
+        match self.next() {
+            Some(Token(_, TokenType::Ident(v), _)) => Ok(Expr::Var(v)),
+            tok => Err(self.error(tok, "expected identifier".to_string())),
         }
     }
 

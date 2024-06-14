@@ -3,7 +3,7 @@ use std::{any, clone};
 use anyhow::anyhow;
 
 use crate::{
-    ast::{Expr, Id, Literal, Op},
+    ast::{Expr, Id, Literal, Op, Program},
     token::TokenType,
 };
 
@@ -21,8 +21,13 @@ pub struct Binding(Id, Value);
 type InterpResult<T> = Result<T, anyhow::Error>;
 type REnv = Vec<Binding>;
 
-pub fn interp(expr: Expr) -> InterpResult<Value> {
-    interp_expr(expr, vec![])
+pub fn interp(prog: Program) -> InterpResult<Value> {
+    // for def in prog.ds {
+    //     if def.f == "main" {
+
+    //     }
+    // }
+    todo!()
 }
 
 fn interp_expr(expr: Expr, env: REnv) -> InterpResult<Value> {

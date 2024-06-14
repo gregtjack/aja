@@ -270,7 +270,7 @@ where
         raw.push(c);
         while let Some(&c) = self.inner_peek() {
             match c {
-                'a'..='z' | 'A'..='Z' => {
+                'a'..='z' | 'A'..='Z' | '0'..='9' => {
                     self.inner_next();
                     raw.push(c);
                 }

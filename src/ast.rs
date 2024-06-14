@@ -22,19 +22,21 @@ pub type Id = EcoString;
 pub type Op = TokenType;
 
 #[derive(Debug)]
-pub struct Prog {
+pub struct Program {
     pub ds: Vec<Defn>,
 }
 
 #[derive(Debug)]
 pub struct Defn {
-    f: Id,
-    xs: Vec<Id>,
-    e: Expr,
+    pub f: Id,
+    pub xs: Vec<Id>,
+    pub e: Expr,
 }
 
 #[derive(Debug)]
 pub enum Expr {
+    Eof,
+    Empty,
     Literal(Literal),
     BinOp(Box<Expr>, Op, Box<Expr>),
     Unary(Op, Box<Expr>),
