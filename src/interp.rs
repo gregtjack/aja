@@ -22,12 +22,13 @@ type InterpResult<T> = Result<T, anyhow::Error>;
 type REnv = Vec<Binding>;
 
 pub fn interp(prog: Program) -> InterpResult<Value> {
-    // for def in prog.ds {
-    //     if def.f == "main" {
-
-    //     }
-    // }
-    todo!()
+    for def in prog.ds {
+        if def.f == "main" {
+            return interp_expr(def.e, vec![])
+        }
+    }
+    
+    Err(anyhow!("No entrypoint to program. Write a main() function."))
 }
 
 fn interp_expr(expr: Expr, env: REnv) -> InterpResult<Value> {
@@ -39,6 +40,7 @@ fn interp_expr(expr: Expr, env: REnv) -> InterpResult<Value> {
         Expr::If(e1, e2, e3) => interp_if(*e1, *e2, *e3, env),
         Expr::Let(id, e1, e2) => interp_let(id, *e1, *e2, env),
         Expr::Var(id) => lookup(env, id),
+        Expr::Empty => Ok(Value::Void),
         _ => Err(anyhow!("Unknown expression")),
     }
 }

@@ -1,7 +1,7 @@
-let n1 = 1 in {
-  let n2 = 2 in {
-    let n3 = 3 in {
-       n1 + n2 + n3
-    }
-  }
+fn main() {
+  
+}
+
+fn add() {
+  1 + 2
 }

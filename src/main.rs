@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     // println!("{:#?}", lexer.collect::<Vec<Token>>());
     let mut parser = Parser::new(lexer);
     let ast = parser.parse()?;
-
+    println!("{:#?}", ast);
     let res = interp(ast)?;
     println!("{:?}", res);
 

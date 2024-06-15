@@ -49,47 +49,66 @@ where
     }
 
     pub fn parse(&mut self) -> ParseResult<Program> {
-        let d = self.parse_defn()?;
-        Ok(Program {
-            ds: vec![d]
-        })
+        let mut ds = Vec::new();
+        while matches!(
+            self.peek(),
+            Some(Token(_, TokenType::Keyword(Keyword::Fn), _))
+        ) {
+            let d = self.parse_defn()?;
+            ds.push(d);
+        }
+        Ok(Program { ds })
     }
 
     fn parse_defn(&mut self) -> ParseResult<Defn> {
         match self.next() {
             Some(Token(_, TokenType::Keyword(Keyword::Fn), _)) => self.parse_fn(),
-            tok => Err(self.error(tok, "unsupported defn".to_string()))
+            tok => Err(self.error(tok, "unsupported defn".to_string())),
         }
     }
 
     fn parse_fn(&mut self) -> ParseResult<Defn> {
-        let ident = self.parse_var()?;
-        match ident {
-            Expr::Var(id) => {
-                // parse arguments
-                let es = self.parse_expr_seq(TokenType::LeftParen, TokenType::Comma, TokenType::RightParen)?;
-                let mut xs: Vec<Id> = vec![];
-
-                for e in es {
-                    match e {
-                        Expr::Var(id) => xs.push(id),
-                        _ => return Err(self.error(self.prev_token.clone(), "invalid function argument".to_string())),
-                    }
-                }
-
-                let e = self.parse_block()?;
-
-                Ok(Defn {
-                    f: id,
-                    xs,
-                    e,
-                })
-            }
-            _ => unreachable!(),
+        if !matches!(self.peek(), Some(Token(_, TokenType::Ident(_), _))) {
+            let tok = self.peek().cloned();
+            return Err(self.error(tok, "Expected identifier".to_string()));
         }
+
+        let ident = match self.next() {
+            Some(Token(_, TokenType::Ident(i), _)) => i,
+            _ => unreachable!(),
+        };
+
+        // parse arguments
+        let es = self.parse_expr_seq(
+            TokenType::LeftParen,
+            TokenType::Comma,
+            TokenType::RightParen,
+        )?;
+        let mut xs: Vec<Id> = vec![];
+
+        for e in es {
+            match e {
+                Expr::Var(id) => xs.push(id),
+                _ => {
+                    return Err(self.error(
+                        self.prev_token.clone(),
+                        "invalid function parameter".to_string(),
+                    ))
+                }
+            }
+        }
+
+        let e = self.parse_block()?;
+
+        Ok(Defn { f: ident, xs, e })
     }
 
-    fn parse_expr_seq(&mut self, open: TokenType, sep: TokenType, close: TokenType) -> ParseResult<Vec<Expr>> {
+    fn parse_expr_seq(
+        &mut self,
+        open: TokenType,
+        sep: TokenType,
+        close: TokenType,
+    ) -> ParseResult<Vec<Expr>> {
         let mut xs = Vec::new();
         self.consume(open.clone(), format!("expected '{:?}'", open).to_string())?;
         if !self.check(TokenType::RightParen) {
@@ -97,8 +116,10 @@ where
                 let e = self.parse_expr()?;
                 xs.push(e);
                 match self.peek() {
-                    Some(Token(_, tt, _)) if *tt == sep => { self.next(); },
-                    _ => self.consume(sep.clone(), format!("expected '{:?}'", open).to_string())?,
+                    Some(Token(_, tt, _)) if *tt == sep => {
+                        self.next();
+                    }
+                    _ => break,
                 }
             }
         }
@@ -112,7 +133,7 @@ where
             Some(Token(_, TokenType::Eof, _)) => Ok(Expr::Eof),
             Some(Token(_, TokenType::Keyword(Keyword::If), _)) => self.parse_if(),
             Some(Token(_, TokenType::Keyword(Keyword::Let), _)) => self.parse_let(),
-            Some(Token(_, TokenType::Ident(var), _)) => self.parse_var(),
+
             // all other exprs
             Some(_) => self.parse_equality(),
             None => Err(self.error(self.prev_token.clone(), "No tokens provided.".to_string())),
@@ -122,23 +143,23 @@ where
     fn parse_if(&mut self) -> ParseResult<Expr> {
         self.consume(TokenType::Keyword(Keyword::If), "Expected 'if'".to_string())?;
         let e1 = self.parse_expr()?;
-        let e2 = self.parse_block()?; 
+        let e2 = self.parse_block()?;
         // TODO: make else optional
         self.consume(
             TokenType::Keyword(Keyword::Else),
             "Expected 'else'".to_string(),
         )?;
 
-        let e3 = self.parse_block()?; 
+        let e3 = self.parse_block()?;
         Ok(Expr::If(Box::new(e1), Box::new(e2), Box::new(e3)))
     }
 
     fn parse_let(&mut self) -> ParseResult<Expr> {
         self.consume(
             TokenType::Keyword(Keyword::Let),
-            "Expected 'if'".to_string(),
+            "Expected 'let'".to_string(),
         )?;
-        let ident = self.parse_primary()?;
+        let ident = self.parse_var_or_call()?;
 
         match ident {
             Expr::Var(id) => {
@@ -149,9 +170,7 @@ where
                     "expected keyword in".to_string(),
                 )?;
 
-                self.consume(TokenType::LeftBrace, "Expected '{'".to_string())?;
-                let e3 = self.parse_expr()?;
-                self.consume(TokenType::RightBrace, "expected '}'".to_string())?;
+                let e3 = self.parse_block()?;
 
                 Ok(Expr::Let(id, Box::new(e2), Box::new(e3)))
             }
@@ -165,11 +184,14 @@ where
     // For now, blocks are just expressions wrapped in braces
     fn parse_block(&mut self) -> ParseResult<Expr> {
         let mut e = Expr::Empty;
-        self.consume(TokenType::LeftBrace, "Expected '{'".to_string())?;
-        if self.check(TokenType::RightBrace) {
+        self.consume(TokenType::LeftBrace, "expected '{'".to_string())?;
+        if !self.check(TokenType::RightBrace) {
             e = self.parse_expr()?;
         }
-        self.consume(TokenType::RightBrace, "expected '}'".to_string())?;
+        self.consume(
+            TokenType::RightBrace,
+            "parse block: expected '}'".to_string(),
+        )?;
         Ok(e)
     }
 
@@ -249,6 +271,31 @@ where
             return Ok(Expr::Unary(op.1, Box::new(right)));
         }
 
+        self.parse_var_or_call()
+    }
+
+    fn parse_var_or_call(&mut self) -> ParseResult<Expr> {
+        if matches!(
+            self.peek(),
+            Some(&Token(_, TokenType::Ident(_), _)) 
+        ) {
+            let tok = self.next().unwrap();
+            if let Token(_, TokenType::Ident(id), _) = tok {
+                if self.check(TokenType::LeftParen) {
+                    let es = self.parse_expr_seq(
+                        TokenType::LeftParen,
+                        TokenType::Comma,
+                        TokenType::RightParen,
+                    )?;
+                    return Ok(Expr::Call(id.clone(), es))
+                } else {
+                    return Ok(Expr::Var(id.clone()))
+                }
+            } else {
+                unreachable!()
+            }
+        }
+
         self.parse_primary()
     }
 
@@ -275,19 +322,16 @@ where
                     )?;
                     Ok(Expr::Grouping(Box::new(expr)))
                 }
-                tok => Err(self.error(Some(tok), "unimplemented primary token".to_string())),
+                tok => {
+                    Err(self.error(Some(tok.clone()), "unimplemented primary token".to_string()))
+                }
             }
         } else {
             Err(self.error(self.prev_token.clone(), "??? what".to_string()))
         }
     }
 
-    fn parse_var(&mut self) -> ParseResult<Expr> {
-        match self.next() {
-            Some(Token(_, TokenType::Ident(v), _)) => Ok(Expr::Var(v)),
-            tok => Err(self.error(tok, "expected identifier".to_string())),
-        }
-    }
+  
 
     fn consume(&mut self, t: TokenType, msg: String) -> ParseResult<()> {
         if self.check(t) {
@@ -309,7 +353,9 @@ where
     fn next(&mut self) -> Option<Token> {
         self.position += 1;
         self.prev_token = self.peek().map(|t| t.clone());
-        self.tokens.next()
+        let t = self.tokens.next();
+        println!("{:?}", t);
+        t
     }
 
     fn is_eof(&mut self) -> bool {

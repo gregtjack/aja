@@ -44,6 +44,7 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(Id, Box<Expr>, Box<Expr>),
     Var(Id),
+    Call(Id, Vec<Expr>),
 }
 
 #[derive(Debug)]
