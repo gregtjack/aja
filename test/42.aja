@@ -1,7 +1,7 @@
 fn main() {
-  
+  print_add(2883, 329049)
 }
 
-fn add() {
-  1 + 2
+fn print_add(x, y) {
+  println(x, "+", y, "=", x + y)
 }

@@ -1,3 +1,9 @@
-fn main() {
-  print("hello world");
+fn main(): str {
+
+  let name = "greg";
+
+}
+
+fn hello_name(name) {
+  println("hello", name)
 }

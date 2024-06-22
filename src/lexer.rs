@@ -61,16 +61,23 @@ where
     pub fn token(&mut self) -> LexResult<Token> {
         // represents the start of a token
         let start = self.pos();
-        // main loop
         while let Some(c) = self.inner_next() {
             match c {
                 '(' => return Ok(Token(start, TokenType::LeftParen, self.pos())),
                 ')' => return Ok(Token(start, TokenType::RightParen, self.pos())),
                 '{' => return Ok(Token(start, TokenType::LeftBrace, self.pos())),
                 '}' => return Ok(Token(start, TokenType::RightBrace, self.pos())),
+                '[' => return Ok(Token(start, TokenType::LeftBracket, self.pos())),
+                ']' => return Ok(Token(start, TokenType::RightBracket, self.pos())),
                 ',' => return Ok(Token(start, TokenType::Comma, self.pos())),
                 '.' => return Ok(Token(start, TokenType::Dot, self.pos())),
-                ':' => return Ok(Token(start, TokenType::Colon, self.pos())),
+                ':' => {
+                    if self.match_advance(':') {
+                        return Ok(Token(start, TokenType::DoubleColon, self.pos()))
+                    } else {
+                        return Ok(Token(start, TokenType::Colon, self.pos()))
+                    }
+                },
                 ';' => return Ok(Token(start, TokenType::Semicolon, self.pos())),
                 '"' => {
                     let tok = self.tok_str(start)?;
@@ -79,7 +86,7 @@ where
                 '+' => return Ok(Token(start, TokenType::Plus, self.pos())),
                 '-' => {
                     if self.match_number() {
-                        let c = self.inner_next().expect("should be number");
+                        let c = self.inner_next().unwrap();
                         let num = self.tok_number(c, start, true);
                         return Ok(num);
                     } else if self.match_advance('>') {
@@ -100,11 +107,12 @@ where
                         return Ok(Token(start, TokenType::Div, self.pos()));
                     }
                 }
+                '%' => return Ok(Token(start, TokenType::Modulo, self.pos())),
                 '0'..='9' => {
                     let num = self.tok_number(c, start, false);
                     return Ok(num);
                 }
-                'a'..='z' | 'A'..='Z' => {
+                '_' | 'a'..='z' | 'A'..='Z' => {
                     let res = self.tok_keyword_or_ident(c, start);
                     return Ok(res);
                 }
@@ -270,7 +278,7 @@ where
         raw.push(c);
         while let Some(&c) = self.inner_peek() {
             match c {
-                'a'..='z' | 'A'..='Z' | '0'..='9' => {
+                'a'..='z' | 'A'..='Z' | '_' | '-' | '0'..='9' => {
                     self.inner_next();
                     raw.push(c);
                 }
@@ -313,7 +321,7 @@ where
 
         match self.token() {
             Ok(t) => Some(t),
-            Err(e) => panic!("{}", e),
+            Err(e) => panic!("{e}"),
         }
     }
 }

@@ -22,6 +22,7 @@ pub enum TokenType {
     Dot,
     Semicolon,
     Colon,
+    DoubleColon,
     RightArrow,
     LeftArrow,
     // Operators
@@ -29,6 +30,7 @@ pub enum TokenType {
     Plus,
     Mult,
     Div,
+    Modulo,
     Equal,
     EqualEqual,
     Bang,
@@ -45,6 +47,7 @@ pub enum TokenType {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Literal {
     Int(i32),
+    Float(f32),
     String(EcoString),
     True,
     False,
