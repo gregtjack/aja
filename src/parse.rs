@@ -7,6 +7,29 @@ use crate::{
     token::{self, Keyword, Token, TokenType},
 };
 
+macro_rules! tok_matches {
+    ($self:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
+        $self.peek().is_some_and(|t|
+            match t.1 {
+                $pattern $(if $guard)? => true,
+                _ => false
+            }
+        )
+    };
+}
+
+macro_rules! consume {
+    ($self:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
+        if tok_matches!($self, $pattern $(if $guard)?) {
+            $self.next();
+            Ok(())
+        } else {
+            let tok = $self.peek().unwrap().clone();
+            Err($self.error(Some(tok), format!("expected {:?}", tok.1)))
+        }
+    };
+}
+
 #[derive(Debug)]
 pub enum ParseError {
     InvalidToken {
@@ -56,10 +79,7 @@ where
 
     pub fn parse(&mut self) -> ParseResult<Program> {
         let mut ds = Vec::new();
-        while matches!(
-            self.peek(),
-            Some(Token(_, TokenType::Keyword(Keyword::Fn), _))
-        ) {
+        while tok_matches!(self, TokenType::Keyword(Keyword::Fn)) {
             let d = self.parse_defn()?;
             ds.push(d);
         }
@@ -74,7 +94,7 @@ where
     }
 
     fn parse_fn_defn(&mut self) -> ParseResult<Definition> {
-        if !matches!(self.peek(), Some(Token(_, TokenType::Ident(_), _))) {
+        if !tok_matches!(self, TokenType::Ident(_)) {
             let tok = self.peek().cloned();
             return Err(self.error(tok, "Expected identifier".to_string()));
         }
@@ -113,29 +133,28 @@ where
         })
     }
 
-    
-
     fn parse_stmt(&mut self) -> ParseResult<Statement> {
         let Some(tok) = self.peek() else {
-            return Err(ParseError::Eof)
+            return Err(ParseError::Eof);
         };
 
-        match tok {
-            Token(_, TokenType::LeftBrace, _) => self.parse_block(),
-            _ => unimplemented!()
+        match tok.1 {
+            TokenType::LeftBrace => self.parse_block(),
+            _ => unimplemented!(),
         }
     }
 
     fn parse_expr(&mut self) -> ParseResult<Expression> {
-        // TODO: include src spans
-        match self.peek() {
-            Some(Token(_, TokenType::Eof, _)) => Ok(Expression::Eof),
-            Some(Token(_, TokenType::Keyword(Keyword::If), _)) => self.parse_if(),
-            // Some(Token(_, TokenType::Keyword(Keyword::Let), _)) => self.parse_let(),
+        let Some(tok) = self.peek() else {
+            return Err(ParseError::Eof);
+        };
 
+        // TODO: include src spans
+        match tok.1 {
+            TokenType::Keyword(Keyword::If) => self.parse_if(),
+            // Some(Token(_, TokenType::Keyword(Keyword::Let), _)) => self.parse_let(),
             // all other exprs
-            Some(_) => self.parse_equality(),
-            None => Err(self.error(self.prev_token.clone(), "End of token stream".to_string())),
+            _ => self.parse_equality(),
         }
     }
 
@@ -149,7 +168,7 @@ where
     ) -> ParseResult<Vec<Expression>> {
         let mut xs = Vec::new();
         self.consume(open.clone())?;
-        if !self.check(TokenType::RightParen) {
+        if !tok_matches!(self, TokenType::RightParen) {
             loop {
                 let e = self.parse_expr()?;
                 xs.push(e);
@@ -166,22 +185,17 @@ where
     }
 
     fn parse_if(&mut self) -> ParseResult<Expression> {
-        self.consume(TokenType::Keyword(Keyword::If))?;
+        consume!(self, TokenType::Keyword(Keyword::If))?;
         let e1 = self.parse_expr()?;
         let e2 = self.parse_block()?;
-        // TODO: make else optional
-        self.consume(
-            TokenType::Keyword(Keyword::Else)
-        )?;
-
+        self.consume(TokenType::Keyword(Keyword::Else))?;
         let e3 = self.parse_block()?;
         Ok(Expression::If(Box::new(e1), Box::new(e2), Box::new(e3)))
     }
 
     fn parse_let(&mut self) -> ParseResult<Statement> {
-        self.consume(
-            TokenType::Keyword(Keyword::Let)
-        )?;
+        self.consume(TokenType::Keyword(Keyword::Let))?;
+
         let ident = self.parse_var_or_call()?;
 
         match ident {
@@ -190,7 +204,7 @@ where
                 let e2 = self.parse_expr()?;
                 self.consume(TokenType::Semicolon)?;
 
-                Ok(Expression::Let(id, Box::new(e2)))
+                Ok(Statement::Let(id, Box::new(e2)))
             }
             _ => Err(self.error(
                 self.prev_token.clone(),
@@ -199,26 +213,21 @@ where
         }
     }
 
-    // For now, blocks are just expressions wrapped in braces
     fn parse_block(&mut self) -> ParseResult<Statement> {
         let mut stmts = Vec::new();
         self.consume(TokenType::LeftBrace)?;
-        if !self.check(TokenType::RightBrace) {
-            e = self.parse_expr()?;
+        if !tok_matches!(self, TokenType::RightBrace) {
+            let stmt = self.parse_stmt()?;
+            stmts.push(stmt);
         }
-        self.consume(
-            TokenType::RightBrace
-        )?;
-        Ok(e)
+        self.consume(TokenType::RightBrace)?;
+        Ok(Statement::Block(stmts))
     }
 
     fn parse_equality(&mut self) -> ParseResult<Expression> {
         let mut expr = self.parse_comparison()?;
 
-        while matches!(
-            self.peek(),
-            Some(&Token(_, TokenType::BangEqual, _)) | Some(&Token(_, TokenType::EqualEqual, _))
-        ) {
+        while self.matches(vec![TokenType::EqualEqual, TokenType::BangEqual]) {
             let op = self.next().unwrap();
             let right = self.parse_comparison()?;
             expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
@@ -231,12 +240,12 @@ where
         let mut expr = self.parse_term()?;
 
         // TODO: include src spans
-        while matches!(
-            self.peek(),
-            Some(&Token(_, TokenType::GreaterThan, _))
-                | Some(&Token(_, TokenType::GreaterEqual, _))
-                | Some(&Token(_, TokenType::LessThan, _))
-                | Some(&Token(_, TokenType::LessEqual, _))
+        while tok_matches!(
+            self,
+            TokenType::GreaterThan
+                | TokenType::GreaterEqual
+                | TokenType::LessThan
+                | TokenType::LessEqual
         ) {
             let op = self.next().unwrap();
             let right = self.parse_term()?;
@@ -250,10 +259,7 @@ where
         let mut expr = self.parse_factor()?;
 
         // TODO: include src spans
-        while matches!(
-            self.peek(),
-            Some(&Token(_, TokenType::Plus, _)) | Some(&Token(_, TokenType::Minus, _))
-        ) {
+        while tok_matches!(self, TokenType::Plus | TokenType::Minus) {
             let op = self.next().unwrap();
             let right = self.parse_factor()?;
             expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
@@ -266,10 +272,7 @@ where
         let mut expr = self.parse_unary()?;
 
         // TODO: include src spans
-        while matches!(
-            self.peek(),
-            Some(&Token(_, TokenType::Mult, _)) | Some(&Token(_, TokenType::Div, _))
-        ) {
+        while tok_matches!(self, TokenType::Mult | TokenType::Div) {
             let op = self.next().unwrap();
             let right = self.parse_unary()?;
             expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
@@ -279,10 +282,7 @@ where
     }
 
     fn parse_unary(&mut self) -> ParseResult<Expression> {
-        if matches!(
-            self.peek(),
-            Some(&Token(_, TokenType::Bang, _)) | Some(&Token(_, TokenType::Minus, _))
-        ) {
+        if tok_matches!(self, TokenType::Bang | TokenType::Minus) {
             let op = self.next().unwrap();
             let right = self.parse_unary()?;
             return Ok(Expression::Unary(op.1.try_into().unwrap(), Box::new(right)));
@@ -292,10 +292,10 @@ where
     }
 
     fn parse_var_or_call(&mut self) -> ParseResult<Expression> {
-        if matches!(self.peek(), Some(&Token(_, TokenType::Ident(_), _))) {
+        if tok_matches!(self, TokenType::Ident(_)) {
             let tok = self.next().unwrap();
             if let Token(_, TokenType::Ident(id), _) = tok {
-                if self.check(TokenType::LeftParen) {
+                if tok_matches!(self, TokenType::LeftParen) {
                     let es = self.parse_expr_seq(
                         TokenType::LeftParen,
                         TokenType::Comma,
@@ -315,25 +315,22 @@ where
 
     fn parse_primary(&mut self) -> ParseResult<Expression> {
         if let Some(next_tok) = self.next() {
-            match next_tok {
-                Token(_, TokenType::Literal(token::Literal::True), _) => {
+            match next_tok.1 {
+                TokenType::Literal(token::Literal::True) => {
                     Ok(Expression::Literal(Literal::Bool(true)))
                 }
-                Token(_, TokenType::Literal(token::Literal::False), _) => {
+                TokenType::Literal(token::Literal::False) => {
                     Ok(Expression::Literal(Literal::Bool(false)))
                 }
-                Token(_, TokenType::Literal(token::Literal::Int(i)), _) => {
+                TokenType::Literal(token::Literal::Int(i)) => {
                     Ok(Expression::Literal(Literal::Int(i)))
                 }
-                Token(_, TokenType::Literal(token::Literal::String(s)), _) => {
+                TokenType::Literal(token::Literal::String(s)) => {
                     Ok(Expression::Literal(Literal::String(s)))
                 }
-                Token(_, TokenType::LeftParen, _) => {
+                TokenType::LeftParen => {
                     let expr = self.parse_expr()?;
-                    self.consume(
-                        TokenType::RightParen
-                        
-                    )?;
+                    self.consume(TokenType::RightParen)?;
                     Ok(Expression::Grouping(Box::new(expr)))
                 }
                 tok => {
@@ -354,8 +351,8 @@ where
         Err(self.error(Some(tok), format!("expected {:?}", tok.1)))
     }
 
-    fn check(&mut self, ts: Vec<TokenType>) -> bool {
-        self.peek().is_some_and(|a| a.1 == ts)
+    fn matches(&mut self, ts: Vec<TokenType>) -> bool {
+        self.peek().is_some_and(|a| ts.contains(&a.t_type))
     }
 
     fn peek(&mut self) -> Option<&Token> {

@@ -1,4 +1,3 @@
-
 use color_eyre::eyre::{bail, Result};
 use ecow::EcoString;
 
@@ -44,15 +43,9 @@ pub enum Definition {
 #[derive(Debug, Clone)]
 pub enum Statement {
     Block(Vec<Statement>),
-    Expression(Expression),
-    Let {
-        var: Id,
-        value: Expression,
-    },
-    Assign {
-        lhs: Expression,
-        rhs: Expression,
-    },
+    Expr(Expression),
+    Let { var: Id, value: Expression },
+    Assign { lhs: Expression, rhs: Expression },
     Return(Option<Expression>),
 }
 
@@ -64,7 +57,7 @@ pub enum Expression {
     BinOp(Box<Expression>, Op2, Box<Expression>),
     Unary(Op1, Box<Expression>),
     Grouping(Box<Expression>),
-    If(Box<Expression>, Box<Expression>, Box<Expression>),
+    If(Box<Expression>, Box<Statement>, Box<Statement>),
     Var(Id),
     Call(Id, Vec<Expression>),
 }
@@ -93,7 +86,7 @@ pub enum Literal {
 /// Unary operation
 #[derive(Debug, Clone)]
 pub enum Op1 {
-    Not, // !
+    Not,    // !
     Negate, // -
 }
 
@@ -140,7 +133,7 @@ impl TryFrom<TokenType> for Op2 {
             TokenType::GreaterEqual => Ok(Self::GreaterEqual),
             TokenType::LessThan => Ok(Self::LessThan),
             TokenType::LessEqual => Ok(Self::LessEqual),
-            _ => bail!("Token {:?} is not a valid op2", value)
+            _ => bail!("Token {:?} is not a valid op2", value),
         }
     }
 }

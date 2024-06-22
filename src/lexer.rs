@@ -73,11 +73,11 @@ where
                 '.' => return Ok(Token(start, TokenType::Dot, self.pos())),
                 ':' => {
                     if self.match_advance(':') {
-                        return Ok(Token(start, TokenType::DoubleColon, self.pos()))
+                        return Ok(Token(start, TokenType::DoubleColon, self.pos()));
                     } else {
-                        return Ok(Token(start, TokenType::Colon, self.pos()))
+                        return Ok(Token(start, TokenType::Colon, self.pos()));
                     }
-                },
+                }
                 ';' => return Ok(Token(start, TokenType::Semicolon, self.pos())),
                 '"' => {
                     let tok = self.tok_str(start)?;
@@ -148,7 +148,7 @@ where
         self.line += 1;
     }
 
-    /// Advance the self if the current char is a match
+    /// Advance self if the current char is a match
     fn match_advance(&mut self, expect: char) -> bool {
         match self.inner_peek() {
             None => false,
@@ -179,6 +179,7 @@ where
         }
     }
 
+    // TODO: add doc comments
     fn tok_comment(&mut self) {
         while let Some(c) = self.inner_next() {
             if c == '\n' {

@@ -1,7 +1,7 @@
-use color_eyre::{eyre::{bail, eyre}, Result};
-use crate::{
-    ast::{Definition, Expr, Id, Literal, Op1, Op2, Program},
-    token::TokenType,
+use crate::ast::{Definition, Expression, Id, Literal, Op1, Op2, Program, Statement};
+use color_eyre::{
+    eyre::{bail, eyre},
+    Result,
 };
 
 mod translate;
@@ -11,7 +11,7 @@ pub enum Value {
     Int(i32),
     Bool(bool),
     String(String),
-    Function(Vec<Id>, Expr),
+    Function(Vec<Id>, Statement),
     Void,
 }
 
@@ -40,13 +40,11 @@ impl Interpreter {
 
         for def in &prog.ds {
             match def {
-                Definition::Function { name, args, body } => {
-                    env.push(Binding(
-                        name.clone(),
-                        Value::Function(args.clone(), expr.clone()),
-                    ))
-                },
-                Definition::Struct() => unimplemented!(),
+                Definition::Function { name, args, body } => env.push(Binding(
+                    name.clone(),
+                    Value::Function(args.clone(), body.clone()),
+                )),
+                _ => unimplemented!(),
             }
         }
 
@@ -61,7 +59,7 @@ impl Interpreter {
             if binding.0 == "main" {
                 match &binding.1 {
                     Value::Function(_, e) => {
-                        return self.interp_expr(
+                        return self.interp_stmt(
                             e.clone(),
                             REnv {
                                 bindings: self.globals.clone(),
@@ -73,27 +71,27 @@ impl Interpreter {
             }
         }
 
-        bail!(
-            "No entrypoint to program. Write a main() function."
-        )
+        bail!("No entrypoint to program. Write a main() function.")
     }
 
-    fn interp_expr(&self, expr: Expr, env: REnv) -> Answer {
+    fn interp_stmt(&self, stmt: Statement, env: REnv) -> Answer {}
+
+    fn interp_expr(&self, expr: Expression, env: REnv) -> Answer {
         match expr {
-            Expr::Literal(p) => self.interp_literal(p),
-            Expr::Unary(op, e1) => self.interp_unary(op, *e1, env),
-            Expr::BinOp(e1, op, e2) => self.interp_binop(*e1, op, *e2, env),
-            Expr::Grouping(e) => self.interp_expr(*e, env),
-            Expr::If(e1, e2, e3) => self.interp_if(*e1, *e2, *e3, env),
-            Expr::Let(id, e1, e2) => self.interp_let(id, *e1, *e2, env),
-            Expr::Var(id) => lookup(id, env),
-            Expr::Call(name, args) => self.interp_call(name, args, env),
-            Expr::Empty => Ok(Value::Void),
+            Expression::Literal(p) => self.interp_literal(p),
+            Expression::Unary(op, e1) => self.interp_unary(op, *e1, env),
+            Expression::BinOp(e1, op, e2) => self.interp_binop(*e1, op, *e2, env),
+            Expression::Grouping(e) => self.interp_expr(*e, env),
+            Expression::If(e1, e2, e3) => self.interp_if(*e1, *e2, *e3, env),
+            Expression::Let(id, e1, e2) => self.interp_let(id, *e1, *e2, env),
+            Expression::Var(id) => lookup(id, env),
+            Expression::Call(name, args) => self.interp_call(name, args, env),
+            Expression::Empty => Ok(Value::Void),
             _ => bail!("Unknown expression"),
         }
     }
 
-    fn interp_call(&self, id: Id, args: Vec<Expr>, mut env: REnv) -> Answer {
+    fn interp_call(&self, id: Id, args: Vec<Expression>, mut env: REnv) -> Answer {
         let args: Vec<Value> = args
             .iter()
             .map(|e| self.interp_expr(e.clone(), env.clone()).unwrap())
@@ -124,14 +122,14 @@ impl Interpreter {
         }
     }
 
-    fn interp_let(&self, id: Id, e1: Expr, e2: Expr, mut env: REnv) -> Answer {
+    fn interp_let(&self, id: Id, e1: Expression, e2: Expression, mut env: REnv) -> Answer {
         let r1 = self.interp_expr(e1, env.clone())?;
         let binding = Binding(id, r1);
         env.bindings.push(binding);
         self.interp_expr(e2, env)
     }
 
-    fn interp_if(&self, e1: Expr, e2: Expr, e3: Expr, env: REnv) -> Answer {
+    fn interp_if(&self, e1: Expression, e2: Expression, e3: Expression, env: REnv) -> Answer {
         let cond = self.interp_expr(e1, env.clone())?;
         match cond {
             Value::Bool(true) => self.interp_expr(e2, env.clone()),
@@ -140,7 +138,7 @@ impl Interpreter {
         }
     }
 
-    fn interp_binop(&self, e1: Expr, op: Op2, e2: Expr, env: REnv) -> Answer {
+    fn interp_binop(&self, e1: Expression, op: Op2, e2: Expression, env: REnv) -> Answer {
         let r1 = self.interp_expr(e1, env.clone())?;
         let r2 = self.interp_expr(e2, env)?;
 
@@ -166,9 +164,7 @@ impl Interpreter {
                 (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 == b2)),
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 == i2)),
                 (Value::String(s1), Value::String(s2)) => Ok(Value::Bool(s1.eq(&s2))),
-                _ => bail!(
-                    "TypeError: equality operator expects operands of the same type"
-                ),
+                _ => bail!("TypeError: equality operator expects operands of the same type"),
             },
             Op2::NotEqual => match (r1, r2) {
                 (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 != b2)),
@@ -197,7 +193,7 @@ impl Interpreter {
         }
     }
 
-    fn interp_unary(&self, op: Op1, expr: Expr, env: REnv) -> Answer {
+    fn interp_unary(&self, op: Op1, expr: Expression, env: REnv) -> Answer {
         let e = self.interp_expr(expr, env)?;
         match op {
             Op1::Not => match e {
