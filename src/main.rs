@@ -1,4 +1,4 @@
-use color_eyre::Result;
+use color_eyre::{eyre::bail, Result};
 use lexer::Lexer;
 use std::{fs::read_to_string, path::PathBuf};
 
@@ -20,14 +20,17 @@ struct AjaCli {
 
 fn main() -> Result<()> {
     let cli = <AjaCli as clap::Parser>::parse();
+
     let script = read_to_string(cli.file.expect("should have been given a source file"))?;
     let lexer = Lexer::new(script.chars());
-
-    // println!("{:#?}", lexer.collect::<Vec<Token>>());
     let mut parser = Parser::new(lexer);
-    let ast = parser.parse()?;
+    let ast = match parser.parse() {
+        Ok(p) => p,
+        Err(_) => bail!("parse input: see report above"),
+    };
+
     println!("AST = {:#?}", ast);
     let res = Interpreter::new(ast).run()?;
-
+    println!("{res}");
     Ok(())
 }

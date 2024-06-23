@@ -296,7 +296,6 @@ where
             "else" => Some(TokenType::Keyword(Keyword::Else)),
             "match" => Some(TokenType::Keyword(Keyword::Match)),
             "return" => Some(TokenType::Keyword(Keyword::Return)),
-            // boolean literal
             "true" => Some(TokenType::Literal(Literal::True)),
             "false" => Some(TokenType::Literal(Literal::False)),
             _ => None,

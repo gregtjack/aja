@@ -1,11 +1,8 @@
-use std::{fmt, iter::Peekable};
-
-use color_eyre::eyre::Error;
-
 use crate::{
     ast::{Definition, Expression, Id, Literal, Program, Statement},
     token::{self, Keyword, Token, TokenType},
 };
+use std::{fmt, iter::Peekable};
 
 macro_rules! tok_matches {
     ($self:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
@@ -18,18 +15,6 @@ macro_rules! tok_matches {
     };
 }
 
-macro_rules! consume {
-    ($self:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
-        if tok_matches!($self, $pattern $(if $guard)?) {
-            $self.next();
-            Ok(())
-        } else {
-            let tok = $self.peek().unwrap().clone();
-            Err($self.error(Some(tok), format!("expected {:?}", tok.1)))
-        }
-    };
-}
-
 #[derive(Debug)]
 pub enum ParseError {
     InvalidToken {
@@ -37,7 +22,6 @@ pub enum ParseError {
         col: u32,
         message: String,
     },
-    Adhoc(String),
     Eof,
     Unknown,
 }
@@ -50,7 +34,7 @@ impl fmt::Display for ParseError {
             Self::InvalidToken { line, col, message } => {
                 write!(f, "[line {}:{}]: {}", line, col, message)
             }
-            Self::Adhoc(s) => write!(f, "{}", s),
+            // Self::Adhoc(s) => write!(f, "{}", s),
             Self::Eof => write!(f, "End of token stream"),
             _ => write!(f, "unknown error"),
         }
@@ -140,8 +124,20 @@ where
 
         match tok.1 {
             TokenType::LeftBrace => self.parse_block(),
-            _ => unimplemented!(),
+            TokenType::Keyword(Keyword::Let) => self.parse_let(),
+            TokenType::Keyword(Keyword::Return) => self.parse_return(),
+            TokenType::Keyword(Keyword::If) => self.parse_if_stmt(),
+            // TokenType::Keyword(Keyword::While) => self.parse_while(),
+            _ => self.parse_stmt_expr(),
         }
+    }
+
+    fn parse_stmt_expr(&mut self) -> ParseResult<Statement> {
+        let e = self.parse_expr()?;
+        if !tok_matches!(self, TokenType::RightBrace) {
+            self.consume(TokenType::Semicolon)?;
+        }
+        Ok(Statement::Expr(e))
     }
 
     fn parse_expr(&mut self) -> ParseResult<Expression> {
@@ -149,17 +145,14 @@ where
             return Err(ParseError::Eof);
         };
 
-        // TODO: include src spans
         match tok.1 {
-            TokenType::Keyword(Keyword::If) => self.parse_if(),
-            // Some(Token(_, TokenType::Keyword(Keyword::Let), _)) => self.parse_let(),
-            // all other exprs
+            TokenType::Keyword(Keyword::If) => self.parse_if_expr(),
             _ => self.parse_equality(),
         }
     }
 
     /// Parse a sequence of expressions,
-    /// defined by a separator and opening and closing token
+    /// defined by a separator, opening, and closing token
     fn parse_expr_seq(
         &mut self,
         open: TokenType,
@@ -184,15 +177,6 @@ where
         Ok(xs)
     }
 
-    fn parse_if(&mut self) -> ParseResult<Expression> {
-        consume!(self, TokenType::Keyword(Keyword::If))?;
-        let e1 = self.parse_expr()?;
-        let e2 = self.parse_block()?;
-        self.consume(TokenType::Keyword(Keyword::Else))?;
-        let e3 = self.parse_block()?;
-        Ok(Expression::If(Box::new(e1), Box::new(e2), Box::new(e3)))
-    }
-
     fn parse_let(&mut self) -> ParseResult<Statement> {
         self.consume(TokenType::Keyword(Keyword::Let))?;
 
@@ -201,10 +185,9 @@ where
         match ident {
             Expression::Var(id) => {
                 self.consume(TokenType::Equal)?;
-                let e2 = self.parse_expr()?;
+                let e = self.parse_expr()?;
                 self.consume(TokenType::Semicolon)?;
-
-                Ok(Statement::Let(id, Box::new(e2)))
+                Ok(Statement::Let { var: id, value: e })
             }
             _ => Err(self.error(
                 self.prev_token.clone(),
@@ -216,12 +199,44 @@ where
     fn parse_block(&mut self) -> ParseResult<Statement> {
         let mut stmts = Vec::new();
         self.consume(TokenType::LeftBrace)?;
-        if !tok_matches!(self, TokenType::RightBrace) {
+        while !tok_matches!(self, TokenType::RightBrace) {
             let stmt = self.parse_stmt()?;
             stmts.push(stmt);
         }
         self.consume(TokenType::RightBrace)?;
         Ok(Statement::Block(stmts))
+    }
+
+    fn parse_return(&mut self) -> ParseResult<Statement> {
+        self.consume(TokenType::Keyword(Keyword::Return))?;
+        let res = if tok_matches!(self, TokenType::Semicolon) {
+            Statement::Return(None)
+        } else {
+            Statement::Return(Some(self.parse_expr()?))
+        };
+        self.consume(TokenType::Semicolon)?;
+        Ok(res)
+    }
+
+    fn parse_if_stmt(&mut self) -> ParseResult<Statement> {
+        self.consume(TokenType::Keyword(Keyword::If))?;
+        let e = self.parse_expr()?;
+        let s1 = self.parse_block()?;
+        let mut s2: Option<Statement> = None;
+        if tok_matches!(self, TokenType::Keyword(Keyword::Else)) {
+            self.consume(TokenType::Keyword(Keyword::Else))?;
+            s2 = Some(self.parse_block()?);
+        }
+        Ok(Statement::If(e, Box::new(s1), Box::new(s2)))
+    }
+
+    fn parse_if_expr(&mut self) -> ParseResult<Expression> {
+        self.consume(TokenType::Keyword(Keyword::If))?;
+        let e1 = self.parse_expr()?;
+        let e2 = self.parse_block()?;
+        self.consume(TokenType::Keyword(Keyword::Else))?;
+        let e3 = self.parse_block()?;
+        Ok(Expression::If(Box::new(e1), Box::new(e2), Box::new(e3)))
     }
 
     fn parse_equality(&mut self) -> ParseResult<Expression> {
@@ -292,8 +307,10 @@ where
     }
 
     fn parse_var_or_call(&mut self) -> ParseResult<Expression> {
+        // TODO: clean this up. messy af
         if tok_matches!(self, TokenType::Ident(_)) {
             let tok = self.next().unwrap();
+
             if let Token(_, TokenType::Ident(id), _) = tok {
                 if tok_matches!(self, TokenType::LeftParen) {
                     let es = self.parse_expr_seq(
@@ -333,26 +350,23 @@ where
                     self.consume(TokenType::RightParen)?;
                     Ok(Expression::Grouping(Box::new(expr)))
                 }
-                tok => {
-                    Err(self.error(Some(tok.clone()), "unimplemented primary token".to_string()))
-                }
+                _ => Err(self.error(Some(next_tok), "unimplemented primary token".to_string())),
             }
         } else {
             Err(self.error(self.prev_token.clone(), "??? what".to_string()))
         }
     }
 
-    fn consume(&mut self, t: TokenType) -> ParseResult<()> {
-        if self.check(t) {
-            self.next();
-            return Ok(());
+    fn consume(&mut self, t: TokenType) -> ParseResult<Token> {
+        if self.matches(vec![t.clone()]) {
+            return Ok(self.next().unwrap());
         }
         let tok = self.peek().unwrap().clone();
-        Err(self.error(Some(tok), format!("expected {:?}", tok.1)))
+        Err(self.error(Some(tok.clone()), format!("expected '{}'", t)))
     }
 
     fn matches(&mut self, ts: Vec<TokenType>) -> bool {
-        self.peek().is_some_and(|a| ts.contains(&a.t_type))
+        self.peek().is_some_and(|a| ts.contains(&a.1))
     }
 
     fn peek(&mut self) -> Option<&Token> {
@@ -363,17 +377,12 @@ where
         self.position += 1;
         self.prev_token = self.peek().map(|t| t.clone());
         let t = self.tokens.next();
-        // println!("{:?}", t);
         t
-    }
-
-    fn is_eof(&mut self) -> bool {
-        self.tokens.peek().is_none()
     }
 
     fn error(&mut self, tok: Option<Token>, msg: String) -> ParseError {
         match tok {
-            Some(Token(start, TokenType::Eof, end)) => {
+            Some(Token(start, TokenType::Eof, _)) => {
                 eprintln!("[{} at end]: {}", start.line, msg);
                 ParseError::InvalidToken {
                     line: start.line,
@@ -381,8 +390,8 @@ where
                     message: msg,
                 }
             }
-            Some(Token(start, tok, end)) => {
-                eprintln!("[{}:{} at '{:?}']: {}", start.line, start.col, tok, msg);
+            Some(Token(start, tok, _)) => {
+                eprintln!("[{}:{} at {:?}]: {}", start.line, start.col, tok, msg);
                 ParseError::InvalidToken {
                     line: start.line,
                     col: start.col,

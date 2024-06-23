@@ -45,6 +45,7 @@ pub enum Statement {
     Block(Vec<Statement>),
     Expr(Expression),
     Let { var: Id, value: Expression },
+    If(Expression, Box<Statement>, Box<Option<Statement>>),
     Assign { lhs: Expression, rhs: Expression },
     Return(Option<Expression>),
 }
