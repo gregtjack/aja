@@ -1,10 +1,8 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, error::Error, fmt::Display};
 
 use crate::ast::{Definition, Expression, Id, Literal, Op1, Op2, Program, Statement};
-use color_eyre::{
-    eyre::{bail, eyre, Ok},
-    Result,
-};
+use color_eyre::Result;
+use ecow::EcoString;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -27,7 +25,30 @@ impl Display for Value {
     }
 }
 
-type Answer = Result<Value>;
+#[derive(Debug, Clone)]
+pub enum RuntimeError {
+    Adhoc(String),
+    UndefinedVariable { var: EcoString },
+    TypeError { msg: String },
+    Return(Value),
+}
+
+impl Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeError::UndefinedVariable { var } => write!(f, "Undefined variable: {var}"),
+            RuntimeError::TypeError { msg } => write!(f, "TypeError: {msg}"),
+            RuntimeError::Return(_) => write!(f, "return statement"),
+            RuntimeError::Adhoc(msg) => {
+                write!(f, "{msg}")
+            }
+        }
+    }
+}
+
+impl Error for RuntimeError {}
+
+type Answer = Result<Value, RuntimeError>;
 
 /// Run environment
 #[derive(Debug, Clone)]
@@ -62,20 +83,24 @@ impl REnvironment {
             return env.get(id);
         }
 
-        bail!("Undefined variable: '{id}'")
+        return Err(RuntimeError::UndefinedVariable { var: id });
     }
 
-    pub fn define(&mut self, id: Id, value: Value) -> Option<Value> {
-        self.values.insert(id, value)
-    }
-
-    pub fn assign(&mut self, id: Id, value: Value) -> Result<()> {
-        if self.values.contains_key(&id) {
-            self.values.insert(id, value);
-            return Ok(());
+    pub fn define(&mut self, id: Id, value: Value) -> Result<(), RuntimeError> {
+        if let Some(_) = self.values.insert(id.clone(), value) {
+            return Err(RuntimeError::UndefinedVariable { var: id });
         }
 
-        bail!("Undefined variable: '{id}'")
+        Ok(())
+    }
+
+    pub fn assign(&mut self, id: Id, value: Value) -> Answer {
+        if self.values.contains_key(&id) {
+            self.values.insert(id, value.clone());
+            return Ok(value);
+        }
+
+        return Err(RuntimeError::UndefinedVariable { var: id });
     }
 }
 
@@ -88,34 +113,49 @@ pub struct Interpreter {
 
 impl Interpreter {
     pub fn new(prog: Program) -> Self {
-        let mut env = REnvironment::new();
-
-        for def in &prog.ds {
-            match def {
-                Definition::Function { name, args, body } => {
-                    // TODO: in the Some case (function already declared), handle more gracefully
-                    assert!(env
-                        .define(name.clone(), Value::Function(args.clone(), body.clone()))
-                        .is_none());
-                }
-                _ => unimplemented!(),
-            }
+        Interpreter {
+            program: prog,
+            env: REnvironment::new(),
         }
-
-        Interpreter { program: prog, env }
     }
 
     pub fn run(mut self) -> Answer {
+        self.defines()?;
+
         for binding in &self.env.values {
             if binding.0 == "main" {
                 match &binding.1 {
-                    Value::Function(_, e) => return self.interp_stmt(e.clone()),
+                    Value::Function(_, e) => {
+                        return match self.interp_stmt(e.clone()) {
+                            Ok(v) => return Ok(v),
+                            Err(err) => match err {
+                                RuntimeError::Return(v) => return Ok(v),
+                                _ => Err(err),
+                            },
+                        }
+                    }
                     _ => unreachable!(),
                 }
             }
         }
 
-        bail!("No entrypoint to program. Write a main() function.")
+        return Err(RuntimeError::Adhoc(
+            "no entrypoint to program. Write a main function.".to_string(),
+        ));
+    }
+
+    fn defines(&mut self) -> Result<(), RuntimeError> {
+        for def in &self.program.ds {
+            match def {
+                Definition::Function { name, args, body } => {
+                    self.env
+                        .define(name.clone(), Value::Function(args.clone(), body.clone()))?;
+                }
+                _ => unimplemented!(),
+            }
+        }
+
+        Ok(())
     }
 
     fn interp_stmt(&mut self, stmt: Statement) -> Answer {
@@ -136,7 +176,6 @@ impl Interpreter {
             Statement::Expr(e) => self.interp_expr(e),
             Statement::Let { var, value } => self.interp_let(var, value),
             Statement::If(e1, s1, s2) => self.interp_if(e1, *s1, *s2),
-            Statement::Assign { lhs, rhs } => todo!(),
             Statement::Return(maybe_e) => self.interp_return(maybe_e),
         }
     }
@@ -149,34 +188,43 @@ impl Interpreter {
             Expression::Grouping(e) => self.interp_expr(*e),
             Expression::If(e1, e2, e3) => self.interp_if(*e1, *e2, Some(*e3)),
             Expression::Var(id) => self.env.get(id),
-            Expression::Call(name, args) => self.interp_call(name, args),
+            Expression::Call(callee, args) => self.interp_call(*callee, args),
+            Expression::Assign(lhs, rhs) => {
+                let value = self.interp_expr(*rhs)?;
+                self.env.assign(lhs, value)
+            }
             Expression::Empty => Ok(Value::Void),
-            _ => bail!("Unknown expression"),
         }
     }
 
-    fn interp_call(&mut self, id: Id, args: Vec<Expression>) -> Answer {
+    fn interp_call(&mut self, callee: Expression, args: Vec<Expression>) -> Answer {
+        let callee = self.interp_expr(callee)?;
+
         let args: Vec<Value> = args
             .iter()
             .map(|e| self.interp_expr(e.clone()).unwrap())
             .collect();
 
-        if BUILTINS.contains(&id.as_str()) {
-            return run_builtin(id, args);
-        }
-
-        let var = self.env.get(id)?;
-
-        match var {
+        match callee {
             Value::Function(params, body) => {
                 assert_eq!(args.len(), params.len(), "Number of arguments passed to function does not equal the number of parameters.");
                 params.iter().zip(args.iter()).for_each(|(name, value)| {
-                    self.env.define(name.clone(), value.clone());
+                    let _ = self.env.define(name.clone(), value.clone());
                 });
 
-                self.interp_stmt(body)
+                match self.interp_stmt(body) {
+                    Ok(v) => return Ok(v),
+                    Err(err) => match err {
+                        RuntimeError::Return(v) => return Ok(v),
+                        _ => Err(err),
+                    },
+                }
             }
-            _ => bail!("Can't call a non-function"),
+            _ => {
+                return Err(RuntimeError::TypeError {
+                    msg: "Can't call a non-function".to_string(),
+                })
+            }
         }
     }
 
@@ -187,7 +235,12 @@ impl Interpreter {
     }
 
     fn interp_return(&mut self, e: Option<Expression>) -> Answer {
-        Ok(Value::Void)
+        if let Some(expr) = e {
+            let value = self.interp_expr(expr)?;
+            Err(RuntimeError::Return(value))
+        } else {
+            Err(RuntimeError::Return(Value::Void))
+        }
     }
 
     fn interp_if(&mut self, e1: Expression, s1: Statement, s2: Option<Statement>) -> Answer {
@@ -201,7 +254,11 @@ impl Interpreter {
                     Ok(Value::Void)
                 }
             }
-            _ => bail!("Expected a boolean expression in if condition"),
+            _ => {
+                return Err(RuntimeError::TypeError {
+                    msg: "Expected a boolean expression in if condition".to_string(),
+                })
+            }
         }
     }
 
@@ -212,51 +269,75 @@ impl Interpreter {
         match op {
             Op2::Addition => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 + i2)),
-                _ => bail!("cannot add non-integers"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: "cannot add non-integers".to_string(),
+                }),
             },
             Op2::Subtraction => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 - i2)),
-                _ => bail!("cannot subtract non-integers"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: "cannot subtract non-integers".to_string(),
+                }),
             },
             Op2::Multiplication => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 * i2)),
-                _ => bail!("cannot multiply non-integers"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: "cannot multiply non-integers".to_string(),
+                }),
             },
             Op2::Division => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 / i2)),
-                _ => bail!("cannot divide non-integers"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: "cannot divide non-integers".to_string(),
+                }),
             },
             // Equality
             Op2::Equal => match (r1, r2) {
                 (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 == b2)),
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 == i2)),
                 (Value::String(s1), Value::String(s2)) => Ok(Value::Bool(s1.eq(&s2))),
-                _ => bail!("TypeError: equality operator expects operands of the same type"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!("equality operator expects operands of the same (supported) type"),
+                }),
             },
             Op2::NotEqual => match (r1, r2) {
                 (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 != b2)),
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 != i2)),
                 (Value::String(s1), Value::String(s2)) => Ok(Value::Bool(s1.ne(&s2))),
-                _ => bail!("TypeError: inequality operator expects booleans"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!(
+                        "inequality operator expects operands of the same (supported) type"
+                    ),
+                }),
             },
             // Comparison
             Op2::GreaterThan => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 > i2)),
-                _ => bail!("TypeError: > operator expects integers"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!("> operator expects operands of the same (supported) type"),
+                }),
             },
             Op2::GreaterEqual => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 >= i2)),
-                _ => bail!("TypeError: >= operator expects integers"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!(">= operator expects operands of the same (supported) type"),
+                }),
             },
             Op2::LessThan => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 < i2)),
-                _ => bail!("TypeError: < operator expects integers"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!("< operator expects operands of the same (supported) type"),
+                }),
             },
             Op2::LessEqual => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 <= i2)),
-                _ => bail!("TypeError: <= operator expects integers"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!("<= operator expects operands of the same (supported) type"),
+                }),
             },
-            _ => bail!("invalid binary operator"),
+            _ => Err(RuntimeError::Adhoc(format!(
+                "greater-than operator expects operands of the same (supported) type"
+            ))),
         }
     }
 
@@ -265,11 +346,15 @@ impl Interpreter {
         match op {
             Op1::Not => match e {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
-                _ => bail!("expected boolean"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!("expected bool, found {}", e),
+                }),
             },
             Op1::Negate => match e {
                 Value::Int(i) => Ok(Value::Int(-i)),
-                _ => bail!("expected integer"),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!("expected int, found {}", e),
+                }),
             },
         }
     }

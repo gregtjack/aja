@@ -1,3 +1,5 @@
+use tracing::{debug, error};
+
 use crate::{
     ast::{Definition, Expression, Id, Literal, Program, Statement},
     token::{self, Keyword, Token, TokenType},
@@ -147,7 +149,7 @@ where
 
         match tok.1 {
             TokenType::Keyword(Keyword::If) => self.parse_if_expr(),
-            _ => self.parse_equality(),
+            _ => self.parse_assignment(),
         }
     }
 
@@ -180,7 +182,7 @@ where
     fn parse_let(&mut self) -> ParseResult<Statement> {
         self.consume(TokenType::Keyword(Keyword::Let))?;
 
-        let ident = self.parse_var_or_call()?;
+        let ident = self.parse_primary()?;
 
         match ident {
             Expression::Var(id) => {
@@ -237,6 +239,25 @@ where
         self.consume(TokenType::Keyword(Keyword::Else))?;
         let e3 = self.parse_block()?;
         Ok(Expression::If(Box::new(e1), Box::new(e2), Box::new(e3)))
+    }
+
+    fn parse_assignment(&mut self) -> ParseResult<Expression> {
+        let expr = self.parse_equality()?;
+
+        if tok_matches!(self, TokenType::Equal) {
+            self.consume(TokenType::Equal)?;
+            let equals = self.prev_token.clone();
+            let value = self.parse_assignment()?;
+
+            match expr.clone() {
+                Expression::Var(v) => return Ok(Expression::Assign(v, Box::new(value))),
+                _ => {
+                    return Err(self.error(equals.clone(), "invalid assignment target".to_string()))
+                }
+            };
+        }
+
+        Ok(expr)
     }
 
     fn parse_equality(&mut self) -> ParseResult<Expression> {
@@ -303,31 +324,29 @@ where
             return Ok(Expression::Unary(op.1.try_into().unwrap(), Box::new(right)));
         }
 
-        self.parse_var_or_call()
+        self.parse_call()
     }
 
-    fn parse_var_or_call(&mut self) -> ParseResult<Expression> {
-        // TODO: clean this up. messy af
-        if tok_matches!(self, TokenType::Ident(_)) {
-            let tok = self.next().unwrap();
+    fn parse_call(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.parse_primary()?;
+        while tok_matches!(self, TokenType::LeftParen) {
+            let es = self.parse_expr_seq(
+                TokenType::LeftParen,
+                TokenType::Comma,
+                TokenType::RightParen,
+            )?;
 
-            if let Token(_, TokenType::Ident(id), _) = tok {
-                if tok_matches!(self, TokenType::LeftParen) {
-                    let es = self.parse_expr_seq(
-                        TokenType::LeftParen,
-                        TokenType::Comma,
-                        TokenType::RightParen,
-                    )?;
-                    return Ok(Expression::Call(id.clone(), es));
-                } else {
-                    return Ok(Expression::Var(id.clone()));
-                }
-            } else {
-                unreachable!()
-            }
+            // if es.len() <= 255 {
+            //     self.error(
+            //         self.peek().cloned(),
+            //         "Number of arguments exceeds 255".to_string(),
+            //     );
+            // }
+
+            expr = Expression::Call(Box::new(expr), es);
         }
 
-        self.parse_primary()
+        return Ok(expr);
     }
 
     fn parse_primary(&mut self) -> ParseResult<Expression> {
@@ -345,6 +364,7 @@ where
                 TokenType::Literal(token::Literal::String(s)) => {
                     Ok(Expression::Literal(Literal::String(s)))
                 }
+                TokenType::Ident(var) => Ok(Expression::Var(var)),
                 TokenType::LeftParen => {
                     let expr = self.parse_expr()?;
                     self.consume(TokenType::RightParen)?;
@@ -353,7 +373,7 @@ where
                 _ => Err(self.error(Some(next_tok), "unimplemented primary token".to_string())),
             }
         } else {
-            Err(self.error(self.prev_token.clone(), "??? what".to_string()))
+            Err(ParseError::Eof)
         }
     }
 
@@ -383,7 +403,7 @@ where
     fn error(&mut self, tok: Option<Token>, msg: String) -> ParseError {
         match tok {
             Some(Token(start, TokenType::Eof, _)) => {
-                eprintln!("[{} at end]: {}", start.line, msg);
+                error!("[{} at end]: {}", start.line, msg);
                 ParseError::InvalidToken {
                     line: start.line,
                     col: start.col,
@@ -391,7 +411,7 @@ where
                 }
             }
             Some(Token(start, tok, _)) => {
-                eprintln!("[{}:{} at {:?}]: {}", start.line, start.col, tok, msg);
+                error!("[{}:{} at {:?}]: {}", start.line, start.col, tok, msg);
                 ParseError::InvalidToken {
                     line: start.line,
                     col: start.col,
@@ -399,7 +419,7 @@ where
                 }
             }
             None => {
-                eprintln!("[unknown error]: {}", msg);
+                error!("[unknown error]: {}", msg);
                 ParseError::Unknown
             }
         }

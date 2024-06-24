@@ -1,6 +1,11 @@
 use color_eyre::{eyre::bail, Result};
 use lexer::Lexer;
 use std::{fs::read_to_string, path::PathBuf};
+use tracing::debug;
+use tracing_subscriber::{
+    fmt::layer,
+    layer::{Filter, SubscriberExt},
+};
 
 use crate::interp::Interpreter;
 use parse::Parser;
@@ -19,6 +24,12 @@ struct AjaCli {
 }
 
 fn main() -> Result<()> {
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .compact()
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
     let cli = <AjaCli as clap::Parser>::parse();
 
     let script = read_to_string(cli.file.expect("should have been given a source file"))?;
@@ -26,10 +37,11 @@ fn main() -> Result<()> {
     let mut parser = Parser::new(lexer);
     let ast = match parser.parse() {
         Ok(p) => p,
-        Err(_) => bail!("parse input: see report above"),
+        Err(e) => bail!(e),
     };
 
-    println!("AST = {:#?}", ast);
+    debug!("{:#?}", ast);
+
     let res = Interpreter::new(ast).run()?;
     println!("{res}");
     Ok(())

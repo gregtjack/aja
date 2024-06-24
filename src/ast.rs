@@ -1,7 +1,10 @@
 use color_eyre::eyre::{bail, Result};
 use ecow::EcoString;
 
-use crate::{parse::ParseError, token::TokenType};
+use crate::{
+    parse::ParseError,
+    token::{Token, TokenType},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Location {
@@ -46,13 +49,11 @@ pub enum Statement {
     Expr(Expression),
     Let { var: Id, value: Expression },
     If(Expression, Box<Statement>, Box<Option<Statement>>),
-    Assign { lhs: Expression, rhs: Expression },
     Return(Option<Expression>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Expression {
-    Eof,
     Empty,
     Literal(Literal),
     BinOp(Box<Expression>, Op2, Box<Expression>),
@@ -60,7 +61,8 @@ pub enum Expression {
     Grouping(Box<Expression>),
     If(Box<Expression>, Box<Statement>, Box<Statement>),
     Var(Id),
-    Call(Id, Vec<Expression>),
+    Call(Box<Expression>, Vec<Expression>),
+    Assign(Id, Box<Expression>),
 }
 
 #[derive(Debug, Clone)]

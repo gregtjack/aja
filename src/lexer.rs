@@ -320,7 +320,10 @@ where
         }
 
         match self.token() {
-            Ok(t) => Some(t),
+            Ok(t) => {
+                tracing::trace!("token: {:?}", t);
+                Some(t)
+            }
             Err(e) => panic!("{e}"),
         }
     }
