@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use color_eyre::eyre::bail;
 
-use crate::interp::Value;
+use crate::interp::{Callable, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -59,9 +59,12 @@ impl From<Value> for Type {
             Value::Int(_) => Self::Int,
             Value::Bool(_) => Self::Bool,
             Value::String(_) => Self::String,
-            Value::Function(ps, _, t) => Self::Fn {
-                arity: ps.len(),
-                rtype: Box::new(t),
+            Value::Callable(c) => match c {
+                Callable::Function(ps, _, t) => Self::Fn {
+                    arity: ps.len(),
+                    rtype: Box::new(t),
+                },
+                Callable::Builtin(_) => Self::Void,
             },
             Value::Void => Self::Void,
         }

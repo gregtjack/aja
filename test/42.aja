@@ -1,14 +1,11 @@
-fn main() -> any {
-  let x: int = 42;
-  {
-    add(x, x)
+fn main(): any {
+  let i = 0;
+  while i < 100 {
+    i = plus(i, 1);
+    println("iteration", i);
   }
 }
 
-fn square(a: int) -> int {
-  a * a
-}
-
-fn add(a:int, b: int) -> int {
+fn plus(a, b): int {
   a + b
 }

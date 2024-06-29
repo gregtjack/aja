@@ -7,5 +7,5 @@ pub enum Target {
 }
 
 pub trait Generator {
-    
+    fn generate(&mut self);
 }

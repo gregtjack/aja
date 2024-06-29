@@ -80,6 +80,7 @@ pub enum Statement {
     Expr(Expression),
     Let { var: Variable, value: Expression },
     If(Expression, Box<Statement>),
+    While(Expression, Box<Statement>),
     Return(Option<Expression>),
 }
 

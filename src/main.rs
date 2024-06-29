@@ -43,6 +43,6 @@ fn main() -> Result<()> {
     debug!("{:?}", ast);
 
     let res = Interpreter::new(ast).run()?;
-    println!("{res}");
+    debug!("{res:?}");
     Ok(())
 }

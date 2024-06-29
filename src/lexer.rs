@@ -293,6 +293,7 @@ where
             "var" => Some(TokenType::Keyword(Keyword::Var)),
             "fn" => Some(TokenType::Keyword(Keyword::Fn)),
             "if" => Some(TokenType::Keyword(Keyword::If)),
+            "while" => Some(TokenType::Keyword(Keyword::While)),
             "else" => Some(TokenType::Keyword(Keyword::Else)),
             "match" => Some(TokenType::Keyword(Keyword::Match)),
             "return" => Some(TokenType::Keyword(Keyword::Return)),

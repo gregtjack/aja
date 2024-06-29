@@ -91,7 +91,7 @@ where
         };
 
         let params = self.parse_fn_params()?;
-        let rtype = self.parse_fn_type_annotation()?;
+        let rtype = self.parse_type_annotation()?;
         let body = self.parse_block()?;
 
         Ok(Definition::Function {
@@ -140,6 +140,7 @@ where
             TokenType::Keyword(Keyword::Let) => self.parse_let(),
             TokenType::Keyword(Keyword::Return) => self.parse_return(),
             TokenType::Keyword(Keyword::If) => self.parse_if_stmt(),
+            TokenType::Keyword(Keyword::While) => self.parse_while(),
             // TokenType::Keyword(Keyword::While) => self.parse_while(),
             _ => self.parse_stmt_expr(),
         }
@@ -233,6 +234,10 @@ where
                         stmts.push(stmt);
                         continue;
                     }
+                    Statement::While(_, _) => {
+                        stmts.push(stmt);
+                        continue;
+                    }
                     Statement::Block(_, t) => {
                         tail = t;
                         break;
@@ -276,6 +281,13 @@ where
             )));
         }
         Ok(Statement::If(e, Box::new(s1)))
+    }
+
+    fn parse_while(&mut self) -> ParseResult<Statement> {
+        self.consume(TokenType::Keyword(Keyword::While))?;
+        let e = self.parse_expr()?;
+        let s1 = self.parse_block()?;
+        Ok(Statement::While(e, Box::new(s1)))
     }
 
     fn parse_if_expr(&mut self) -> ParseResult<Expression> {
@@ -426,24 +438,6 @@ where
     fn parse_type_annotation(&mut self) -> ParseResult<Type> {
         if tok_matches!(self, TokenType::Colon) {
             self.consume(TokenType::Colon)?;
-            let type_expr = self.parse_primary()?;
-            match type_expr {
-                Expression::Var(v) => Ok(v.to_string().try_into().unwrap()),
-                _ => {
-                    return Err(self.error(
-                        self.prev_token.clone(),
-                        "variable declaration must be an identifier".to_string(),
-                    ))
-                }
-            }
-        } else {
-            Ok(Type::Any)
-        }
-    }
-
-    fn parse_fn_type_annotation(&mut self) -> ParseResult<Type> {
-        if tok_matches!(self, TokenType::RightArrow) {
-            self.consume(TokenType::RightArrow)?;
             let type_expr = self.parse_primary()?;
             match type_expr {
                 Expression::Var(v) => Ok(v.to_string().try_into().unwrap()),
