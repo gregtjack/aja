@@ -25,7 +25,7 @@ struct AjaCli {
 
 fn main() -> Result<()> {
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         .compact()
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         Err(e) => bail!(e),
     };
 
-    debug!("{:#?}", ast);
+    debug!("{:?}", ast);
 
     let res = Interpreter::new(ast).run()?;
     println!("{res}");

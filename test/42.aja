@@ -1,3 +1,14 @@
-fn main() {
-  42
+fn main() -> any {
+  let x: int = 42;
+  {
+    add(x, x)
+  }
+}
+
+fn square(a: int) -> int {
+  a * a
+}
+
+fn add(a:int, b: int) -> int {
+  a + b
 }

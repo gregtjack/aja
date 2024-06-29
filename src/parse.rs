@@ -1,7 +1,7 @@
 use tracing::{debug, error};
 
 use crate::{
-    ast::{Definition, Expression, Id, Literal, Program, Statement},
+    ast::{types::Type, Definition, Expression, Id, Literal, Program, Statement, Variable},
     token::{self, Keyword, Token, TokenType},
 };
 use std::{fmt, iter::Peekable};
@@ -90,33 +90,44 @@ where
             _ => unreachable!(),
         };
 
-        // parse arguments
-        let es = self.parse_expr_seq(
-            TokenType::LeftParen,
-            TokenType::Comma,
-            TokenType::RightParen,
-        )?;
-        let mut xs: Vec<Id> = vec![];
-
-        for e in es {
-            match e {
-                Expression::Var(id) => xs.push(id),
-                _ => {
-                    return Err(self.error(
-                        self.prev_token.clone(),
-                        "Function parameters must be identifiers".to_string(),
-                    ))
-                }
-            }
-        }
-
-        let s = self.parse_block()?;
+        let params = self.parse_fn_params()?;
+        let rtype = self.parse_fn_type_annotation()?;
+        let body = self.parse_block()?;
 
         Ok(Definition::Function {
             name: ident,
-            args: xs,
-            body: s,
+            params,
+            body,
+            rtype,
         })
+    }
+
+    fn parse_fn_params(&mut self) -> ParseResult<Vec<Variable>> {
+        let mut xs = Vec::new();
+        self.consume(TokenType::LeftParen)?;
+        if !tok_matches!(self, TokenType::RightParen) {
+            loop {
+                let e = self.parse_primary()?;
+                let vtype: Type = self.parse_type_annotation()?;
+                let v = match e {
+                    Expression::Var(id) => Variable::new(id, vtype),
+                    _ => {
+                        return Err(self.error(
+                            self.prev_token.clone(),
+                            "Function parameter must be variable".to_string(),
+                        ))
+                    }
+                };
+                xs.push(v);
+                if tok_matches!(self, TokenType::Comma) {
+                    self.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenType::RightParen)?;
+        Ok(xs)
     }
 
     fn parse_stmt(&mut self) -> ParseResult<Statement> {
@@ -136,9 +147,6 @@ where
 
     fn parse_stmt_expr(&mut self) -> ParseResult<Statement> {
         let e = self.parse_expr()?;
-        if !tok_matches!(self, TokenType::RightBrace) {
-            self.consume(TokenType::Semicolon)?;
-        }
         Ok(Statement::Expr(e))
     }
 
@@ -186,10 +194,14 @@ where
 
         match ident {
             Expression::Var(id) => {
+                let ttype: Type = self.parse_type_annotation()?;
+
                 self.consume(TokenType::Equal)?;
                 let e = self.parse_expr()?;
-                self.consume(TokenType::Semicolon)?;
-                Ok(Statement::Let { var: id, value: e })
+                Ok(Statement::Let {
+                    var: Variable::new(id, ttype),
+                    value: e,
+                })
             }
             _ => Err(self.error(
                 self.prev_token.clone(),
@@ -200,13 +212,44 @@ where
 
     fn parse_block(&mut self) -> ParseResult<Statement> {
         let mut stmts = Vec::new();
+        let mut tail = None;
         self.consume(TokenType::LeftBrace)?;
         while !tok_matches!(self, TokenType::RightBrace) {
             let stmt = self.parse_stmt()?;
-            stmts.push(stmt);
+            if tok_matches!(self, TokenType::Semicolon) {
+                self.consume(TokenType::Semicolon)?;
+                stmts.push(stmt);
+            } else {
+                match stmt {
+                    Statement::Expr(e) => {
+                        tail = Some(e);
+                        break;
+                    }
+                    Statement::If(_, _) => {
+                        // return Err(self.error(
+                        //     self.prev_token.clone(),
+                        //     "Expected expression at tail position. If expressions must have an `else` block.".to_string(),
+                        // ))
+                        stmts.push(stmt);
+                        continue;
+                    }
+                    Statement::Block(_, t) => {
+                        tail = t;
+                        break;
+                    }
+                    _ => {
+                        return Err(self.error(
+                            self.prev_token.clone(),
+                            "Expected expression at tail position".to_string(),
+                        ))
+                    }
+                };
+            }
         }
+
         self.consume(TokenType::RightBrace)?;
-        Ok(Statement::Block(stmts))
+
+        Ok(Statement::Block(stmts, tail))
     }
 
     fn parse_return(&mut self) -> ParseResult<Statement> {
@@ -216,7 +259,6 @@ where
         } else {
             Statement::Return(Some(self.parse_expr()?))
         };
-        self.consume(TokenType::Semicolon)?;
         Ok(res)
     }
 
@@ -224,12 +266,16 @@ where
         self.consume(TokenType::Keyword(Keyword::If))?;
         let e = self.parse_expr()?;
         let s1 = self.parse_block()?;
-        let mut s2: Option<Statement> = None;
         if tok_matches!(self, TokenType::Keyword(Keyword::Else)) {
             self.consume(TokenType::Keyword(Keyword::Else))?;
-            s2 = Some(self.parse_block()?);
+            let s2 = self.parse_block()?;
+            return Ok(Statement::Expr(Expression::If(
+                Box::new(e),
+                Box::new(s1),
+                Box::new(s2),
+            )));
         }
-        Ok(Statement::If(e, Box::new(s1), Box::new(s2)))
+        Ok(Statement::If(e, Box::new(s1)))
     }
 
     fn parse_if_expr(&mut self) -> ParseResult<Expression> {
@@ -374,6 +420,42 @@ where
             }
         } else {
             Err(ParseError::Eof)
+        }
+    }
+
+    fn parse_type_annotation(&mut self) -> ParseResult<Type> {
+        if tok_matches!(self, TokenType::Colon) {
+            self.consume(TokenType::Colon)?;
+            let type_expr = self.parse_primary()?;
+            match type_expr {
+                Expression::Var(v) => Ok(v.to_string().try_into().unwrap()),
+                _ => {
+                    return Err(self.error(
+                        self.prev_token.clone(),
+                        "variable declaration must be an identifier".to_string(),
+                    ))
+                }
+            }
+        } else {
+            Ok(Type::Any)
+        }
+    }
+
+    fn parse_fn_type_annotation(&mut self) -> ParseResult<Type> {
+        if tok_matches!(self, TokenType::RightArrow) {
+            self.consume(TokenType::RightArrow)?;
+            let type_expr = self.parse_primary()?;
+            match type_expr {
+                Expression::Var(v) => Ok(v.to_string().try_into().unwrap()),
+                _ => {
+                    return Err(self.error(
+                        self.prev_token.clone(),
+                        "variable declaration must be an identifier".to_string(),
+                    ))
+                }
+            }
+        } else {
+            Ok(Type::Any)
         }
     }
 

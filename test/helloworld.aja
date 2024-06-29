@@ -1,7 +1,5 @@
-fn main(): str {
-
-  let name = "greg";
-
+fn main() {
+  let name = "bro";
 }
 
 fn hello_name(name) {

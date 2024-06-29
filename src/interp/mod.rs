@@ -1,6 +1,8 @@
 use std::{collections::HashMap, error::Error, fmt::Display};
 
-use crate::ast::{Definition, Expression, Id, Literal, Op1, Op2, Program, Statement};
+use crate::ast::{
+    types::Type, Definition, Expression, Id, Literal, Op1, Op2, Program, Statement, Variable,
+};
 use color_eyre::Result;
 use ecow::EcoString;
 
@@ -9,7 +11,7 @@ pub enum Value {
     Int(i32),
     Bool(bool),
     String(String),
-    Function(Vec<Id>, Statement),
+    Function(Vec<Variable>, Statement, Type),
     Void,
 }
 
@@ -19,10 +21,17 @@ impl Display for Value {
             Value::Int(i) => write!(f, "{i}"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::String(s) => write!(f, "{s}"),
-            Value::Function(_, _) => write!(f, "<function>"),
+            Value::Function(ps, _, rt) => {
+                let fvs: Vec<String> = ps.iter().map(|v| v.t.to_string()).collect();
+                write!(f, "fn({}) -> {}", fvs.join(", "), rt)
+            }
             Value::Void => write!(f, "()"),
         }
     }
+}
+
+pub enum Callable {
+    Function { params: Vec<Id> },
 }
 
 #[derive(Debug, Clone)]
@@ -104,8 +113,6 @@ impl REnvironment {
     }
 }
 
-const BUILTINS: [&str; 1] = ["println"];
-
 pub struct Interpreter {
     pub program: Program,
     pub env: REnvironment,
@@ -125,14 +132,17 @@ impl Interpreter {
         for binding in &self.env.values {
             if binding.0 == "main" {
                 match &binding.1 {
-                    Value::Function(_, e) => {
-                        return match self.interp_stmt(e.clone()) {
-                            Ok(v) => return Ok(v),
+                    Value::Function(_, s, t) => {
+                        let rt = t.clone();
+                        let res = match self.interp_stmt(s.clone()) {
+                            Ok(v) => Ok(v),
                             Err(err) => match err {
-                                RuntimeError::Return(v) => return Ok(v),
+                                RuntimeError::Return(v) => Ok(v),
                                 _ => Err(err),
                             },
-                        }
+                        }?;
+                        Self::type_check(&res, rt)?;
+                        return Ok(res);
                     }
                     _ => unreachable!(),
                 }
@@ -147,9 +157,20 @@ impl Interpreter {
     fn defines(&mut self) -> Result<(), RuntimeError> {
         for def in &self.program.ds {
             match def {
-                Definition::Function { name, args, body } => {
-                    self.env
-                        .define(name.clone(), Value::Function(args.clone(), body.clone()))?;
+                Definition::Function {
+                    name,
+                    params,
+                    body,
+                    rtype,
+                } => {
+                    self.env.define(
+                        name.clone(),
+                        Value::Function(
+                            params.into_iter().map(|a| a.clone()).collect(),
+                            body.clone(),
+                            rtype.clone(),
+                        ),
+                    )?;
                 }
                 _ => unimplemented!(),
             }
@@ -160,22 +181,22 @@ impl Interpreter {
 
     fn interp_stmt(&mut self, stmt: Statement) -> Answer {
         match stmt {
-            Statement::Block(stmts) => {
+            Statement::Block(stmts, tail) => {
                 let prev_env = self.env.clone();
                 let mut tail_val: Value = Value::Void;
-                if let Some(tail) = stmts.last() {
-                    self.env = REnvironment::from_enclosing(prev_env.clone());
-                    for i in 0..(stmts.len() - 1) {
-                        self.interp_stmt(stmts[i].clone());
-                    }
-                    tail_val = self.interp_stmt(tail.clone())?;
+                self.env = REnvironment::from_enclosing(prev_env.clone());
+                for stmt in stmts {
+                    self.interp_stmt(stmt.clone())?;
+                }
+                if let Some(tail) = tail {
+                    tail_val = self.interp_expr(tail)?;
                 }
                 self.env = prev_env;
                 Ok(tail_val)
             }
             Statement::Expr(e) => self.interp_expr(e),
             Statement::Let { var, value } => self.interp_let(var, value),
-            Statement::If(e1, s1, s2) => self.interp_if(e1, *s1, *s2),
+            Statement::If(e1, s1) => self.interp_if(e1, *s1, None),
             Statement::Return(maybe_e) => self.interp_return(maybe_e),
         }
     }
@@ -206,19 +227,22 @@ impl Interpreter {
             .collect();
 
         match callee {
-            Value::Function(params, body) => {
+            Value::Function(params, body, rtype) => {
                 assert_eq!(args.len(), params.len(), "Number of arguments passed to function does not equal the number of parameters.");
-                params.iter().zip(args.iter()).for_each(|(name, value)| {
-                    let _ = self.env.define(name.clone(), value.clone());
+                params.iter().zip(args.iter()).for_each(|(var, value)| {
+                    Self::type_check(value, var.t.clone()).expect("Typecheck failed");
+                    let _ = self.env.define(var.name.clone(), value.clone());
                 });
 
-                match self.interp_stmt(body) {
-                    Ok(v) => return Ok(v),
+                let ret = match self.interp_stmt(body) {
+                    Ok(v) => Ok(v),
                     Err(err) => match err {
-                        RuntimeError::Return(v) => return Ok(v),
+                        RuntimeError::Return(v) => Ok(v),
                         _ => Err(err),
                     },
-                }
+                }?;
+                Self::type_check(&ret, rtype)?;
+                Ok(ret)
             }
             _ => {
                 return Err(RuntimeError::TypeError {
@@ -228,9 +252,10 @@ impl Interpreter {
         }
     }
 
-    fn interp_let(&mut self, id: Id, e: Expression) -> Answer {
+    fn interp_let(&mut self, var: Variable, e: Expression) -> Answer {
         let r = self.interp_expr(e)?;
-        self.env.define(id, r);
+        Self::type_check(&r, var.t)?;
+        self.env.define(var.name, r)?;
         Ok(Value::Void)
     }
 
@@ -364,6 +389,21 @@ impl Interpreter {
             Literal::Int(i) => Ok(Value::Int(i)),
             Literal::String(s) => Ok(Value::String(s.to_string())),
             Literal::Bool(b) => Ok(Value::Bool(b)),
+        }
+    }
+
+    fn type_check(v: &Value, t: Type) -> Result<(), RuntimeError> {
+        if matches!(t, Type::Any) {
+            return Ok(());
+        }
+
+        let other: Type = v.clone().into();
+        if other == t {
+            Ok(())
+        } else {
+            Err(RuntimeError::TypeError {
+                msg: format!("cannot cast {other} to {t}"),
+            })
         }
     }
 }

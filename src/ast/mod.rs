@@ -1,10 +1,12 @@
+use std::fmt::Display;
+
 use color_eyre::eyre::{bail, Result};
 use ecow::EcoString;
+use types::Type;
 
-use crate::{
-    parse::ParseError,
-    token::{Token, TokenType},
-};
+use crate::token::TokenType;
+
+pub(crate) mod types;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Location {
@@ -23,7 +25,35 @@ impl Location {
 pub struct Span(Location, Location);
 
 pub type Id = EcoString;
-pub type Addr = usize;
+
+#[derive(Debug, Clone)]
+pub struct Variable {
+    pub name: Id,
+    pub t: Type,
+}
+
+impl Display for Variable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.name, self.t)
+    }
+}
+
+impl Variable {
+    pub fn new(name: Id, t: Type) -> Self {
+        Self { name, t }
+    }
+
+    pub fn any(name: Id) -> Self {
+        Self {
+            name,
+            t: Default::default(),
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        format!("{}: {}", self.name, self.t)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -34,21 +64,22 @@ pub struct Program {
 pub enum Definition {
     Function {
         name: Id,
-        args: Vec<Id>,
+        params: Vec<Variable>,
         body: Statement,
+        rtype: Type,
     },
     Struct {
         name: Id,
-        fields: Vec<Id>,
+        fields: Vec<Variable>,
     },
 }
 
 #[derive(Debug, Clone)]
 pub enum Statement {
-    Block(Vec<Statement>),
+    Block(Vec<Statement>, Option<Expression>),
     Expr(Expression),
-    Let { var: Id, value: Expression },
-    If(Expression, Box<Statement>, Box<Option<Statement>>),
+    Let { var: Variable, value: Expression },
+    If(Expression, Box<Statement>),
     Return(Option<Expression>),
 }
 
@@ -63,20 +94,6 @@ pub enum Expression {
     Var(Id),
     Call(Box<Expression>, Vec<Expression>),
     Assign(Id, Box<Expression>),
-}
-
-#[derive(Debug, Clone)]
-pub enum IExpression {
-    Eof,
-    Empty,
-    Literal(Literal),
-    BinOp(Box<IExpression>, Op2, Box<IExpression>),
-    Unary(Op1, Box<IExpression>),
-    Grouping(Box<IExpression>),
-    If(Box<IExpression>, Box<IExpression>, Box<IExpression>),
-    Let(Box<IExpression>, Box<IExpression>),
-    Var(Addr),
-    Call(Id, Vec<IExpression>),
 }
 
 #[derive(Debug, Clone)]
