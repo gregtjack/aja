@@ -2,8 +2,6 @@ use std::fmt::Display;
 
 use color_eyre::eyre::bail;
 
-use crate::interp::{Callable, Value};
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Any,
@@ -11,8 +9,11 @@ pub enum Type {
     Float,
     Bool,
     String,
-    Fn { arity: usize, rtype: Box<Type> },
-    Vec(Box<Type>),
+    Fn {
+        param_types: Vec<Type>,
+        ret_type: Box<Type>,
+    },
+    List(Box<Type>),
     Void,
 }
 
@@ -30,8 +31,22 @@ impl Display for Type {
             Type::Float => write!(f, "float"),
             Type::Bool => write!(f, "bool"),
             Type::String => write!(f, "str"),
-            Type::Fn { arity, rtype } => write!(f, "Fn<{}>:{}", rtype, arity),
-            Type::Vec(t) => write!(f, "vec[{}]", t),
+            Type::Fn {
+                param_types,
+                ret_type,
+            } => {
+                write!(
+                    f,
+                    "fn<{}> -> {}",
+                    param_types
+                        .iter()
+                        .map(|t| format!("{}", t))
+                        .collect::<Vec<String>>()
+                        .join(", "),
+                    ret_type
+                )
+            }
+            Type::List(t) => write!(f, "List<{}>", t),
             Type::Void => write!(f, "void"),
         }
     }
@@ -49,24 +64,6 @@ impl TryFrom<String> for Type {
             "void" => Ok(Self::Void),
             "any" => Ok(Self::Any),
             _ => bail!("'{value}' is not a valid type"),
-        }
-    }
-}
-
-impl From<Value> for Type {
-    fn from(value: Value) -> Self {
-        match value {
-            Value::Int(_) => Self::Int,
-            Value::Bool(_) => Self::Bool,
-            Value::String(_) => Self::String,
-            Value::Callable(c) => match c {
-                Callable::Function(ps, _, t) => Self::Fn {
-                    arity: ps.len(),
-                    rtype: Box::new(t),
-                },
-                Callable::Builtin(_) => Self::Void,
-            },
-            Value::Void => Self::Void,
         }
     }
 }

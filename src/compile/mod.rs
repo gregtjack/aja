@@ -2,8 +2,7 @@ mod llvm;
 mod qbe;
 
 pub enum Target {
-    Llvm,
-    // TODO: QBE
+    QBE,
 }
 
 pub trait Generator {

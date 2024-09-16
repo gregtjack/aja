@@ -95,11 +95,12 @@ pub enum Expression {
     Var(Id),
     Call(Box<Expression>, Vec<Expression>),
     Assign(Id, Box<Expression>),
+    Closure(Vec<Variable>, Type, Box<Statement>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Literal {
-    Int(i32),
+    Int(i64),
     Bool(bool),
     String(EcoString),
 }

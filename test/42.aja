@@ -1,11 +1,10 @@
-fn main(): any {
-  let i = 0;
-  while i < 100 {
-    i = plus(i, 1);
-    println("iteration", i);
+fn main() {
+  print("while loop test:");
+  
+  let num = 1;
+  while (num < 100) {
+    print(num);
+    sleep(100);
+    num = num + 1;
   }
-}
-
-fn plus(a, b): int {
-  a + b
 }

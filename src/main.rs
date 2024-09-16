@@ -33,6 +33,7 @@ fn main() -> Result<()> {
     let cli = <AjaCli as clap::Parser>::parse();
 
     let script = read_to_string(cli.file.expect("should have been given a source file"))?;
+
     let lexer = Lexer::new(script.chars());
     let mut parser = Parser::new(lexer);
     let ast = match parser.parse() {

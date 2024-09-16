@@ -45,6 +45,10 @@ impl fmt::Display for ParseError {
 
 type ParseResult<T> = Result<T, ParseError>;
 
+/// A hand-written recursive descent parser for Aja.
+///
+/// Designed to wrap the lexer implementation which
+/// implements `Iterator<Token>`.
 pub struct Parser<T: Iterator<Item = Token>> {
     tokens: Peekable<T>,
     prev_token: Option<Token>,
@@ -90,8 +94,8 @@ where
             _ => unreachable!(),
         };
 
-        let params = self.parse_fn_params()?;
-        let rtype = self.parse_type_annotation()?;
+        let params = self.parse_fn_params(false)?;
+        let rtype = self.parse_fn_return_type_annotation()?;
         let body = self.parse_block()?;
 
         Ok(Definition::Function {
@@ -102,9 +106,15 @@ where
         })
     }
 
-    fn parse_fn_params(&mut self) -> ParseResult<Vec<Variable>> {
+    fn parse_fn_params(&mut self, closure: bool) -> ParseResult<Vec<Variable>> {
         let mut xs = Vec::new();
-        self.consume(TokenType::LeftParen)?;
+
+        if closure {
+            self.consume(TokenType::Pipe)?;
+        } else {
+            self.consume(TokenType::LeftParen)?;
+        }
+
         if !tok_matches!(self, TokenType::RightParen) {
             loop {
                 let e = self.parse_primary()?;
@@ -114,7 +124,7 @@ where
                     _ => {
                         return Err(self.error(
                             self.prev_token.clone(),
-                            "Function parameter must be variable".to_string(),
+                            "Function parameter must be an identifier".to_string(),
                         ))
                     }
                 };
@@ -126,10 +136,17 @@ where
                 }
             }
         }
-        self.consume(TokenType::RightParen)?;
+
+        if closure {
+            self.consume(TokenType::Pipe)?;
+        } else {
+            self.consume(TokenType::RightParen)?;
+        }
+
         Ok(xs)
     }
 
+    /// Parse a statement
     fn parse_stmt(&mut self) -> ParseResult<Statement> {
         let Some(tok) = self.peek() else {
             return Err(ParseError::Eof);
@@ -146,11 +163,13 @@ where
         }
     }
 
+    /// Parse a statement-form expression
     fn parse_stmt_expr(&mut self) -> ParseResult<Statement> {
         let e = self.parse_expr()?;
         Ok(Statement::Expr(e))
     }
 
+    /// Parse an expression
     fn parse_expr(&mut self) -> ParseResult<Expression> {
         let Some(tok) = self.peek() else {
             return Err(ParseError::Eof);
@@ -172,7 +191,7 @@ where
     ) -> ParseResult<Vec<Expression>> {
         let mut xs = Vec::new();
         self.consume(open.clone())?;
-        if !tok_matches!(self, TokenType::RightParen) {
+        if !self.matches(vec![open]) {
             loop {
                 let e = self.parse_expr()?;
                 xs.push(e);
@@ -394,12 +413,12 @@ where
                 TokenType::RightParen,
             )?;
 
-            // if es.len() <= 255 {
-            //     self.error(
-            //         self.peek().cloned(),
-            //         "Number of arguments exceeds 255".to_string(),
-            //     );
-            // }
+            if es.len() <= 255 {
+                self.error(
+                    self.peek().cloned(),
+                    "Number of arguments exceeds 255".to_string(),
+                );
+            }
 
             expr = Expression::Call(Box::new(expr), es);
         }
@@ -408,27 +427,46 @@ where
     }
 
     fn parse_primary(&mut self) -> ParseResult<Expression> {
-        if let Some(next_tok) = self.next() {
-            match next_tok.1 {
+        let next = self.peek().cloned();
+        if let Some(next_tok) = next {
+            match &next_tok.1 {
                 TokenType::Literal(token::Literal::True) => {
+                    self.next();
                     Ok(Expression::Literal(Literal::Bool(true)))
                 }
                 TokenType::Literal(token::Literal::False) => {
+                    self.next();
                     Ok(Expression::Literal(Literal::Bool(false)))
                 }
                 TokenType::Literal(token::Literal::Int(i)) => {
-                    Ok(Expression::Literal(Literal::Int(i)))
+                    self.next();
+                    Ok(Expression::Literal(Literal::Int(*i)))
                 }
                 TokenType::Literal(token::Literal::String(s)) => {
-                    Ok(Expression::Literal(Literal::String(s)))
+                    self.next();
+                    Ok(Expression::Literal(Literal::String(s.clone())))
                 }
-                TokenType::Ident(var) => Ok(Expression::Var(var)),
+                TokenType::Ident(var) => {
+                    self.next();
+                    Ok(Expression::Var(var.clone()))
+                }
                 TokenType::LeftParen => {
+                    self.next();
                     let expr = self.parse_expr()?;
                     self.consume(TokenType::RightParen)?;
                     Ok(Expression::Grouping(Box::new(expr)))
                 }
-                _ => Err(self.error(Some(next_tok), "unimplemented primary token".to_string())),
+                TokenType::Pipe => {
+                    let params = self.parse_fn_params(true)?;
+                    let rt = self.parse_type_annotation()?;
+                    self.consume(TokenType::FatArrow)?;
+                    let body = Box::new(self.parse_stmt()?);
+                    Ok(Expression::Closure(params, rt, body))
+                }
+                _ => Err(self.error(
+                    Some(next_tok.clone()),
+                    "unimplemented primary token".to_string(),
+                )),
             }
         } else {
             Err(ParseError::Eof)
@@ -438,6 +476,19 @@ where
     fn parse_type_annotation(&mut self) -> ParseResult<Type> {
         if tok_matches!(self, TokenType::Colon) {
             self.consume(TokenType::Colon)?;
+            let type_expr = self.parse_primary()?;
+            match type_expr {
+                Expression::Var(v) => Ok(v.to_string().try_into().unwrap()),
+                _ => return Err(self.error(self.prev_token.clone(), "type must be ".to_string())),
+            }
+        } else {
+            Ok(Type::Any)
+        }
+    }
+
+    fn parse_fn_return_type_annotation(&mut self) -> ParseResult<Type> {
+        if tok_matches!(self, TokenType::RightArrow) {
+            self.consume(TokenType::RightArrow)?;
             let type_expr = self.parse_primary()?;
             match type_expr {
                 Expression::Var(v) => Ok(v.to_string().try_into().unwrap()),

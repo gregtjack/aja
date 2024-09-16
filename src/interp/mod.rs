@@ -1,4 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, error::Error, fmt::Display, rc::Rc};
+use core::time;
+use std::{
+    error::Error,
+    fmt::Display,
+    sync::{Arc, Mutex},
+    thread::sleep,
+    time::Duration,
+};
 
 use crate::ast::{
     types::Type, Definition, Expression, Id, Literal, Op1, Op2, Program, Statement, Variable,
@@ -6,41 +13,10 @@ use crate::ast::{
 use color_eyre::Result;
 use ecow::EcoString;
 use env::REnvironment;
+use value::{Function, Value};
 
 mod env;
-
-#[derive(Debug, Clone)]
-pub enum Value {
-    Int(i32),
-    Bool(bool),
-    String(String),
-    Callable(Callable),
-    Void,
-}
-
-impl Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Int(i) => write!(f, "{i}"),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::String(s) => write!(f, "{s}"),
-            Value::Callable(c) => match c {
-                Callable::Function(ps, _, rt) => {
-                    let fvs: Vec<String> = ps.iter().map(|v| v.t.to_string()).collect();
-                    write!(f, "fn({}) -> {}", fvs.join(", "), rt)
-                }
-                Callable::Builtin(_) => write!(f, "<native fn>"),
-            },
-            Value::Void => write!(f, "()"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum Callable {
-    Function(Vec<Variable>, Statement, Type),
-    Builtin(Id),
-}
+pub mod value;
 
 #[derive(Debug, Clone)]
 pub enum RuntimeError {
@@ -69,34 +45,33 @@ type Answer = Result<Value, RuntimeError>;
 
 pub struct Interpreter {
     pub program: Program,
-    pub env: Rc<RefCell<REnvironment>>,
+    pub env: Arc<Mutex<REnvironment>>,
 }
 
 impl Interpreter {
     pub fn new(prog: Program) -> Self {
         Interpreter {
             program: prog,
-            env: Rc::new(RefCell::new(REnvironment::new())),
+            env: Arc::new(Mutex::new(REnvironment::new())),
         }
     }
 
     pub fn run(mut self) -> Answer {
         self.defines()?;
-        let bs = self.env.borrow().values.clone();
+        let bs = self.env.lock().unwrap().values.clone();
         for binding in &bs {
             if binding.0 == "main" {
                 match &binding.1 {
-                    Value::Callable(c) => match c {
-                        Callable::Function(_, s, t) => {
-                            let rt = t.clone();
-                            let res = match self.interp_stmt(s.clone()) {
+                    Value::Fn(c) => match c {
+                        Function { body, ret_type, .. } => {
+                            let res = match self.interp_stmt(body.clone()) {
                                 Ok(v) => Ok(v),
                                 Err(err) => match err {
                                     RuntimeError::Return(v) => Ok(v),
                                     _ => Err(err),
                                 },
                             }?;
-                            Self::type_check(&res, rt)?;
+                            Self::type_check(&res, ret_type.clone())?;
                             return Ok(res);
                         }
                         _ => unreachable!(),
@@ -112,7 +87,9 @@ impl Interpreter {
     }
 
     fn defines(&mut self) -> Result<(), RuntimeError> {
-        self.define_builtin("println".into())?;
+        self.define_builtin("print".into())?;
+        self.define_builtin("clock".into())?;
+        self.define_builtin("sleep".into())?;
 
         for def in &self.program.ds {
             match def {
@@ -122,13 +99,14 @@ impl Interpreter {
                     body,
                     rtype,
                 } => {
-                    self.env.borrow_mut().define(
+                    self.env.lock().unwrap().define(
                         name.clone(),
-                        Value::Callable(Callable::Function(
-                            params.into_iter().map(|a| a.clone()).collect(),
-                            body.clone(),
-                            rtype.clone(),
-                        )),
+                        Value::Fn(Function {
+                            params: params.to_vec(),
+                            body: body.clone(),
+                            ret_type: rtype.clone(),
+                            env: self.env.clone(),
+                        }),
                     )?;
                 }
                 _ => unimplemented!(),
@@ -140,8 +118,9 @@ impl Interpreter {
 
     fn define_builtin(&mut self, name: Id) -> Result<(), RuntimeError> {
         self.env
-            .borrow_mut()
-            .define(name.clone(), Value::Callable(Callable::Builtin(name)))
+            .lock()
+            .unwrap()
+            .define(name.clone(), Value::NativeFn(name))
     }
 
     fn interp_stmt(&mut self, stmt: Statement) -> Answer {
@@ -149,7 +128,7 @@ impl Interpreter {
             Statement::Block(stmts, tail) => {
                 let prev = self.env.clone();
                 let mut tail_val: Value = Value::Void;
-                self.env = Rc::new(RefCell::new(REnvironment::from_enclosing(prev.clone())));
+                self.env = Arc::new(Mutex::new(REnvironment::from_enclosing(prev.clone())));
                 for stmt in stmts {
                     self.interp_stmt(stmt.clone())?;
                 }
@@ -173,14 +152,20 @@ impl Interpreter {
             Expression::Unary(op, e1) => self.interp_unary(op, *e1),
             Expression::BinOp(e1, op, e2) => self.interp_binop(*e1, op, *e2),
             Expression::Grouping(e) => self.interp_expr(*e),
-            Expression::If(e1, e2, e3) => self.interp_if(*e1, *e2, Some(*e3)),
-            Expression::Var(id) => self.env.borrow().get(id),
+            Expression::If(e1, s1, s2) => self.interp_if(*e1, *s1, Some(*s2)),
+            Expression::Var(id) => self.env.lock().unwrap().get(id),
             Expression::Call(callee, args) => self.interp_call(*callee, args),
             Expression::Assign(lhs, rhs) => {
                 let value = self.interp_expr(*rhs)?;
-                self.env.borrow_mut().assign(lhs, value)
+                self.env.lock().unwrap().assign(lhs, value)
             }
             Expression::Empty => Ok(Value::Void),
+            Expression::Closure(ps, ret_type, stmt) => Ok(Value::Fn(Function {
+                params: ps,
+                body: *stmt,
+                ret_type,
+                env: self.env.clone(),
+            })),
         };
         ans
     }
@@ -194,14 +179,24 @@ impl Interpreter {
             .collect();
 
         match callee {
-            Value::Callable(c) => match c {
-                Callable::Function(params, body, rtype) => {
+            Value::Fn(c) => match c {
+                Function {
+                    params,
+                    body,
+                    ret_type,
+                    env,
+                } => {
                     assert_eq!(args.len(), params.len(), "Number of arguments passed to function does not equal the number of parameters.");
+
+                    let prev_env = self.env.clone();
+                    self.env = env;
+
                     params.iter().zip(args.iter()).for_each(|(var, value)| {
                         Self::type_check(value, var.t.clone()).expect("Typecheck failed");
                         let _ = self
                             .env
-                            .borrow_mut()
+                            .lock()
+                            .unwrap()
                             .define(var.name.clone(), value.clone());
                     });
 
@@ -212,10 +207,33 @@ impl Interpreter {
                             _ => Err(err),
                         },
                     }?;
-                    Self::type_check(&ret, rtype)?;
+                    Self::type_check(&ret, ret_type)?;
+                    self.env = prev_env;
                     Ok(ret)
                 }
-                Callable::Builtin(name) => run_builtin(name, args),
+            },
+            Value::NativeFn(name) => match name.as_str() {
+                "print" => {
+                    println!(
+                        "{}",
+                        args.into_iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<String>>()
+                            .join(" ")
+                    );
+                    Ok(Value::Void)
+                }
+                "sleep" => {
+                    if let Value::Int(i) = args[0] {
+                        sleep(Duration::from_millis(i.try_into().unwrap()));
+                        return Ok(Value::Void);
+                    }
+
+                    Err(RuntimeError::Adhoc(
+                        "invalid arguments for sleep()".to_string(),
+                    ))
+                }
+                _ => Err(RuntimeError::Adhoc("unknown builtin function".to_string())),
             },
             _ => {
                 return Err(RuntimeError::TypeError {
@@ -228,7 +246,7 @@ impl Interpreter {
     fn interp_let(&mut self, var: Variable, e: Expression) -> Answer {
         let r = self.interp_expr(e)?;
         Self::type_check(&r, var.t)?;
-        self.env.borrow_mut().define(var.name, r)?;
+        self.env.lock().unwrap().define(var.name, r)?;
         Ok(Value::Void)
     }
 
@@ -385,7 +403,7 @@ impl Interpreter {
             return Ok(());
         }
 
-        let other: Type = v.clone().into();
+        let other: Type = v.clone().to_type();
         if other == t {
             Ok(())
         } else {
@@ -393,16 +411,5 @@ impl Interpreter {
                 msg: format!("cannot cast {other} to {t}"),
             })
         }
-    }
-}
-
-fn run_builtin(name: Id, args: Vec<Value>) -> Answer {
-    match name.as_str() {
-        "println" => {
-            let sargs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            println!("{}", sargs.join(" "));
-            Ok(Value::Void)
-        }
-        _ => unreachable!(),
     }
 }
