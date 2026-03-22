@@ -36,7 +36,6 @@
               rust-analyzer
               pkg-config
               just
-              
               eza
               fd
               openssl.dev

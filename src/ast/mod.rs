@@ -1,10 +1,9 @@
-use std::fmt::Display;
-
 use color_eyre::eyre::{bail, Result};
 use ecow::EcoString;
+use std::fmt::Display;
 use types::Type;
 
-use crate::token::TokenType;
+use crate::token::Token;
 
 pub(crate) mod types;
 
@@ -57,7 +56,7 @@ impl Variable {
 
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub ds: Vec<Definition>,
+    pub definitions: Vec<Definition>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,10 +85,13 @@ pub enum Statement {
 
 #[derive(Debug, Clone)]
 pub enum Expression {
-    Empty,
-    Literal(Literal),
-    BinOp(Box<Expression>, Op2, Box<Expression>),
+    Int(i32),
+    Float(f32),
+    String(EcoString),
+    True,
+    False,
     Unary(Op1, Box<Expression>),
+    BinOp(Box<Expression>, Op2, Box<Expression>),
     Grouping(Box<Expression>),
     If(Box<Expression>, Box<Statement>, Box<Statement>),
     Var(Id),
@@ -99,25 +101,17 @@ pub enum Expression {
 }
 
 #[derive(Debug, Clone)]
-pub enum Literal {
-    Int(i64),
-    Bool(bool),
-    String(EcoString),
-}
-
-/// Unary operation
-#[derive(Debug, Clone)]
 pub enum Op1 {
-    Not,    // !
-    Negate, // -
+    Not,
+    Negate,
 }
 
-impl TryFrom<TokenType> for Op1 {
+impl TryFrom<Token> for Op1 {
     type Error = color_eyre::eyre::Error;
-    fn try_from(value: TokenType) -> Result<Self, Self::Error> {
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
         match value {
-            TokenType::Bang => Ok(Self::Not),
-            TokenType::Minus => Ok(Self::Negate),
+            Token::Bang => Ok(Self::Not),
+            Token::Minus => Ok(Self::Negate),
             _ => bail!("Token {:?} is not a valid op1", value),
         }
     }
@@ -141,20 +135,22 @@ pub enum Op2 {
     Or,
 }
 
-impl TryFrom<TokenType> for Op2 {
+impl TryFrom<Token> for Op2 {
     type Error = color_eyre::eyre::Error;
-    fn try_from(value: TokenType) -> Result<Self, Self::Error> {
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
         match value {
-            TokenType::Minus => Ok(Self::Subtraction),
-            TokenType::Plus => Ok(Self::Addition),
-            TokenType::Mult => Ok(Self::Multiplication),
-            TokenType::Div => Ok(Self::Division),
-            TokenType::EqualEqual => Ok(Self::Equal),
-            TokenType::BangEqual => Ok(Self::NotEqual),
-            TokenType::GreaterThan => Ok(Self::GreaterThan),
-            TokenType::GreaterEqual => Ok(Self::GreaterEqual),
-            TokenType::LessThan => Ok(Self::LessThan),
-            TokenType::LessEqual => Ok(Self::LessEqual),
+            Token::Minus => Ok(Self::Subtraction),
+            Token::Plus => Ok(Self::Addition),
+            Token::Mult => Ok(Self::Multiplication),
+            Token::Div => Ok(Self::Division),
+            Token::EqualEqual => Ok(Self::Equal),
+            Token::BangEqual => Ok(Self::NotEqual),
+            Token::GreaterThan => Ok(Self::GreaterThan),
+            Token::GreaterEqual => Ok(Self::GreaterEqual),
+            Token::LessThan => Ok(Self::LessThan),
+            Token::LessEqual => Ok(Self::LessEqual),
+            Token::And => Ok(Self::And),
+            Token::Or => Ok(Self::Or),
             _ => bail!("Token {:?} is not a valid op2", value),
         }
     }

@@ -1,0 +1,7 @@
+fn main() -> bool {
+    // This should cause the program to stop
+    assert(false);
+    
+    // This line should never be reached
+    return true;
+}

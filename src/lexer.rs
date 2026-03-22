@@ -1,4 +1,4 @@
-use crate::token::{Keyword, Literal, Token, TokenType};
+use crate::token::Token;
 use core::panic;
 use ecow::EcoString;
 use std::{fmt, iter::Peekable};
@@ -26,11 +26,16 @@ impl LexicalError {
 
 impl fmt::Display for LexicalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[line {}:{}]: {}", self.line, self.col, self.message)
+        write!(
+            f,
+            "SyntaxError: [line {}:{}] {}",
+            self.line, self.col, self.message
+        )
     }
 }
 
-type LexResult<T> = Result<T, LexicalError>;
+pub type SrcSpan = (Location, Token, Location);
+pub type LexResult = Result<SrcSpan, LexicalError>;
 
 pub struct Lexer<T>
 where
@@ -58,46 +63,59 @@ where
     }
 
     /// Process one token.
-    pub fn token(&mut self) -> LexResult<Token> {
-        // represents the start of a token
+    pub fn token(&mut self) -> LexResult {
         let start = self.get_location();
         while let Some(c) = self.inner_next() {
             match c {
-                '(' => return Ok(Token(start, TokenType::LeftParen, self.get_location())),
-                ')' => return Ok(Token(start, TokenType::RightParen, self.get_location())),
-                '{' => return Ok(Token(start, TokenType::LeftBrace, self.get_location())),
-                '}' => return Ok(Token(start, TokenType::RightBrace, self.get_location())),
-                '[' => return Ok(Token(start, TokenType::LeftBracket, self.get_location())),
-                ']' => return Ok(Token(start, TokenType::RightBracket, self.get_location())),
-                '|' => return Ok(Token(start, TokenType::Pipe, self.get_location())),
-                ',' => return Ok(Token(start, TokenType::Comma, self.get_location())),
-                '.' => return Ok(Token(start, TokenType::Dot, self.get_location())),
-                ':' => {
-                    if self.match_advance(':') {
-                        return Ok(Token(start, TokenType::DoubleColon, self.get_location()));
+                '0'..='9' => {
+                    return self.tok_number(c, start, false);
+                }
+                'a'..='z' | 'A'..='Z' | '_' => {
+                    return self.tok_keyword_or_ident(c, start);
+                }
+                // ignore whitespace
+                ' ' | '\t' | '\r' => {}
+                '\n' => self.advance_line(),
+                '(' => return Ok((start, Token::LeftParen, self.get_location())),
+                ')' => return Ok((start, Token::RightParen, self.get_location())),
+                '{' => return Ok((start, Token::LeftBrace, self.get_location())),
+                '}' => return Ok((start, Token::RightBrace, self.get_location())),
+                '[' => return Ok((start, Token::LeftBracket, self.get_location())),
+                ']' => return Ok((start, Token::RightBracket, self.get_location())),
+                '|' => {
+                    if self.match_advance('|') {
+                        return Ok((start, Token::Or, self.get_location()));
                     } else {
-                        return Ok(Token(start, TokenType::Colon, self.get_location()));
+                        return Ok((start, Token::Pipe, self.get_location()));
                     }
                 }
-                ';' => return Ok(Token(start, TokenType::Semicolon, self.get_location())),
+                ',' => return Ok((start, Token::Comma, self.get_location())),
+                '.' => return Ok((start, Token::Dot, self.get_location())),
+                ':' => {
+                    if self.match_advance(':') {
+                        return Ok((start, Token::DoubleColon, self.get_location()));
+                    } else {
+                        return Ok((start, Token::Colon, self.get_location()));
+                    }
+                }
+                ';' => return Ok((start, Token::Semicolon, self.get_location())),
                 '"' => {
                     let tok = self.tok_str(start)?;
                     return Ok(tok);
                 }
-                '+' => return Ok(Token(start, TokenType::Plus, self.get_location())),
+                '+' => return Ok((start, Token::Plus, self.get_location())),
                 '-' => {
                     if self.match_number() {
                         let c = self.inner_next().unwrap();
-                        let num = self.tok_number(c, start, true);
-                        return Ok(num);
+                        return self.tok_number(c, start, true);
                     } else if self.match_advance('>') {
-                        return Ok(Token(start, TokenType::RightArrow, self.get_location()));
+                        return Ok((start, Token::RightArrow, self.get_location()));
                     } else {
-                        return Ok(Token(start, TokenType::Minus, self.get_location()));
+                        return Ok((start, Token::Minus, self.get_location()));
                     }
                 }
-                '*' => return Ok(Token(start, TokenType::Mult, self.get_location())),
-                '!' | '=' | '>' | '<' => {
+                '*' => return Ok((start, Token::Mult, self.get_location())),
+                '!' | '=' | '>' | '<' | '&' => {
                     let op = self.tok_op(c, start)?;
                     return Ok(op);
                 }
@@ -105,21 +123,10 @@ where
                     if self.match_advance('/') {
                         self.tok_comment();
                     } else {
-                        return Ok(Token(start, TokenType::Div, self.get_location()));
+                        return Ok((start, Token::Div, self.get_location()));
                     }
                 }
-                '%' => return Ok(Token(start, TokenType::Modulo, self.get_location())),
-                '0'..='9' => {
-                    let num = self.tok_number(c, start, false);
-                    return Ok(num);
-                }
-                '_' | 'a'..='z' | 'A'..='Z' => {
-                    let res = self.tok_keyword_or_ident(c, start);
-                    return Ok(res);
-                }
-                // ignore whitespace
-                ' ' | '\t' | '\r' => {}
-                '\n' => self.advance_line(),
+                '%' => return Ok((start, Token::Modulo, self.get_location())),
                 _ => {
                     return Err(LexicalError::new(
                         self.get_location().line,
@@ -131,7 +138,7 @@ where
         }
 
         self.eof = true;
-        Ok(Token(start, TokenType::Eof, self.get_location()))
+        Ok((start, Token::Eof, self.get_location()))
     }
 
     /// Advance the iterator
@@ -192,55 +199,95 @@ where
         }
     }
 
-    fn tok_op(&mut self, c: char, start: Location) -> LexResult<Token> {
+    /// Tokenize
+    fn tok_op(&mut self, c: char, start: Location) -> LexResult {
         match c {
             '!' => {
                 if self.match_advance('=') {
-                    Ok(Token(start, TokenType::BangEqual, self.get_location()))
+                    Ok((start, Token::BangEqual, self.get_location()))
                 } else {
-                    Ok(Token(start, TokenType::Bang, self.get_location()))
+                    Ok((start, Token::Bang, self.get_location()))
                 }
             }
             '=' => {
                 if self.match_advance('=') {
-                    Ok(Token(start, TokenType::EqualEqual, self.get_location()))
+                    Ok((start, Token::EqualEqual, self.get_location()))
+                } else if self.match_advance('>') {
+                    Ok((start, Token::FatArrow, self.get_location()))
                 } else {
-                    Ok(Token(start, TokenType::Equal, self.get_location()))
+                    Ok((start, Token::Equal, self.get_location()))
                 }
             }
             '>' => {
                 if self.match_advance('=') {
-                    Ok(Token(start, TokenType::GreaterEqual, self.get_location()))
+                    Ok((start, Token::GreaterEqual, self.get_location()))
                 } else {
-                    Ok(Token(start, TokenType::GreaterThan, self.get_location()))
+                    Ok((start, Token::GreaterThan, self.get_location()))
                 }
             }
             '<' => {
                 if self.match_advance('=') {
-                    Ok(Token(start, TokenType::LessEqual, self.get_location()))
+                    Ok((start, Token::LessEqual, self.get_location()))
                 } else if self.match_advance('-') {
-                    Ok(Token(start, TokenType::LeftArrow, self.get_location()))
+                    Ok((start, Token::LeftArrow, self.get_location()))
                 } else {
-                    Ok(Token(start, TokenType::LessThan, self.get_location()))
+                    Ok((start, Token::LessThan, self.get_location()))
                 }
             }
-            _ => {
-                Err(LexicalError::new(self.line, self.col, "Invalid delimiter".to_string()).into())
+            '&' => {
+                if self.match_advance('&') {
+                    Ok((start, Token::And, self.get_location()))
+                } else {
+                    Err(LexicalError::new(
+                        self.line,
+                        self.col,
+                        "Invalid operator: '&'. Expected '&&'".to_string(),
+                    ))
+                }
             }
+            _ => Err(LexicalError::new(self.line, self.col, "Invalid operator".to_string()).into()),
         }
     }
 
-    fn tok_str(&mut self, start: Location) -> LexResult<Token> {
+    fn tok_str(&mut self, start: Location) -> LexResult {
         let mut literal = EcoString::new();
         while let Some(&c) = self.inner_peek() {
             match c {
                 '"' => {
                     self.inner_next();
-                    return Ok(Token(
-                        start,
-                        TokenType::Literal(Literal::String(literal)),
-                        self.get_location(),
-                    ));
+                    return Ok((start, Token::String(literal), self.get_location()));
+                }
+                '\\' => {
+                    self.inner_next();
+                    if let Some(&c) = self.inner_peek() {
+                        match c {
+                            // new line
+                            'n' => {
+                                self.inner_next();
+                                literal.push('\n')
+                            }
+                            // horizontal tab
+                            't' => {
+                                self.inner_next();
+                                literal.push('\t')
+                            }
+                            // carriage return
+                            'r' => {
+                                self.inner_next();
+                                literal.push('\r')
+                            }
+                            '\\' => {
+                                self.inner_next();
+                                literal.push('\\')
+                            }
+                            _ => {
+                                self.warn("Invalid escape sequence".to_string());
+                                self.inner_next();
+                                literal.push('\\');
+                                literal.push(c)
+                            }
+                        }
+                    }
                 }
                 '\n' => {
                     self.inner_next();
@@ -261,36 +308,52 @@ where
         ))
     }
 
-    fn tok_number(&mut self, c: char, start: Location, negative: bool) -> Token {
-        // let mut number = c
-        //     .to_string()
-        //     .parse::<i32>()
-        //     .expect("The caller should have passed a digit");
-        // while let Some(Ok(digit)) = self.inner_peek().map(|c| c.to_string().parse::<i64>()) {
-        //     number = number * 10 + digit;
-        //     self.inner_next();
-        // }
+    fn tok_number(&mut self, c: char, start: Location, negative: bool) -> LexResult {
+        let mut is_float = false;
         let mut num_str = String::new();
         num_str.push(c);
 
-        while let Some(c) = self.inner_peek() {}
+        while let Some(c) = self.inner_peek() {
+            match c {
+                '0'..='9' => {
+                    num_str.push(*c);
+                    self.inner_next();
+                }
+                '.' => {
+                    num_str.push(*c);
+                    is_float = true;
+                    self.inner_next();
+                }
+                '_' => {
+                    self.inner_next();
+                }
+                _ => break,
+            }
+        }
 
-        if negative {
-            Token(
+        let sign: i8 = if negative { -1 } else { 1 };
+        if is_float {
+            let num = num_str
+                .parse::<f32>()
+                .expect("Number should have been a 32-bit float");
+            Ok((
                 start,
-                TokenType::Literal(Literal::Int(-number)),
+                Token::Float(f32::from(sign) * num),
                 self.get_location(),
-            )
+            ))
         } else {
-            Token(
+            let num = num_str
+                .parse::<i32>()
+                .expect("Number should have been a 32-bit integer");
+            Ok((
                 start,
-                TokenType::Literal(Literal::Int(number)),
+                Token::Int(i32::from(sign) * num),
                 self.get_location(),
-            )
+            ))
         }
     }
 
-    fn tok_keyword_or_ident(&mut self, c: char, start: Location) -> Token {
+    fn tok_keyword_or_ident(&mut self, c: char, start: Location) -> LexResult {
         let mut raw = String::new();
         raw.push(c);
         while let Some(&c) = self.inner_peek() {
@@ -304,32 +367,32 @@ where
         }
 
         let keyword = match raw.as_str() {
-            "let" => Some(TokenType::Keyword(Keyword::Let)),
-            "in" => Some(TokenType::Keyword(Keyword::In)),
-            "var" => Some(TokenType::Keyword(Keyword::Var)),
-            "fn" => Some(TokenType::Keyword(Keyword::Fn)),
-            "if" => Some(TokenType::Keyword(Keyword::If)),
-            "while" => Some(TokenType::Keyword(Keyword::While)),
-            "else" => Some(TokenType::Keyword(Keyword::Else)),
-            "match" => Some(TokenType::Keyword(Keyword::Match)),
-            "return" => Some(TokenType::Keyword(Keyword::Return)),
-            "true" => Some(TokenType::Literal(Literal::True)),
-            "false" => Some(TokenType::Literal(Literal::False)),
+            "let" => Some(Token::Let),
+            "fn" => Some(Token::Fn),
+            "if" => Some(Token::If),
+            "while" => Some(Token::While),
+            "else" => Some(Token::Else),
+            "match" => Some(Token::Match),
+            "return" => Some(Token::Return),
             _ => None,
         };
 
         if let Some(kw) = keyword {
-            Token(start, kw, self.get_location())
+            Ok((start, kw, self.get_location()))
         } else {
-            Token(start, TokenType::Ident(raw.into()), self.get_location())
+            Ok((start, Token::Ident(raw.into()), self.get_location()))
         }
+    }
+
+    fn warn(&self, msg: String) {
+        println!("Syntax warning [line {}:{}]: {}", self.line, self.col, msg)
     }
 }
 impl<T> Iterator for Lexer<T>
 where
     T: Iterator<Item = char>,
 {
-    type Item = Token;
+    type Item = SrcSpan;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.eof {
@@ -337,11 +400,8 @@ where
         }
 
         match self.token() {
-            Ok(t) => {
-                tracing::trace!("token: {:?}", t);
-                Some(t)
-            }
-            Err(e) => panic!("{e}"),
+            Ok(t) => return Some(t),
+            Err(e) => panic!("{}", e),
         }
     }
 }

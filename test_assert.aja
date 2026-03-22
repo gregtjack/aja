@@ -1,0 +1,13 @@
+fn main() -> int {
+    // Test successful assertion
+    assert(true);
+    // Test assertion with logical operators
+    let a: bool = true;
+    let b: bool = false;
+    assert(a);
+    assert(a || b);
+    assert(b && true);
+    
+    // This should not error
+    0
+}

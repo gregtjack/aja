@@ -7,25 +7,25 @@ use crate::ast::Id;
 
 use super::{Answer, RuntimeError, Value};
 
-/// Run environment
+/// Runtime environment
 #[derive(Debug, Clone)]
-pub struct REnvironment {
+pub struct RuntimeEnv {
     pub values: HashMap<Id, Value>,
-    pub enclosing: Option<Arc<Mutex<REnvironment>>>,
+    pub enclosing: Option<Arc<Mutex<RuntimeEnv>>>,
 }
 
-impl REnvironment {
+impl RuntimeEnv {
     /// Create a new blank run environment
     pub fn new() -> Self {
-        REnvironment {
+        RuntimeEnv {
             values: HashMap::new(),
             enclosing: None,
         }
     }
 
     /// Create a new run environment from an enclosing scope
-    pub fn from_enclosing(env: Arc<Mutex<REnvironment>>) -> Self {
-        REnvironment {
+    pub fn from_enclosing(env: Arc<Mutex<RuntimeEnv>>) -> Self {
+        RuntimeEnv {
             values: HashMap::new(),
             enclosing: Some(env),
         }

@@ -1,0 +1,14 @@
+
+fn main() {
+  let start = clock();
+
+  let c = 0;
+  while (c < 1000) {
+    print("hi\n");
+    c = c + 1;
+  }
+
+  let end = clock();
+
+  print("duration:", end - start, "ms")
+}

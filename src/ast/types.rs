@@ -37,7 +37,7 @@ impl Display for Type {
             } => {
                 write!(
                     f,
-                    "fn<{}> -> {}",
+                    "Fn<{}> -> {}",
                     param_types
                         .iter()
                         .map(|t| format!("{}", t))

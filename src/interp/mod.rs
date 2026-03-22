@@ -1,20 +1,19 @@
-use core::time;
 use std::{
     error::Error,
     fmt::Display,
     sync::{Arc, Mutex},
-    thread::sleep,
-    time::Duration,
 };
 
-use crate::ast::{
-    types::Type, Definition, Expression, Id, Literal, Op1, Op2, Program, Statement, Variable,
+use crate::{
+    ast::{types::Type, Definition, Expression, Op1, Op2, Program, Statement, Variable},
+    interp::builtin::Builtin,
 };
 use color_eyre::Result;
 use ecow::EcoString;
-use env::REnvironment;
+use env::RuntimeEnv;
 use value::{Function, Value};
 
+mod builtin;
 mod env;
 pub mod value;
 
@@ -45,53 +44,55 @@ type Answer = Result<Value, RuntimeError>;
 
 pub struct Interpreter {
     pub program: Program,
-    pub env: Arc<Mutex<REnvironment>>,
+    pub env: Arc<Mutex<RuntimeEnv>>,
 }
 
 impl Interpreter {
     pub fn new(prog: Program) -> Self {
-        Interpreter {
+        let mut i = Interpreter {
             program: prog,
-            env: Arc::new(Mutex::new(REnvironment::new())),
-        }
+            env: Arc::new(Mutex::new(RuntimeEnv::new())),
+        };
+        i.defines()
+            .unwrap_or_else(|e| panic!("Failed to initialize builtins: {}", e));
+        i
     }
 
     pub fn run(mut self) -> Answer {
-        self.defines()?;
         let bs = self.env.lock().unwrap().values.clone();
         for binding in &bs {
-            if binding.0 == "main" {
-                match &binding.1 {
-                    Value::Fn(c) => match c {
-                        Function { body, ret_type, .. } => {
-                            let res = match self.interp_stmt(body.clone()) {
-                                Ok(v) => Ok(v),
-                                Err(err) => match err {
-                                    RuntimeError::Return(v) => Ok(v),
-                                    _ => Err(err),
-                                },
-                            }?;
-                            Self::type_check(&res, ret_type.clone())?;
-                            return Ok(res);
-                        }
-                        _ => unreachable!(),
-                    },
+            if binding.0 != "main" {
+                continue;
+            }
+
+            match &binding.1 {
+                Value::Fn(c) => match c {
+                    Function { body, ret_type, .. } => {
+                        let res = match self.interp_stmt(body.clone()) {
+                            Ok(v) => Ok(v),
+                            Err(err) => match err {
+                                RuntimeError::Return(v) => Ok(v),
+                                _ => Err(err),
+                            },
+                        }?;
+                        Self::type_check(&res, ret_type.clone())?;
+                        return Ok(res);
+                    }
                     _ => unreachable!(),
-                }
+                },
+                _ => unreachable!(),
             }
         }
 
-        return Err(RuntimeError::Adhoc(
-            "no entrypoint to program. Write a main function.".to_string(),
-        ));
+        return Err(RuntimeError::Adhoc("No entrypoint found".to_string()));
     }
 
-    fn defines(&mut self) -> Result<(), RuntimeError> {
-        self.define_builtin("print".into())?;
-        self.define_builtin("clock".into())?;
-        self.define_builtin("sleep".into())?;
+    pub fn defines(&mut self) -> Result<(), RuntimeError> {
+        for builtin in Builtin::all() {
+            self.define_builtin(builtin)?;
+        }
 
-        for def in &self.program.ds {
+        for def in &self.program.definitions {
             match def {
                 Definition::Function {
                     name,
@@ -116,19 +117,20 @@ impl Interpreter {
         Ok(())
     }
 
-    fn define_builtin(&mut self, name: Id) -> Result<(), RuntimeError> {
+    fn define_builtin(&mut self, builtin: Builtin) -> Result<(), RuntimeError> {
+        let info = builtin.info();
         self.env
             .lock()
             .unwrap()
-            .define(name.clone(), Value::NativeFn(name))
+            .define(info.name.into(), Value::NativeFn(builtin))
     }
 
-    fn interp_stmt(&mut self, stmt: Statement) -> Answer {
+    pub fn interp_stmt(&mut self, stmt: Statement) -> Answer {
         match stmt {
             Statement::Block(stmts, tail) => {
                 let prev = self.env.clone();
                 let mut tail_val: Value = Value::Void;
-                self.env = Arc::new(Mutex::new(REnvironment::from_enclosing(prev.clone())));
+                self.env = Arc::new(Mutex::new(RuntimeEnv::from_enclosing(prev.clone())));
                 for stmt in stmts {
                     self.interp_stmt(stmt.clone())?;
                 }
@@ -146,9 +148,13 @@ impl Interpreter {
         }
     }
 
-    fn interp_expr(&mut self, expr: Expression) -> Answer {
+    pub fn interp_expr(&mut self, expr: Expression) -> Answer {
         let ans = match expr {
-            Expression::Literal(p) => self.interp_literal(p),
+            Expression::Int(i) => Ok(Value::Int(i)),
+            Expression::Float(f) => Ok(Value::Float(f)),
+            Expression::True => Ok(Value::Bool(true)),
+            Expression::False => Ok(Value::Bool(false)),
+            Expression::String(s) => Ok(Value::String(s.into())),
             Expression::Unary(op, e1) => self.interp_unary(op, *e1),
             Expression::BinOp(e1, op, e2) => self.interp_binop(*e1, op, *e2),
             Expression::Grouping(e) => self.interp_expr(*e),
@@ -159,7 +165,6 @@ impl Interpreter {
                 let value = self.interp_expr(*rhs)?;
                 self.env.lock().unwrap().assign(lhs, value)
             }
-            Expression::Empty => Ok(Value::Void),
             Expression::Closure(ps, ret_type, stmt) => Ok(Value::Fn(Function {
                 params: ps,
                 body: *stmt,
@@ -212,29 +217,7 @@ impl Interpreter {
                     Ok(ret)
                 }
             },
-            Value::NativeFn(name) => match name.as_str() {
-                "print" => {
-                    println!(
-                        "{}",
-                        args.into_iter()
-                            .map(|a| a.to_string())
-                            .collect::<Vec<String>>()
-                            .join(" ")
-                    );
-                    Ok(Value::Void)
-                }
-                "sleep" => {
-                    if let Value::Int(i) = args[0] {
-                        sleep(Duration::from_millis(i.try_into().unwrap()));
-                        return Ok(Value::Void);
-                    }
-
-                    Err(RuntimeError::Adhoc(
-                        "invalid arguments for sleep()".to_string(),
-                    ))
-                }
-                _ => Err(RuntimeError::Adhoc("unknown builtin function".to_string())),
-            },
+            Value::NativeFn(builtin) => builtin.execute(args),
             _ => {
                 return Err(RuntimeError::TypeError {
                     msg: "Can't call non-callable".to_string(),
@@ -300,24 +283,28 @@ impl Interpreter {
         match op {
             Op2::Addition => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 + i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Float(f1 + f2)),
                 _ => Err(RuntimeError::TypeError {
                     msg: "cannot add non-integers".to_string(),
                 }),
             },
             Op2::Subtraction => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 - i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Float(f1 - f2)),
                 _ => Err(RuntimeError::TypeError {
                     msg: "cannot subtract non-integers".to_string(),
                 }),
             },
             Op2::Multiplication => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 * i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Float(f1 * f2)),
                 _ => Err(RuntimeError::TypeError {
                     msg: "cannot multiply non-integers".to_string(),
                 }),
             },
             Op2::Division => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 / i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Float(f1 / f2)),
                 _ => Err(RuntimeError::TypeError {
                     msg: "cannot divide non-integers".to_string(),
                 }),
@@ -326,6 +313,7 @@ impl Interpreter {
             Op2::Equal => match (r1, r2) {
                 (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 == b2)),
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 == i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 == f2)),
                 (Value::String(s1), Value::String(s2)) => Ok(Value::Bool(s1.eq(&s2))),
                 _ => Err(RuntimeError::TypeError {
                     msg: format!("equality operator expects operands of the same (supported) type"),
@@ -334,6 +322,7 @@ impl Interpreter {
             Op2::NotEqual => match (r1, r2) {
                 (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 != b2)),
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 != i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 != f2)),
                 (Value::String(s1), Value::String(s2)) => Ok(Value::Bool(s1.ne(&s2))),
                 _ => Err(RuntimeError::TypeError {
                     msg: format!(
@@ -344,31 +333,46 @@ impl Interpreter {
             // Comparison
             Op2::GreaterThan => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 > i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 > f2)),
                 _ => Err(RuntimeError::TypeError {
                     msg: format!("> operator expects operands of the same (supported) type"),
                 }),
             },
             Op2::GreaterEqual => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 >= i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 >= f2)),
                 _ => Err(RuntimeError::TypeError {
                     msg: format!(">= operator expects operands of the same (supported) type"),
                 }),
             },
             Op2::LessThan => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 < i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 < f2)),
                 _ => Err(RuntimeError::TypeError {
                     msg: format!("< operator expects operands of the same (supported) type"),
                 }),
             },
             Op2::LessEqual => match (r1, r2) {
                 (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 <= i2)),
+                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 <= f2)),
                 _ => Err(RuntimeError::TypeError {
                     msg: format!("<= operator expects operands of the same (supported) type"),
                 }),
             },
-            _ => Err(RuntimeError::Adhoc(format!(
-                "greater-than operator expects operands of the same (supported) type"
-            ))),
+            // Logical operators
+            Op2::And => match (r1, r2) {
+                (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 && b2)),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!("&& operator expects boolean operands"),
+                }),
+            },
+            Op2::Or => match (r1, r2) {
+                (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 || b2)),
+                _ => Err(RuntimeError::TypeError {
+                    msg: format!("|| operator expects boolean operands"),
+                }),
+            },
+            _ => Err(RuntimeError::Adhoc(format!("unsupported binary operator"))),
         }
     }
 
@@ -387,14 +391,6 @@ impl Interpreter {
                     msg: format!("expected int, found {}", e),
                 }),
             },
-        }
-    }
-
-    fn interp_literal(&self, p: Literal) -> Answer {
-        match p {
-            Literal::Int(i) => Ok(Value::Int(i)),
-            Literal::String(s) => Ok(Value::String(s.to_string())),
-            Literal::Bool(b) => Ok(Value::Bool(b)),
         }
     }
 

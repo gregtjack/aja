@@ -1,4 +1,3 @@
-mod llvm;
 mod qbe;
 
 pub enum Target {

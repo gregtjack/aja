@@ -5,16 +5,16 @@ use std::{
 
 use crate::ast::{types::Type, Id, Statement, Variable};
 
-use super::env::REnvironment;
+use super::{env::RuntimeEnv, Builtin};
 
 #[derive(Debug, Clone)]
 pub enum Value {
-    Int(i64),
-    Float(f64),
+    Int(i32),
+    Float(f32),
     Bool(bool),
     String(String),
     Fn(Function),
-    NativeFn(Id),
+    NativeFn(Builtin),
     Void,
 }
 
@@ -33,7 +33,7 @@ impl Value {
                     ret_type: Box::new(ret_type.clone()),
                 },
             },
-            Value::NativeFn(_) => Type::Void,
+            Value::NativeFn(builtin) => builtin.info().return_type,
             Value::Void => Type::Void,
         }
     }
@@ -44,7 +44,7 @@ pub struct Function {
     pub params: Vec<Variable>,
     pub body: Statement,
     pub ret_type: Type,
-    pub env: Arc<Mutex<REnvironment>>,
+    pub env: Arc<Mutex<RuntimeEnv>>,
 }
 
 impl Display for Value {
@@ -58,10 +58,10 @@ impl Display for Value {
                     params, ret_type, ..
                 } => {
                     let vars: Vec<String> = params.iter().map(|v| v.t.to_string()).collect();
-                    write!(f, "<function({}) -> {}>", vars.join(", "), ret_type)
+                    write!(f, "<fn ({}) -> {}>", vars.join(", "), ret_type)
                 }
             },
-            Value::NativeFn(id) => write!(f, "<native fn: {}>", id),
+            Value::NativeFn(builtin) => write!(f, "<native fn: {}>", builtin.info().name),
             Value::Void => write!(f, "()"),
             Value::Float(n) => write!(f, "{n:?}"),
         }

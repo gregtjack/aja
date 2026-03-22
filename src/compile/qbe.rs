@@ -16,6 +16,6 @@ impl Generator for QbeGenerator {
     fn generate(&mut self) {
         let module = qbe::Module::new();
 
-        for defn in &self.program.ds {}
+        for defn in &self.program.definitions {}
     }
 }

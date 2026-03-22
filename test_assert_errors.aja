@@ -1,0 +1,6 @@
+fn main() -> bool {
+    // Test with no arguments - should error
+    assert();
+    
+    return true;
+}
