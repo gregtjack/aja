@@ -8,15 +8,15 @@
 //     /usr/bin/time -l cargo run --release -- examples/garbage.aja
 
 fn countdown(from: int) -> int {
-    let step = fn(n: int) -> int { n };
+    var step = fn(n: int) -> int { n };
     step = fn(n: int) -> int { if n == 0 { 0 } else { 1 + step(n - 1) } };
     step(from)
 }
 
 fn main() {
     let start = clock();
-    let total = 0;
-    let i = 0;
+    var total = 0;
+    var i = 0;
     while i < 1_000_000 {
         total = total + countdown(3);
         i = i + 1;

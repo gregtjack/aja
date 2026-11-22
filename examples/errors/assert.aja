@@ -3,7 +3,7 @@
 // expect: assertion failed
 
 fn main() {
-    let balance = 100;
+    var balance = 100;
     balance = balance - 150;
     assert(balance >= 0);
     println("never printed");

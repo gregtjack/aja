@@ -4,8 +4,8 @@
 //! Call frames are kept in [`Vm::frames`], not on the Rust stack, so deep
 //! recursion in Aja can't overflow the VM's own stack: the call stack can grow
 //! until it uses [`DEFAULT_STACK_LIMIT`] bytes. Tail calls reuse their frame,
-//! so tail recursion runs in constant space. Closures and captured variables
-//! live on a garbage-collected [`heap`].
+//! so tail recursion runs in constant space. Closures, captured variables,
+//! struct and enum values, and strings live on a garbage-collected [`heap`].
 
 use std::{mem::size_of, rc::Rc};
 
@@ -24,9 +24,9 @@ pub mod value;
 #[cfg(test)]
 mod tests;
 
-use bytecode::{Capture, Layout, Op, Proto};
-pub use compile::{Compiled, Compiler};
-use heap::{Closure, Gc, Heap};
+use bytecode::{Capture, Layout, Literals, Op, Proto};
+pub use compile::{Compiled, Compiler, ReplInput};
+use heap::{Closure, Gc, Heap, MAX_STR_LEN};
 use value::Value;
 
 /// How much memory the call stack (frames and their registers) may use
@@ -111,6 +111,8 @@ struct Frame {
 pub struct Vm {
     pub heap: Heap,
     globals: Vec<Value>,
+    /// The string literals, by number; see [`Literals`]. They are roots.
+    literals: Vec<Value>,
     /// Every call's registers, one window after another.
     regs: Vec<Value>,
     frames: Vec<Frame>,
@@ -132,6 +134,7 @@ impl Vm {
         Vm {
             heap: Heap::new(),
             globals,
+            literals: Vec::new(),
             regs: Vec::new(),
             frames: Vec::new(),
             stack_limit: DEFAULT_STACK_LIMIT,
@@ -141,6 +144,7 @@ impl Vm {
     /// Define a compiled program's functions, then run `main` and return
     /// its result.
     pub fn run_program(&mut self, program: &Compiled) -> Result<Value, RuntimeError> {
+        self.load_literals(&program.literals);
         for (slot, proto) in &program.functions {
             let f = self.alloc_closure(proto.clone(), Box::new([]));
             self.set_global(*slot, Value::Fn(f));
@@ -152,9 +156,24 @@ impl Vm {
     }
 
     /// Run a compiled REPL input and return its value.
-    pub fn run_repl(&mut self, input: Rc<Proto>) -> Result<Value, RuntimeError> {
-        let f = self.alloc_closure(input, Box::new([]));
+    pub fn run_repl(&mut self, input: &ReplInput) -> Result<Value, RuntimeError> {
+        self.load_literals(&input.literals);
+        let f = self.alloc_closure(input.proto.clone(), Box::new([]));
         self.run(f)
+    }
+
+    /// Put string literals on the heap, where they stay for good.
+    fn load_literals(&mut self, literals: &Literals) {
+        for (n, s) in literals {
+            let n = *n as usize;
+            if n >= self.literals.len() {
+                self.literals.resize(n + 1, Value::Void);
+            }
+            // Clear the slot first, so a literal it held before can be freed.
+            self.literals[n] = Value::Void;
+            let gc = self.alloc_str(s.clone());
+            self.literals[n] = Value::Str(gc);
+        }
     }
 
     /// Free every object the program can no longer reach.
@@ -167,7 +186,7 @@ impl Vm {
     // register, global, or frame, or passed in, when these are called.
 
     fn alloc_closure(&mut self, proto: Rc<Proto>, upvalues: Box<[Gc]>) -> Gc {
-        if self.heap.wants_collection() {
+        if self.heap.wants_collection(upvalues.len() * size_of::<Gc>()) {
             let extra = upvalues.iter().copied().collect::<Vec<_>>();
             self.collect_garbage_with(extra);
         }
@@ -175,7 +194,7 @@ impl Vm {
     }
 
     fn alloc_data(&mut self, layout: Rc<Layout>, fields: Box<[Value]>) -> Gc {
-        if self.heap.wants_collection() {
+        if self.heap.wants_collection(fields.len() * size_of::<Value>()) {
             let extra = fields.iter().filter_map(Value::handle).collect();
             self.collect_garbage_with(extra);
         }
@@ -183,10 +202,17 @@ impl Vm {
     }
 
     fn alloc_cell(&mut self, value: Value) -> Gc {
-        if self.heap.wants_collection() {
+        if self.heap.wants_collection(0) {
             self.collect_garbage_with(value.handle().into_iter().collect());
         }
         self.heap.alloc_cell(value)
+    }
+
+    fn alloc_str(&mut self, s: Box<str>) -> Gc {
+        if self.heap.wants_collection(s.len()) {
+            self.collect_garbage_with(Vec::new());
+        }
+        self.heap.alloc_str(s)
     }
 
     /// Collect, keeping `extra` and everything it reaches alive too.
@@ -201,7 +227,7 @@ impl Vm {
             .min(self.regs.len());
         let roots: Vec<Gc> = self.frames.iter().map(|f| f.closure).chain(extra).collect();
         self.heap
-            .collect(self.regs[..live_regs].iter().chain(&self.globals), roots);
+            .collect(self.regs[..live_regs].iter().chain(&self.globals).chain(&self.literals), roots);
     }
 
     fn set_global(&mut self, slot: u32, value: Value) {
@@ -320,9 +346,7 @@ impl Vm {
                 Op::LoadBool { dst, value } => reg!(dst) = Value::Bool(value),
                 Op::LoadInt { dst, value } => reg!(dst) = Value::Int(value),
                 Op::LoadFloat { dst, value } => reg!(dst) = Value::Float(value),
-                Op::LoadConst { dst, index } => {
-                    reg!(dst) = proto.consts[index as usize].clone()
-                }
+                Op::LoadStr { dst, index } => reg!(dst) = self.literals[index as usize].clone(),
                 Op::Move { dst, src } => reg!(dst) = reg!(src).clone(),
 
                 Op::GetGlobal { dst, index } => reg!(dst) = self.globals[index as usize].clone(),
@@ -408,6 +432,20 @@ impl Vm {
                 Op::DivF { dst, a, b } => float_op!(dst, a, b, /),
                 Op::RemF { dst, a, b } => float_op!(dst, a, b, %),
                 Op::NegF { dst, src } => reg!(dst) = Value::Float(-get!(Float, src)),
+                Op::AddS { dst, a, b } => {
+                    let (a, b) = (self.heap.str(get!(Str, a)), self.heap.str(get!(Str, b)));
+                    if a.len() + b.len() > MAX_STR_LEN {
+                        throw!(format!(
+                            "string too long: '+' would make a string of {} bytes, but the most is {MAX_STR_LEN}",
+                            a.len() + b.len()
+                        ));
+                    }
+                    let s = [a, b].concat().into_boxed_str();
+                    // The operands are still in their registers, so a
+                    // collection here keeps them.
+                    let gc = self.alloc_str(s);
+                    reg!(dst) = Value::Str(gc);
+                }
 
                 Op::LtI { dst, a, b } => compare!(dst, a, b, Int, <),
                 Op::LeI { dst, a, b } => compare!(dst, a, b, Int, <=),
@@ -416,7 +454,10 @@ impl Vm {
                 Op::EqI { dst, a, b } => compare!(dst, a, b, Int, ==),
                 Op::EqF { dst, a, b } => compare!(dst, a, b, Float, ==),
                 Op::EqB { dst, a, b } => compare!(dst, a, b, Bool, ==),
-                Op::EqS { dst, a, b } => compare!(dst, a, b, Str, ==),
+                Op::EqS { dst, a, b } => {
+                    let v = self.heap.equal(&reg!(a), &reg!(b));
+                    reg!(dst) = Value::Bool(v);
+                }
                 Op::EqD { dst, a, b } => {
                     let v = self.heap.equal(&reg!(a), &reg!(b));
                     reg!(dst) = Value::Bool(v);

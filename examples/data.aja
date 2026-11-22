@@ -36,7 +36,8 @@ fn describe(p: Point) -> str {
 }
 
 fn range(n: int) -> List {
-    let list = List::Nil;
+    var n = n;
+    var list = List::Nil;
     while n > 0 {
         n = n - 1;
         list = List::Cons(n, list);

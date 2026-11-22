@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use ecow::EcoString;
 
-use super::{key, plural, Checker, Class, Ty, TypeError};
+use super::{key, plural, BindingKind, Checker, Class, Ty, TypeError};
 use crate::{
     ast::{types::Type, Arm, Definition, Expr, FieldInit, Id, Pattern, PatternKind, Program, Span, Statement},
     diagnostic::closest_match,
@@ -487,7 +487,7 @@ impl Checker {
                         p.span,
                     ));
                 }
-                self.define(var.name.clone(), expected.clone());
+                self.define(var.name.clone(), expected.clone(), BindingKind::Pattern);
                 Pat::Wild
             }
             PatternKind::Int(i) => {

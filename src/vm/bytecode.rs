@@ -13,8 +13,6 @@ use std::{collections::HashMap, fmt, rc::Rc};
 
 use crate::ast::{Id, Span};
 
-use super::value::Value;
-
 /// A register number, relative to the current call's window.
 pub type Reg = u16;
 
@@ -25,8 +23,8 @@ pub enum Op {
     LoadBool { dst: Reg, value: bool },
     LoadInt { dst: Reg, value: i32 },
     LoadFloat { dst: Reg, value: f32 },
-    /// Load `consts[index]` (used for strings).
-    LoadConst { dst: Reg, index: u32 },
+    /// Load the string literal numbered `index` (see [`Literals`]).
+    LoadStr { dst: Reg, index: u32 },
     Move { dst: Reg, src: Reg },
 
     // ---- Globals: built-ins, top-level functions, REPL variables -------------
@@ -68,6 +66,8 @@ pub enum Op {
     DivF { dst: Reg, a: Reg, b: Reg },
     RemF { dst: Reg, a: Reg, b: Reg },
     NegF { dst: Reg, src: Reg },
+    /// Concatenate two strings into a new one.
+    AddS { dst: Reg, a: Reg, b: Reg },
 
     // ---- Comparison (`>` and `>=` swap the operands of `<` and `<=`) --------
     LtI { dst: Reg, a: Reg, b: Reg },
@@ -101,6 +101,17 @@ pub enum Op {
     /// every `match` exhaustive, so reaching this is a bug in the compiler.
     NoMatch,
 }
+
+/// String literals, numbered by the compiler. The VM allocates each one on
+/// its heap once, when the code that uses it is loaded, and keeps it alive
+/// for as long as the VM runs, so `LoadStr` never allocates.
+///
+/// A compiler numbers literals across everything it compiles (every REPL
+/// input), and each compiled unit carries only the literals it introduced.
+/// A REPL input that fails is rolled back with its compiler, so its numbers
+/// can be given out again; loading a literal replaces whatever the VM had
+/// under that number.
+pub type Literals = Vec<(u32, Box<str>)>;
 
 /// What the VM needs to know about a struct or one variant of an enum to
 /// build and show its values.
@@ -136,7 +147,6 @@ pub struct Proto {
     pub code: Vec<Op>,
     /// The source span each instruction came from, for error messages.
     pub spans: Vec<Span>,
-    pub consts: Vec<Value>,
     /// Closures defined inside this function.
     pub protos: Vec<Rc<Proto>>,
     /// The struct and variant layouts `NewData` instructions refer to.

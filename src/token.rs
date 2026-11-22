@@ -46,6 +46,7 @@ pub enum Token {
     Match,        // match
     Return,       // return
     Struct,       // struct
+    Var,          // var
     While,        // while
 }
 
@@ -94,6 +95,7 @@ impl std::fmt::Display for Token {
             Token::Fn => "fn",
             Token::If => "if",
             Token::Let => "let",
+            Token::Var => "var",
             Token::Match => "match",
             Token::Return => "return",
             Token::Struct => "struct",

@@ -13,8 +13,8 @@
 //! uses, rather than a polymorphic type usable at many. Generic functions,
 //! when Aja gets them, will be declared explicitly in signatures.
 //!
-//! Some operators work on more than one type (`+` on `int` or `float`, `==`
-//! on any of `int`, `float`, `bool`, `str`). A type variable can carry such a
+//! Some operators work on more than one type (`+` on `int`, `float`, or
+//! `str`, `==` on any of `int`, `float`, `bool`, `str`). A type variable can carry such a
 //! restriction (a [`Class`]) until it is resolved, much like Rust's
 //! `{integer}`.
 //!
@@ -67,13 +67,15 @@ enum Class {
     /// A type that supports `==`: int, float, bool, str, or a struct or
     /// enum made of such types.
     Eq,
+    /// A type that supports `+`: int, float, or str (concatenation).
+    Add,
     /// A type that supports arithmetic and ordering: int or float.
     Num,
 }
 
 impl Class {
     /// The class of types belonging to both `self` and `other`. The classes
-    /// are nested (Num ⊂ Eq ⊂ Any), so this is the narrower one.
+    /// are nested (Num ⊂ Add ⊂ Eq ⊂ Any), so this is the narrower one.
     fn meet(self, other: Class) -> Class {
         self.max(other)
     }
@@ -84,6 +86,7 @@ impl Class {
         match (self, t) {
             (_, Ty::Never | Ty::Error) | (Class::Any, _) => true,
             (Class::Eq, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) => true,
+            (Class::Add, Ty::Int | Ty::Float | Ty::Str) => true,
             (Class::Num, Ty::Int | Ty::Float) => true,
             _ => false,
         }
@@ -185,8 +188,14 @@ pub fn check_program(program: &Program) -> Result<Types, Vec<TypeError>> {
 
 #[derive(Debug, Clone, PartialEq)]
 enum BindingKind {
-    /// A `let` variable or a parameter.
-    Local,
+    /// A `let` variable, which can't be assigned to.
+    Let,
+    /// A `var` variable, which can.
+    Var,
+    /// A function or closure parameter.
+    Param,
+    /// A name bound by a `match` pattern.
+    Pattern,
     /// A top-level function.
     Function,
     /// A variadic built-in such as `print`, which can only be called directly.
@@ -437,7 +446,7 @@ impl Checker {
     ) {
         self.scopes.push(HashMap::new());
         for (p, t) in params.iter().zip(param_tys) {
-            self.define(p.name.clone(), t.clone());
+            self.define(p.name.clone(), t.clone(), BindingKind::Param);
         }
         let fallback = ctx.span;
         self.fns.push(ctx);
@@ -550,7 +559,11 @@ impl Checker {
                 t
             }
             Statement::Expr(e) => self.expr(e),
-            Statement::Let { var, value } => {
+            Statement::Let {
+                var,
+                value,
+                mutable,
+            } => {
                 let found = self.expr(value);
                 let ty = match &var.t {
                     Some(annotation) => {
@@ -573,7 +586,12 @@ impl Checker {
                         found
                     }
                 };
-                self.define(var.name.clone(), ty);
+                let kind = if *mutable {
+                    BindingKind::Var
+                } else {
+                    BindingKind::Let
+                };
+                self.define(var.name.clone(), ty, kind);
                 Ty::Void
             }
             Statement::If(cond, body) => {
@@ -681,11 +699,35 @@ impl Checker {
                 match self.lookup(name).cloned() {
                     Some(Binding {
                         ty,
-                        kind: BindingKind::Local,
+                        kind: BindingKind::Var,
                     }) => {
                         self.expect(&ty, &found, value.span, |e, f| {
                             format!("mismatched types: cannot assign {f} to '{name}', which has type {e}")
                         });
+                        ty
+                    }
+                    Some(Binding {
+                        ty,
+                        kind: kind @ (BindingKind::Let | BindingKind::Param | BindingKind::Pattern),
+                    }) => {
+                        let (why, help) = match kind {
+                            BindingKind::Let => (
+                                "it was declared with 'let'",
+                                format!("declare it with 'var' to make it mutable: `var {name} = ...;`"),
+                            ),
+                            BindingKind::Param => (
+                                "it is a parameter",
+                                format!("copy it into a mutable variable first: `var {name} = {name};`"),
+                            ),
+                            _ => (
+                                "it is bound by a pattern",
+                                format!("copy it into a mutable variable first: `var {name} = {name};`"),
+                            ),
+                        };
+                        self.error(
+                            TypeError::new(format!("cannot assign to '{name}' because {why}"), span)
+                                .help(help),
+                        );
                         ty
                     }
                     Some(_) => {
@@ -755,8 +797,8 @@ impl Checker {
         }
 
         let (class, result) = match op {
-            Op2::Addition
-            | Op2::Subtraction
+            Op2::Addition => (Class::Add, None),
+            Op2::Subtraction
             | Op2::Multiplication
             | Op2::Division
             | Op2::Modulo => (Class::Num, None),
@@ -909,14 +951,11 @@ impl Checker {
 
     // ---- Scopes ------------------------------------------------------------
 
-    fn define(&mut self, name: Id, ty: Ty) {
-        self.scopes.last_mut().unwrap().insert(
-            name,
-            Binding {
-                ty,
-                kind: BindingKind::Local,
-            },
-        );
+    fn define(&mut self, name: Id, ty: Ty, kind: BindingKind) {
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(name, Binding { ty, kind });
     }
 
     fn lookup(&self, name: &Id) -> Option<&Binding> {
@@ -1083,7 +1122,8 @@ impl Checker {
     }
 
     /// A type as written in Aja source; unknown parts show as `_`, or
-    /// `{number}` when only int or float would fit.
+    /// `{number}` when only int or float would fit (`{number or str}` when
+    /// a str would too).
     pub fn show(&self, t: &Ty) -> String {
         match self.zonk(t) {
             Ty::Int => "int".into(),
@@ -1096,6 +1136,7 @@ impl Checker {
             Ty::Named(name) => name.to_string(),
             Ty::Var(v) => match self.vars[v].1 {
                 Class::Num => "{number}".into(),
+                Class::Add => "{number or str}".into(),
                 _ => "_".into(),
             },
             Ty::Fn(params, ret) => {

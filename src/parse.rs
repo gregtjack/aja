@@ -196,11 +196,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_var_statement() {
+        let mut parser = create_parser("var x = 1;");
+        match parser.parse_stmt_only().unwrap() {
+            Statement::Let { var, mutable, .. } => {
+                assert!(mutable);
+                assert_eq!(var.name, "x");
+                assert_eq!(var.t, None);
+            }
+            result => panic!("Expected Statement::Let, got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_parse_let_statement() {
         let mut parser = create_parser("let x: int = 42;");
         let result = parser.parse_stmt_only().unwrap();
         match result {
-            Statement::Let { var, value } => {
+            Statement::Let {
+                var,
+                value,
+                mutable,
+            } => {
+                assert!(!mutable);
                 assert_eq!(var.name, "x");
                 assert_eq!(var.t, Some(Type::Int));
                 match value.kind {
@@ -685,7 +703,7 @@ where
 
         match tok.1 {
             Token::LeftBrace => self.parse_block(),
-            Token::Let => self.parse_let(),
+            Token::Let | Token::Var => self.parse_let(),
             Token::Return => self.parse_return(),
             Token::If => self.parse_if_stmt(),
             Token::While => self.parse_while(),
@@ -737,14 +755,17 @@ where
         Ok(xs)
     }
 
+    /// `let name = value;` or `var name = value;`.
     fn parse_let(&mut self) -> ParseResult<Statement> {
-        self.consume(Token::Let)?;
+        let mutable = tok_matches!(self, Token::Var);
+        let keyword = if mutable { "var" } else { "let" };
+        self.next();
 
         let (id, span) = match self.peek() {
             Some((start, Token::Ident(id), end)) if id != "true" && id != "false" => {
                 (id.clone(), Span::new(*start, *end))
             }
-            _ => return Err(self.expected("a variable name after 'let'")),
+            _ => return Err(self.expected(&format!("a variable name after '{keyword}'"))),
         };
         self.next();
 
@@ -752,13 +773,14 @@ where
         if !tok_matches!(self, Token::Equal) {
             return Err(self
                 .expected("'='")
-                .help(format!("variables must be initialized: `let {id} = <value>;`")));
+                .help(format!("variables must be initialized: `{keyword} {id} = <value>;`")));
         }
         self.consume(Token::Equal)?;
         let e = self.parse_expr()?;
         Ok(Statement::Let {
             var: Variable::new(id, ttype, span),
             value: e,
+            mutable,
         })
     }
 

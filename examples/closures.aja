@@ -3,7 +3,7 @@
 
 // Returns a function that remembers and updates its own `count`.
 fn counter() -> fn() -> int {
-    let count = 0;
+    var count = 0;
     fn() {
         count = count + 1;
         count
@@ -22,7 +22,8 @@ fn compose(f: fn(int) -> int, g: fn(int) -> int) -> fn(int) -> int {
 
 // Apply `f` to `x`, `times` times.
 fn repeat(f: fn(int) -> int, times: int, x: int) -> int {
-    let i = 0;
+    var x = x;
+    var i = 0;
     while i < times {
         x = f(x);
         i = i + 1;
@@ -46,7 +47,7 @@ fn main() {
 
     // A closure and the function that made it share captured variables:
     // each sees the other's assignments.
-    let total = 0;
+    var total = 0;
     let deposit = fn(amount: int) { total = total + amount; };
     deposit(50);
     deposit(25);

@@ -30,6 +30,10 @@ understood locally, one obvious way to do things, and a fast feedback loop.
    constructors or destructors that run without being visible at the call site.
 5. **Local reasoning.** A function can be understood from its signature and
    its body. Signatures are always fully typed; inference stays inside bodies.
+   Bindings are immutable unless declared mutable: `let` names a value that
+   never changes, and only a `var` can be assigned to, so a reader knows which
+   names can change without reading the rest of the body. Parameters and
+   names bound by patterns are immutable too.
 6. **Data is modeled with structs and enums.** Enums carry data (sum types), and
    `match` is exhaustive: adding a variant produces a compile error at every
    `match` that doesn't handle it.
@@ -56,7 +60,7 @@ understood locally, one obvious way to do things, and a fast feedback loop.
 |-----------------|-----------------------------------------------------------------------|---------------------------------------|
 | Rust            | enums with data, exhaustive `match`, `Result`/`Option`, traits, expressions everywhere, diagnostic quality | borrow checker, lifetimes, macro complexity |
 | Go              | goroutine-style green threads, GC'd runtime, fast compiles, single-binary deploys, one formatter | `nil`, `if err != nil` boilerplate |
-| Swift / Kotlin  | type inference, null safety, readable syntax                          | feature sprawl                        |
+| Swift / Kotlin  | type inference, null safety, readable syntax, `let`/`var`                          | feature sprawl                        |
 | Elixir / Erlang | structured concurrency, supervision, "let it crash" for bugs          | dynamic typing                        |
 | Zig             | no hidden control flow; explicit allocation where it matters          | manual memory management              |
 
@@ -139,10 +143,11 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
    bytecode, and the tree-walking interpreter is gone. The checker hands the
    compiler operand types rather than a full typed IR; a typed IR can come
    when data types need it.
-4. **Memory management.** ✅ Closures and captured variables live on a
-   garbage-collected heap with a precise mark-and-sweep collector. Strings,
-   which can't form cycles, are still reference-counted. Struct and enum
-   values live on the heap too. Next: strings.
+4. **Memory management.** ✅ Closures, captured variables, struct and enum
+   values, and strings live on a garbage-collected heap with a precise
+   mark-and-sweep collector, which runs when the heap's size in bytes has
+   doubled. String literals are allocated once and kept as roots; strings
+   built at runtime (with `+`) are collected. Nothing is reference-counted.
 5. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.
 6. **Green threads and structured concurrency** in the VM.
@@ -155,7 +160,5 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
   default, with sized types (`i8` … `u64`) available explicitly?
 - **Traits and generics.** How far do generics go (no higher-kinded types is a
   likely non-goal), and are traits implemented nominally or structurally?
-- **Mutability.** Are bindings immutable by default (`let` vs `let mut` or
-  `var`)?
 - **Strings.** UTF-8 everywhere, and is indexing by byte, by code point, or not
   allowed at all?

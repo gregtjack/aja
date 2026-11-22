@@ -32,10 +32,7 @@ use crate::{
     diagnostic::Diagnostic,
 };
 
-use super::{
-    bytecode::{Capture, Layout, Op, Proto, Reg},
-    value::Value,
-};
+use super::bytecode::{Capture, Layout, Literals, Op, Proto, Reg};
 
 /// The global names and their slots. It persists across REPL inputs, so a
 /// later input can use what an earlier one defined.
@@ -45,6 +42,10 @@ pub struct Compiler {
     count: u32,
     /// The program's structs and enums, by name.
     data: HashMap<Id, DataDef>,
+    /// Every string literal's number.
+    literals: HashMap<Box<str>, u32>,
+    /// The literals numbered since the last unit was finished.
+    new_literals: Literals,
 }
 
 /// How a struct or enum is laid out at runtime.
@@ -62,10 +63,18 @@ enum DataDef {
 }
 
 /// A compiled program: its top-level functions with the global slot each
-/// belongs in, and the slot of `main`.
+/// belongs in, the slot of `main`, and its string literals.
 pub struct Compiled {
     pub functions: Vec<(u32, Rc<Proto>)>,
     pub main: u32,
+    pub literals: Literals,
+}
+
+/// A compiled REPL input: a function that takes no arguments, and the string
+/// literals it introduced.
+pub struct ReplInput {
+    pub proto: Rc<Proto>,
+    pub literals: Literals,
 }
 
 impl Compiler {
@@ -75,6 +84,8 @@ impl Compiler {
             globals: HashMap::new(),
             count: 0,
             data: HashMap::new(),
+            literals: HashMap::new(),
+            new_literals: Vec::new(),
         };
         for b in BUILTINS {
             compiler.define_global(b.name.into());
@@ -87,6 +98,17 @@ impl Compiler {
         self.count += 1;
         self.globals.insert(name, slot);
         slot
+    }
+
+    /// The number of the string literal `s`.
+    fn literal(&mut self, s: &str) -> u32 {
+        if let Some(&n) = self.literals.get(s) {
+            return n;
+        }
+        let n = u32::try_from(self.literals.len()).expect("too many string literals");
+        self.literals.insert(s.into(), n);
+        self.new_literals.push((n, s.into()));
+        n
     }
 
     pub fn program(&mut self, program: &Program, types: &Types) -> Result<Compiled, Diagnostic> {
@@ -153,15 +175,23 @@ impl Compiler {
         let main = main.ok_or_else(|| {
             Diagnostic::new("no 'main' function found; add `fn main() { ... }` as the entry point")
         })?;
-        Ok(Compiled { functions, main })
+        Ok(Compiled {
+            functions,
+            main,
+            literals: std::mem::take(&mut self.new_literals),
+        })
     }
 
     /// Compile one REPL input as a function that takes no arguments and
     /// returns the input's value. Its top-level `let` defines a global.
-    pub fn repl(&mut self, stmt: &Statement, types: &Types, span: Span) -> Rc<Proto> {
+    pub fn repl(&mut self, stmt: &Statement, types: &Types, span: Span) -> ReplInput {
         let captured = captured_locals(&[], stmt, true);
         let mut fc = FnCompiler::new(self, types, &captured, true);
-        Rc::new(fc.function(None, &[], None, stmt, span))
+        let proto = Rc::new(fc.function(None, &[], None, stmt, span));
+        ReplInput {
+            proto,
+            literals: std::mem::take(&mut self.new_literals),
+        }
     }
 }
 
@@ -191,7 +221,6 @@ struct Local {
 struct FnState {
     code: Vec<Op>,
     spans: Vec<Span>,
-    consts: Vec<Value>,
     protos: Vec<Rc<Proto>>,
     layouts: Vec<Rc<Layout>>,
     captures: Vec<Capture>,
@@ -246,7 +275,6 @@ impl<'a> FnCompiler<'a> {
         self.fns.push(FnState {
             code: Vec::new(),
             spans: Vec::new(),
-            consts: Vec::new(),
             protos: Vec::new(),
             layouts: Vec::new(),
             captures: Vec::new(),
@@ -280,7 +308,6 @@ impl<'a> FnCompiler<'a> {
             num_regs: f.max,
             code: f.code,
             spans: f.spans,
-            consts: f.consts,
             protos: f.protos,
             layouts: f.layouts,
             captures: f.captures,
@@ -427,7 +454,7 @@ impl<'a> FnCompiler<'a> {
                 Some(dst) => self.expr(e, dst),
                 None => self.discard(e),
             },
-            Statement::Let { var, value } => {
+            Statement::Let { var, value, .. } => {
                 self.let_(var, value);
                 if let Some(dst) = dst {
                     self.void(dst);
@@ -553,10 +580,8 @@ impl<'a> FnCompiler<'a> {
                 self.emit(Op::LoadBool { dst, value }, span);
             }
             Expression::String(s) => {
-                let consts = &mut self.cur().consts;
-                consts.push(Value::Str(Rc::from(s.as_str())));
-                let index = (consts.len() - 1) as u32;
-                self.emit(Op::LoadConst { dst, index }, span);
+                let index = self.compiler.literal(s);
+                self.emit(Op::LoadStr { dst, index }, span);
             }
             Expression::Grouping(inner) => self.expr(inner, dst),
             Expression::Unary(op, operand) => {
@@ -696,6 +721,7 @@ impl<'a> FnCompiler<'a> {
         let float = t == Float;
         let op = match op {
             Op2::Addition if float => Op::AddF { dst, a, b },
+            Op2::Addition if t == Str => Op::AddS { dst, a, b },
             Op2::Addition => Op::AddI { dst, a, b },
             Op2::Subtraction if float => Op::SubF { dst, a, b },
             Op2::Subtraction => Op::SubI { dst, a, b },
@@ -872,10 +898,8 @@ impl FnCompiler<'_> {
             }
             PatternKind::Str(s) => {
                 let t = self.alloc();
-                let consts = &mut self.cur().consts;
-                consts.push(Value::Str(Rc::from(s.as_str())));
-                let index = (consts.len() - 1) as u32;
-                self.emit(Op::LoadConst { dst: t, index }, p.span);
+                let index = self.compiler.literal(s);
+                self.emit(Op::LoadStr { dst: t, index }, p.span);
                 self.emit(
                     Op::EqS {
                         dst: t,
@@ -1084,7 +1108,7 @@ impl CaptureFinder {
                 }
             }),
             Statement::Expr(e) => self.expr(e),
-            Statement::Let { var, value } => {
+            Statement::Let { var, value, .. } => {
                 self.expr(value);
                 let repl_global = self.repl && self.depth == 0 && self.scopes.len() == 1;
                 if !repl_global {

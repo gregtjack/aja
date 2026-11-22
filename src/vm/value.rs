@@ -1,4 +1,4 @@
-use std::{fmt, rc::Rc};
+use std::fmt;
 
 use crate::builtins::Builtin;
 
@@ -15,7 +15,8 @@ pub enum Value {
     Int(i32),
     Float(f32),
     Bool(bool),
-    Str(Rc<str>),
+    /// A string on the heap.
+    Str(Gc),
     /// A closure on the heap.
     Fn(Gc),
     /// A struct or enum value on the heap.
@@ -32,7 +33,7 @@ impl Value {
     /// The heap object this value refers to, if any.
     pub fn handle(&self) -> Option<Gc> {
         match self {
-            Value::Fn(gc) | Value::Cell(gc) | Value::Data(gc) => Some(*gc),
+            Value::Str(gc) | Value::Fn(gc) | Value::Cell(gc) | Value::Data(gc) => Some(*gc),
             _ => None,
         }
     }
@@ -45,7 +46,7 @@ impl fmt::Debug for Value {
             Value::Int(i) => write!(f, "Int({i})"),
             Value::Float(n) => write!(f, "Float({n:?})"),
             Value::Bool(b) => write!(f, "Bool({b})"),
-            Value::Str(s) => write!(f, "Str({:?})", &**s),
+            Value::Str(gc) => write!(f, "Str({gc})"),
             Value::Fn(gc) => write!(f, "Fn({gc})"),
             Value::Data(gc) => write!(f, "Data({gc})"),
             Value::Native(b, _) => write!(f, "Native({})", b.name),

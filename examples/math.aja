@@ -2,8 +2,8 @@
 
 // Newton's method for square roots.
 fn sqrt(x: float) -> float {
-    let guess = x / 2.0;
-    let i = 0;
+    var guess = x / 2.0;
+    var i = 0;
     while i < 20 {
         guess = (guess + x / guess) / 2.0;
         i = i + 1;
@@ -15,7 +15,7 @@ fn is_prime(n: int) -> bool {
     if n < 2 {
         return false;
     }
-    let d = 2;
+    var d = 2;
     while d * d <= n {
         if n % d == 0 {
             return false;
@@ -27,7 +27,8 @@ fn is_prime(n: int) -> bool {
 
 // How many steps the Collatz sequence takes to reach 1.
 fn collatz_steps(n: int) -> int {
-    let steps = 0;
+    var n = n;
+    var steps = 0;
     while n != 1 {
         n = if n % 2 == 0 { n / 2 } else { 3 * n + 1 };
         steps = steps + 1;
@@ -40,7 +41,7 @@ fn main() {
     println("sqrt(144) =", sqrt(144.0));
 
     print("primes below 60:");
-    let n = 2;
+    var n = 2;
     while n < 60 {
         if is_prime(n) {
             print("", n);

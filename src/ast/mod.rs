@@ -53,7 +53,7 @@ impl Expr {
 
 pub type Id = EcoString;
 
-/// A binding introduced by a parameter or `let`, with its optional annotation.
+/// A binding introduced by a parameter, `let`, or `var`, with its optional annotation.
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Id,
@@ -169,7 +169,13 @@ pub enum PatternKind {
 pub enum Statement {
     Block(Vec<Statement>, Option<Expr>),
     Expr(Expr),
-    Let { var: Variable, value: Expr },
+    /// `let x = value;`, or `var x = value;` when `mutable`. Only a `var`
+    /// can be assigned to.
+    Let {
+        var: Variable,
+        value: Expr,
+        mutable: bool,
+    },
     If(Expr, Box<Statement>),
     While(Expr, Box<Statement>),
     Return(Option<Expr>),

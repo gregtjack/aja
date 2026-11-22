@@ -13,7 +13,7 @@ fn fizzbuzz(n: int) -> str {
 }
 
 fn main() {
-    let i = 1;
+    var i = 1;
     while i <= 20 {
         let word = fizzbuzz(i);
         if word == "" {

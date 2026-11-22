@@ -1,0 +1,18 @@
+// Variables declared with `let` never change; only a `var` can be assigned
+// to. Parameters can't be assigned either: copy one into a `var` first.
+//
+// expect: cannot assign to 'total' because it was declared with 'let'
+// expect: cannot assign to 'n' because it is a parameter
+
+fn sum_to(n: int) -> int {
+    let total = 0;
+    while n > 0 {
+        total = total + n;
+        n = n - 1;
+    }
+    total
+}
+
+fn main() {
+    println(sum_to(10));
+}

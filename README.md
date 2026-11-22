@@ -21,7 +21,7 @@ fn main() -> int {
     let start = clock();
     let add = fn(a: int, b: int) -> int { a + b };
 
-    let i = 0;
+    var i = 0;
     while i < 3 {
         print("i =", i, "\n");
         i = i + 1;
@@ -80,7 +80,7 @@ A program is a sequence of top-level `fn` definitions. Execution starts at
 | `int`   | `42`, `-7`, `1_000`     | 32-bit signed integer                |
 | `float` | `3.14`, `-0.5`          | 32-bit float                         |
 | `bool`  | `true`, `false`         |                                      |
-| `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`      |
+| `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`; join with `+` |
 | `void`  | —                       | Result of statements / no value      |
 | `fn(int, str) -> bool` | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
 | structs and enums | `Point { x: 1, y: 2 }`, `Shape::Circle(p, 3)` | Defined at the top level; see below |
@@ -161,7 +161,7 @@ is no `any` type: every value has one static type.
 
 The checker lives in `src/check/`. It is unification-based, the core of
 Hindley–Milner inference, without let-polymorphism. Operators that accept
-several types (`+` on int or float; `==` on int, float, bool, or str) keep
+several types (`+` on int, float, or str; `==` on int, float, bool, or str) keep
 an unresolved type restricted until it's known, much like Rust's `{integer}`.
 
 ```
@@ -175,9 +175,12 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 
 ### Syntax
 
-- **Variables:** `let name: type = expr;` declares; `name = expr` assigns.
-  Blocks introduce a new lexical scope, and a later `let` with the same name
-  shadows the earlier one.
+- **Variables:** `let name: type = expr;` declares an immutable variable;
+  `var name: type = expr;` declares a mutable one, which `name = expr`
+  assigns. Assigning to a `let`, a parameter, or a name bound by a pattern is
+  a type error; to change a parameter, copy it first (`var n = n;`). Blocks
+  introduce a new lexical scope, and a later `let` or `var` with the same
+  name shadows the earlier one.
 - **Functions:** `fn name(a: int, b: str) -> int { ... }`. Parameters must be
   annotated; omitting `-> T` means the function returns `void`.
 - **Closures:** an anonymous `fn` with the same syntax as a named function,
@@ -261,20 +264,23 @@ A local that a closure captures is stored in a shared cell, so the function
 and its closures see each other's assignments. The compiler finds these
 variables in a pass over each function before compiling it.
 
-Closures, cells, and struct and enum values live on a garbage-collected heap (`src/vm/heap.rs`). The
+Closures, cells, struct and enum values, and strings live on a garbage-collected heap (`src/vm/heap.rs`). The
 collector is a precise mark-and-sweep: it starts from the registers in use,
 the globals, and the call frames, marks every object reachable from them, and
 frees the rest, so cycles (such as a closure that calls itself through a
 variable it captures) are freed too. It runs when the VM allocates, once the
-number of live objects has doubled since the last collection. Strings hold no
-references, so they stay reference-counted. The VM tests run with the
+heap's size in bytes has doubled since the last collection, so a few large
+strings trigger it as surely as many small objects. String literals are put
+on the heap once, when the code using them is loaded, and kept as roots;
+strings built with `+` are freed once unreachable. A string may be at most
+`i32::MAX` bytes; building a longer one is a runtime error. The VM tests run with the
 collector in stress mode, collecting before every allocation, so any value
 the VM forgets to keep reachable is caught.
 
 ## Status
 
-**Working:** ints, floats, bools, strings; `let`/assignment with lexical
-scoping; functions and first-class closures; `if`/`else` expressions;
+**Working:** ints, floats, bools, strings; immutable `let` and mutable
+`var` with lexical scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
 structs, enums with data, and exhaustive `match`;
 static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,

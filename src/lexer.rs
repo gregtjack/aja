@@ -372,6 +372,7 @@ where
 
         let keyword = match raw.as_str() {
             "let" => Some(Token::Let),
+            "var" => Some(Token::Var),
             "fn" => Some(Token::Fn),
             "if" => Some(Token::If),
             "while" => Some(Token::While),

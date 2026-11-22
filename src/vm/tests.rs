@@ -24,12 +24,21 @@ fn run(src: &str) -> Result<Value, RuntimeError> {
     run_vm(src).1
 }
 
+/// A value as `{:?}` shows it, but with a string's contents, e.g.
+/// `Str("hi")`, rather than its heap handle.
+fn show(vm: &Vm, v: &Value) -> String {
+    match v {
+        Value::Str(gc) => format!("Str({:?})", vm.heap.str(*gc)),
+        v => format!("{v:?}"),
+    }
+}
+
 /// Run a program and show its result, e.g. `Int(3)`.
 #[track_caller]
 fn value(src: &str) -> String {
-    match run(src) {
-        Ok(v) => format!("{v:?}"),
-        Err(e) => panic!("program failed: {}", e.message),
+    match run_vm(src) {
+        (vm, Ok(v)) => show(&vm, &v),
+        (_, Err(e)) => panic!("program failed: {}", e.message),
     }
 }
 
@@ -87,8 +96,8 @@ fn logical_operators_short_circuit() {
 #[test]
 fn control_flow() {
     assert_eq!(main_value("int", "if 1 < 2 { 10 } else { 20 }"), "Int(10)");
-    assert_eq!(main_value("int", "let i = 0; let s = 0; while i < 5 { s = s + i; i = i + 1; } s"), "Int(10)");
-    assert_eq!(main_value("int", "let x = 1; if true { x = 2; } x"), "Int(2)");
+    assert_eq!(main_value("int", "var i = 0; var s = 0; while i < 5 { s = s + i; i = i + 1; } s"), "Int(10)");
+    assert_eq!(main_value("int", "var x = 1; if true { x = 2; } x"), "Int(2)");
     assert_eq!(
         value("fn sign(n: int) -> int { if n < 0 { return -1; } if n == 0 { return 0; } 1 }
                fn main() -> int { sign(-5) * 100 + sign(0) * 10 + sign(7) }"),
@@ -146,7 +155,7 @@ fn tail_calls_run_in_constant_space() {
     // Closures, including ones that capture variables, can be tail-called.
     let closure = "fn main() -> int {
                        let step = 1;
-                       let f = fn(n: int) -> int { n };
+                       var f = fn(n: int) -> int { n };
                        f = fn(n: int) -> int { if n >= 1000000 { n } else { f(n + step) } };
                        f(0)
                    }";
@@ -181,10 +190,10 @@ fn functions_can_be_called_before_they_are_defined() {
 
 #[test]
 fn assignment_is_an_expression() {
-    assert_eq!(main_value("int", "let a = 1; let b = (a = 5) + a; b"), "Int(10)");
+    assert_eq!(main_value("int", "var a = 1; let b = (a = 5) + a; b"), "Int(10)");
     // The right operand changes `a` only after the left one has been read.
-    assert_eq!(main_value("int", "let a = 1; a + (a = 5)"), "Int(6)");
-    assert_eq!(main_value("bool", "let a = true; let b = false; a = b && a; a"), "Bool(false)");
+    assert_eq!(main_value("int", "var a = 1; a + (a = 5)"), "Int(6)");
+    assert_eq!(main_value("bool", "var a = true; let b = false; a = b && a; a"), "Bool(false)");
 }
 
 #[test]
@@ -196,7 +205,7 @@ fn let_shadowing() {
 
 #[test]
 fn closures_capture_and_mutate() {
-    let src = "fn mk() -> fn(int) -> int { let c = 0; fn(x) { c = c + x; c } }
+    let src = "fn mk() -> fn(int) -> int { var c = 0; fn(x) { c = c + x; c } }
                fn main() -> int { let k = mk(); k(1); k(1); k(5) }";
     assert_eq!(value(src), "Int(7)");
 }
@@ -205,7 +214,7 @@ fn closures_capture_and_mutate() {
 fn closures_share_variables_with_their_function() {
     // The function sees the closure's writes, and the closure the function's.
     let src = "fn main() -> int {
-                   let n = 1;
+                   var n = 1;
                    let bump = fn() { n = n * 10; };
                    bump();
                    n = n + 1;
@@ -217,7 +226,7 @@ fn closures_share_variables_with_their_function() {
 
 #[test]
 fn each_counter_has_its_own_variable() {
-    let src = "fn counter() -> fn() -> int { let c = 0; fn() { c = c + 1; c } }
+    let src = "fn counter() -> fn() -> int { var c = 0; fn() { c = c + 1; c } }
                fn main() -> int { let a = counter(); let b = counter(); a(); a(); b(); a() * 10 + b() }";
     assert_eq!(value(src), "Int(32)");
 }
@@ -225,7 +234,7 @@ fn each_counter_has_its_own_variable() {
 #[test]
 fn closures_capture_through_several_levels() {
     let src = "fn main() -> int {
-                   let x = 1;
+                   var x = 1;
                    let outer = fn() -> fn() -> int { fn() { x = x + 1; x } };
                    let inner = outer();
                    inner();
@@ -244,8 +253,8 @@ fn closures_capture_parameters() {
 #[test]
 fn each_loop_iteration_has_its_own_variable() {
     let src = "fn main() -> int {
-                   let first = fn() { 0 };
-                   let i = 0;
+                   var first = fn() { 0 };
+                   var i = 0;
                    while i < 3 {
                        let j = i;
                        if i == 0 { first = fn() { j }; }
@@ -371,9 +380,10 @@ fn repl_inputs_share_globals() {
         let types = checker.check_repl_stmt(&stmt).unwrap();
         let span = Span::new(crate::ast::Location::new(0, 1, 1), crate::ast::Location::new(0, 1, 1));
         let input = compiler.repl(&stmt, &types, span);
-        format!("{:?}", vm.run_repl(input).unwrap())
+        let v = vm.run_repl(&input).unwrap();
+        show(&vm, &v)
     };
-    assert_eq!(eval("let x = 1"), "Void");
+    assert_eq!(eval("var x = 1"), "Void");
     assert_eq!(eval("let add = fn(n: int) -> int { x = x + n; x }"), "Void");
     assert_eq!(eval("add(4)"), "Int(5)");
     assert_eq!(eval("x"), "Int(5)");
@@ -397,21 +407,21 @@ fn live_after(src: &str) -> usize {
 fn cycles_through_closures_are_freed() {
     // `f` captures the cell it is stored in: a cycle.
     let recursive = "fn make() -> int {
-                         let f = fn(n: int) -> int { n };
+                         var f = fn(n: int) -> int { n };
                          f = fn(n: int) -> int { if n == 0 { 0 } else { f(n - 1) } };
                          f(3)
                      }
-                     fn main() { let i = 0; while i < 200 { make(); i = i + 1; } }";
+                     fn main() { var i = 0; while i < 200 { make(); i = i + 1; } }";
     assert_eq!(live_after(recursive), 2);
 
     // Two closures that call each other through captured variables.
     let mutual = "fn make() -> bool {
-                      let even = fn(n: int) -> bool { true };
+                      var even = fn(n: int) -> bool { true };
                       let odd = fn(n: int) -> bool { if n == 0 { false } else { even(n - 1) } };
                       even = fn(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } };
                       even(10)
                   }
-                  fn main() { let i = 0; while i < 200 { assert(make()); i = i + 1; } }";
+                  fn main() { var i = 0; while i < 200 { assert(make()); i = i + 1; } }";
     assert_eq!(live_after(mutual), 2);
 }
 
@@ -419,11 +429,11 @@ fn cycles_through_closures_are_freed() {
 fn reachable_objects_survive_collection() {
     // Every allocation collects (stress mode), while counters and their
     // cells are only reachable from registers and other closures.
-    let src = "fn counter() -> fn() -> int { let c = 0; fn() { c = c + 1; c } }
+    let src = "fn counter() -> fn() -> int { var c = 0; fn() { c = c + 1; c } }
                fn main() -> int {
                    let a = counter();
-                   let total = 0;
-                   let i = 0;
+                   var total = 0;
+                   var i = 0;
                    while i < 50 {
                        let b = counter();
                        b();
@@ -439,9 +449,9 @@ fn reachable_objects_survive_collection() {
 fn collection_runs_without_stress_mode() {
     // Enough garbage to pass the collector's threshold several times.
     let src = "fn main() -> int {
-                   let i = 0;
+                   var i = 0;
                    let keep = fn() -> int { i };
-                   while i < 10000 { let c = 0; let g = fn() -> int { c = c + 1; c }; g(); i = i + 1; }
+                   while i < 10000 { var c = 0; let g = fn() -> int { c = c + 1; c }; g(); i = i + 1; }
                    keep()
                }";
     let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
@@ -458,7 +468,7 @@ const DATA: &str = "
 struct Point { x: int, y: int }
 enum Shape { Circle(Point, int), Rect(Point, Point), Empty }
 enum List { Nil, Cons(int, List) }
-fn range(n: int) -> List { let l = List::Nil; while n > 0 { n = n - 1; l = List::Cons(n, l); } l }
+fn range(n: int) -> List { var n = n; var l = List::Nil; while n > 0 { n = n - 1; l = List::Cons(n, l); } l }
 ";
 
 /// The value `main` returns, shown as `print` shows it, with the
@@ -489,7 +499,7 @@ fn structs_are_built_and_read() {
 #[test]
 fn fields_are_evaluated_in_the_order_written() {
     let src = "fn main() -> int {
-                   let order = 0;
+                   var order = 0;
                    let note = fn(n: int) -> int { order = order * 10 + n; n };
                    let p = Point { y: note(2), x: note(1) };
                    order * 100 + p.x * 10 + p.y
@@ -577,7 +587,7 @@ fn nested_patterns() {
 #[test]
 fn match_is_an_expression_and_a_statement() {
     assert_eq!(
-        data_value("int", "let n = 0; match Shape::Empty { Shape::Empty => { n = 5; }, _ => { } } n"),
+        data_value("int", "var n = 0; match Shape::Empty { Shape::Empty => { n = 5; }, _ => { } } n"),
         "5"
     );
     assert_eq!(data_value("int", "let s = Shape::Empty; 1 + match s { Shape::Empty => 1, _ => 2 } * 10"), "11");
@@ -600,7 +610,7 @@ fn guards_see_bindings_and_fall_through() {
     assert_eq!(value(&format!("{DATA} {src}")), "Int(210)");
     // A guard that changes the value matched on doesn't change what later arms see.
     let src = "fn main() -> int {
-                   let n = 1;
+                   var n = 1;
                    let bump = fn() { n = 2; false };
                    match n { _ if bump() => 0, 1 => 1, _ => 2 }
                }";
@@ -658,8 +668,8 @@ fn struct_and_enum_values_are_collected() {
     // stay, as in a program that builds nothing.
     let busy = format!(
         "{DATA} fn main() {{
-             let i = 0;
-             let keep = range(10);
+             var i = 0;
+             var keep = range(10);
              while i < 20 {{ range(50); keep = List::Cons(i, keep); i = i + 1; }}
              assert(keep != List::Nil);
          }}"
@@ -672,18 +682,18 @@ fn struct_and_enum_values_are_collected() {
 fn statements_ending_in_a_block_need_no_semicolon() {
     // An `if` / `else` followed by more statements.
     assert_eq!(
-        main_value("int", "let x = 0; if x == 0 { x = 1; } else { x = 2; } x = x * 10; x"),
+        main_value("int", "var x = 0; if x == 0 { x = 1; } else { x = 2; } x = x * 10; x"),
         "Int(10)"
     );
     // A nested block keeps its statements, and its scope.
-    assert_eq!(main_value("int", "let a = 1; { let a = 2; a = a + 1; } a"), "Int(1)");
-    assert_eq!(main_value("int", "{ let b = 2; b = b * 3; } 4"), "Int(4)");
+    assert_eq!(main_value("int", "var a = 1; { var a = 2; a = a + 1; } a"), "Int(1)");
+    assert_eq!(main_value("int", "{ var b = 2; b = b * 3; } 4"), "Int(4)");
     assert_eq!(main_value("int", "{ 5 }"), "Int(5)");
 }
 
 #[test]
 fn if_expressions_can_be_assigned() {
-    assert_eq!(main_value("int", "let n = 3; n = if n > 2 { n * 2 } else { 0 }; n"), "Int(6)");
+    assert_eq!(main_value("int", "var n = 3; n = if n > 2 { n * 2 } else { 0 }; n"), "Int(6)");
 }
 
 /// Run an Aja source file through every stage, returning the messages of
@@ -737,4 +747,115 @@ fn error_examples_fail_as_described() {
             Err(errors) => assert_eq!(errors, expected, "{}", path.display()),
         }
     }
+}
+
+// ---- Strings ------------------------------------------------------------------
+
+#[test]
+fn strings_concatenate() {
+    assert_eq!(main_value("str", "\"foo\" + \"bar\""), "Str(\"foobar\")");
+    assert_eq!(main_value("str", "var s = \"\"; var i = 0; while i < 3 { s = s + \"ab\"; i = i + 1; } s"), "Str(\"ababab\")");
+    // Inferred: `a + b` on strings.
+    assert_eq!(main_value("str", "let join = fn(a, b) { a + \" \" + b }; join(\"hello\", \"world\")"), "Str(\"hello world\")");
+    // A built string equals a literal with the same contents.
+    assert_eq!(main_value("bool", "\"ab\" + \"c\" == \"abc\""), "Bool(true)");
+    assert_eq!(main_value("bool", "\"ab\" + \"c\" != \"ab\""), "Bool(true)");
+    assert_eq!(main_value("int", "match \"a\" + \"b\" { \"a\" => 1, \"ab\" => 2, _ => 3 }"), "Int(2)");
+    // Multi-byte characters survive.
+    assert_eq!(main_value("str", "\"é\" + \"✓\""), "Str(\"é✓\")");
+}
+
+#[test]
+fn strings_survive_collection_wherever_they_are_kept() {
+    // The stress-mode collector runs before every allocation, so a string
+    // the VM forgot to keep reachable is freed before it is read.
+    let src = "struct Named { name: str, n: int }
+               enum Tree { Leaf(str), Node(Tree, Tree) }
+               fn label(t: Tree) -> str {
+                   match t { Tree::Leaf(s) => s, Tree::Node(l, r) => label(l) + \",\" + label(r) }
+               }
+               fn main() -> str {
+                   let a = \"x\" + \"y\";
+                   let p = Named { name: a + \"z\", n: 1 };
+                   var tail = \"!\";
+                   let shout = fn(s: str) -> str { s + tail };
+                   tail = \"?\" + \"!\";
+                   let t = Tree::Node(Tree::Leaf(p.name), Tree::Node(Tree::Leaf(a), Tree::Leaf(shout(\"hi\"))));
+                   label(t) + \" \" + p.name
+               }";
+    assert_eq!(value(src), "Str(\"xyz,xy,hi?! xyz\")");
+}
+
+#[test]
+fn strings_built_at_runtime_are_collected() {
+    // Only the literals outlive the program (they are kept for good), so
+    // building strings leaves no more behind than not building them.
+    let program = |n: usize| {
+        format!(
+            "struct Box {{ s: str }}
+             fn main() {{
+                 var i = 0;
+                 var s = \"\";
+                 while i < {n} {{ s = s + \"abc\"; let b = Box {{ s: s + \"!\" }}; i = i + 1; }}
+                 assert(s != \"x\");
+             }}"
+        )
+    };
+    let after = |n: usize| {
+        let (mut vm, result) = run_vm(&program(n));
+        result.expect("program runs");
+        vm.collect_garbage();
+        (vm.heap.live(), vm.heap.bytes())
+    };
+    assert_eq!(after(50), after(0));
+}
+
+#[test]
+fn large_strings_trigger_collection() {
+    // Collection is triggered by bytes, not object count: each pass of the
+    // loop makes one 256 KiB string, which a count-based trigger would let
+    // pile up to hundreds of megabytes.
+    let src = "fn main() -> int {
+                   var big = \"0123456789abcdef\";
+                   var i = 0;
+                   while i < 14 { big = big + big; i = i + 1; }
+                   i = 0;
+                   while i < 1000 { let copy = big + big; i = i + 1; }
+                   i
+               }";
+    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let types = check::check_program(&ast).unwrap();
+    let program = Compiler::new().program(&ast, &types).unwrap();
+    let mut vm = Vm::new();
+    assert_eq!(format!("{:?}", vm.run_program(&program).unwrap()), "Int(1000)");
+    assert!(vm.heap.bytes() < 4 << 20, "{} bytes live", vm.heap.bytes());
+}
+
+#[test]
+fn repl_literals_are_kept_and_renumbered_after_a_failed_input() {
+    let mut checker = check::Checker::new();
+    let mut compiler = Compiler::new();
+    let mut vm = Vm::new();
+    vm.heap.stress = true;
+    let mut eval = |src: &str| {
+        let stmt = Parser::new(tokenize(src).unwrap().into_iter()).parse_stmt_only().unwrap();
+        let saved = (checker.clone(), compiler.clone());
+        let types = checker.check_repl_stmt(&stmt).unwrap();
+        let span = Span::new(crate::ast::Location::new(0, 1, 1), crate::ast::Location::new(0, 1, 1));
+        let input = compiler.repl(&stmt, &types, span);
+        match vm.run_repl(&input) {
+            Ok(v) => show(&vm, &v),
+            Err(e) => {
+                // As the REPL does: forget what the failed input defined.
+                (checker, compiler) = saved;
+                e.message
+            }
+        }
+    };
+    assert_eq!(eval("let greet = fn(n: str) -> str { \"hi \" + n }"), "Void");
+    // This input's literal is numbered, then rolled back with the compiler.
+    assert_eq!(eval("{ let s = \"lost\"; assert(false); s }"), "assertion failed");
+    // So the next literal reuses its number, and must not see "lost".
+    assert_eq!(eval("greet(\"there\")"), "Str(\"hi there\")");
+    assert_eq!(eval("\"hi \" + \"again\""), "Str(\"hi again\")");
 }

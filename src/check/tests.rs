@@ -38,9 +38,9 @@ fn help(src: &str) -> String {
 fn well_typed_programs_pass() {
     ok("fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
         fn main() -> int { fib(10) }");
-    ok("fn main() { let x = 1; let y = x * 2; assert(y == 2); print(\"y =\", y, \"\\n\"); }");
+    ok("fn main() { let x = 1; var y = x * 2; assert(y == 2); print(\"y =\", y, \"\\n\"); }");
     ok("fn main() -> bool { let a = true; a && !false || 1.5 < 2.0 }");
-    ok("fn main() -> str { let s = \"a\"; s = \"b\"; s }");
+    ok("fn main() -> str { var s = \"a\"; s = \"b\"; s }");
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn closure_types_are_inferred_from_use() {
     // A parameter's type can come from a later call.
     ok("fn main() -> float { let add = fn(a, b) { a + b }; add(1.5, 2.0) }");
     // Closures capture and mutate their environment.
-    ok("fn counter() -> fn(int) -> int { let c = 0; fn(x) { c = c + x; c } }
+    ok("fn counter() -> fn(int) -> int { var c = 0; fn(x) { c = c + x; c } }
         fn main() -> int { let k = counter(); k(1); k(5) }");
 }
 
@@ -153,10 +153,13 @@ fn operator_errors() {
 
 #[test]
 fn numeric_operators_constrain_inferred_types() {
-    // `a + b` restricts `a` to int or float, so a bool doesn't fit.
+    // `a + b` restricts `a` to int, float, or str, so a bool doesn't fit.
     let (msg, at) = error("fn main() { let add = fn(a, b) { a + b }; add(true, false); }");
-    assert_eq!(msg, "mismatched types: argument 1 of function 'add' expects {number}, found bool");
+    assert_eq!(msg, "mismatched types: argument 1 of function 'add' expects {number or str}, found bool");
     assert_eq!(at, "true");
+    // `a - b` restricts it to int or float.
+    let (msg, _) = error("fn main() { let sub = fn(a, b) { a - b }; sub(\"x\", \"y\"); }");
+    assert_eq!(msg, "mismatched types: argument 1 of function 'sub' expects {number}, found str");
 }
 
 #[test]
@@ -175,11 +178,34 @@ fn let_and_assignment() {
     let (msg, at) = error("fn main() { let x: str = 5; }");
     assert_eq!(msg, "mismatched types: 'x' is declared as str but was given int");
     assert_eq!(at, "5");
-    let (msg, at) = error("fn main() { let x = 1; x = \"s\"; }");
+    let (msg, at) = error("fn main() { var x = 1; x = \"s\"; }");
     assert_eq!(msg, "mismatched types: cannot assign str to 'x', which has type int");
     assert_eq!(at, "\"s\"");
     // Shadowing introduces a new variable, which may have a new type.
     ok("fn main() -> str { let a: int = 1; let a: str = \"s\"; a }");
+}
+
+#[test]
+fn only_var_can_be_assigned() {
+    ok("fn main() -> int { var x = 1; x = x + 1; x }");
+    ok("fn main() -> int { var x: int = 1; let f = fn() { x = 2; }; f(); x }");
+    let (msg, at) = error("fn main() { let x = 1; x = 2; }");
+    assert_eq!(msg, "cannot assign to 'x' because it was declared with 'let'");
+    assert_eq!(at, "x = 2");
+    assert_eq!(help("fn main() { let x = 1; x = 2; }"), "declare it with 'var' to make it mutable: `var x = ...;`");
+    // Closures can't assign to a captured `let` either.
+    let (msg, _) = error("fn main() { let x = 1; let f = fn() { x = 2; }; }");
+    assert_eq!(msg, "cannot assign to 'x' because it was declared with 'let'");
+    let (msg, at) = error("fn f(n: int) { n = 2; }");
+    assert_eq!(msg, "cannot assign to 'n' because it is a parameter");
+    assert_eq!(at, "n = 2");
+    assert_eq!(help("fn f(n: int) { n = 2; }"), "copy it into a mutable variable first: `var n = n;`");
+    let (msg, _) = error("fn f(x: int) { match x { n => { n = 2; } } }");
+    assert_eq!(msg, "cannot assign to 'n' because it is bound by a pattern");
+    // A `var` can shadow a `let` or a parameter, and the other way round.
+    ok("fn f(n: int) -> int { var n = n; n = n + 1; n }");
+    let (msg, _) = error("fn main() { var x = 1; let x = x; x = 2; }");
+    assert_eq!(msg, "cannot assign to 'x' because it was declared with 'let'");
 }
 
 #[test]
@@ -508,4 +534,13 @@ fn unreachable_arms_are_errors() {
     );
     // A guarded arm doesn't make later arms unreachable.
     shapes_ok("fn f(c: Color) -> int { match c { _ if false => 1, Color::Red => 2, _ => 3 } } fn main() { }");
+}
+
+#[test]
+fn plus_concatenates_strings() {
+    ok("fn main() -> str { \"a\" + \"b\" }");
+    ok("fn main() -> str { let f = fn(a, b) { a + b }; f(\"x\", \"y\") }");
+    assert_eq!(error("fn main() { \"a\" + 1; }").0, "cannot apply '+' to str and int");
+    assert_eq!(error("fn main() { \"a\" - \"b\"; }").0, "cannot apply '-' to str and str");
+    assert_eq!(error("fn main() { \"a\" < \"b\"; }").0, "cannot apply '<' to str and str");
 }
