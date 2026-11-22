@@ -8,8 +8,8 @@ concurrency, running on a bytecode VM during development and compiled ahead
 of time to native code through Cranelift. See [DESIGN.md](DESIGN.md) for the
 principles, non-goals, and roadmap.
 
-Today, Aja runs on a **tree-walking interpreter** with a REPL, and type
-annotations are optional and checked at runtime.
+Today, Aja is **statically type-checked** with type inference, and runs on a
+**tree-walking interpreter** with a REPL.
 
 ```rust
 fn fact(n: int) -> int {
@@ -78,16 +78,46 @@ A program is a sequence of top-level `fn` definitions. Execution starts at
 | `bool`  | `true`, `false`         |                                      |
 | `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`      |
 | `void`  | —                       | Result of statements / no value      |
-| `any`   | —                       | Default when no annotation is given  |
-| functions | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
+| `fn(int, str) -> bool` | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
 
-Type annotations are optional and are **checked at runtime**: on `let`
-bindings, function parameters, and function return values. An unannotated
-binding has type `any`, which accepts anything.
+### Type checking
 
-```rust
-let x: int = 5;      // ok
-let s: str = 5;      // TypeError: cannot cast int to str
+Every program is type-checked before it runs, and every type error is
+reported (all of them, not just the first) without running anything. There
+is no `any` type: every value has one static type.
+
+- **Signatures are written out.** Top-level functions annotate every
+  parameter. A function with no `-> T` returns `void`. Function types are
+  written `fn(int, str) -> bool` (or `fn(int)` for a `void` result), so
+  higher-order functions can be declared:
+  `fn apply(f: fn(int) -> int, x: int) -> int { f(x) }`.
+- **Everything inside a body is inferred.** `let` bindings, closure
+  parameters, and closure return types need no annotations; their types come
+  from how they're used:
+
+  ```rust
+  let twice = fn(f, x) { f(f(x)) };       // f: fn(int) -> int, x: int
+  twice(fn(y) { y * 2 }, 3)
+  ```
+
+- **One type per binding.** A closure has a single type, fixed by its uses,
+  so `let id = fn(x) { x }; id(1); id(true);` is an error. (Generic
+  functions, when they arrive, will be declared in signatures.)
+- If a type can't be worked out (e.g. a closure parameter that's never
+  used), the checker asks for an annotation rather than guessing.
+
+The checker lives in `src/check/`. It is unification-based, the core of
+Hindley–Milner inference, without let-polymorphism. Operators that accept
+several types (`+` on int or float; `==` on int, float, bool, or str) keep
+an unresolved type restricted until it's known, much like Rust's `{integer}`.
+
+```
+error: mismatched types: function 'one' has no return type, so it returns void, but this is int
+ --> main.aja:1:12
+  |
+1 | fn one() { 1 }
+  |            ^
+  = help: add a return type after the parameters: `-> int`
 ```
 
 ### Syntax
@@ -95,11 +125,12 @@ let s: str = 5;      // TypeError: cannot cast int to str
 - **Variables:** `let name: type = expr;` declares; `name = expr` assigns.
   Blocks introduce a new lexical scope, and a later `let` with the same name
   shadows the earlier one.
-- **Functions:** `fn name(a: int, b) -> int { ... }`. Parameter and return
-  annotations are optional.
+- **Functions:** `fn name(a: int, b: str) -> int { ... }`. Parameters must be
+  annotated; omitting `-> T` means the function returns `void`.
 - **Closures:** an anonymous `fn` with the same syntax as a named function,
   minus the name: `fn(a, b) { a + b }`, `fn(x: int) -> int { x * 2 }`,
-  `fn() { ... }`. The body is always a block. Closures capture their
+  `fn() { ... }`. The body is always a block, and annotations are optional.
+  Closures capture their
   enclosing environment and can mutate it (e.g. counters).
 - **Blocks are expressions:** the final expression without a trailing `;` is
   the block's value. `return expr;` exits a function early.
@@ -127,8 +158,8 @@ let s: str = 5;      // TypeError: cannot cast int to str
 ## Architecture
 
 ```
-source ──► Lexer ──► Parser ──► AST ──► Interpreter
-          lexer.rs   parse.rs   ast/    interp/
+source ──► Lexer ──► Parser ──► AST ──► Type checker ──► Interpreter
+          lexer.rs   parse.rs   ast/    check/           interp/
                                   └───► compile/ (QBE backend, stub)
 ```
 
@@ -139,6 +170,7 @@ source ──► Lexer ──► Parser ──► AST ──► Interpreter
 | `src/lexer.rs`        | Hand-written lexer; tracks line/column for errors |
 | `src/parse.rs`        | Recursive-descent parser (plus unit tests) |
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
+| `src/check/`          | Static type checker with local type inference |
 | `src/interp/`         | Tree-walking interpreter, environments, values, builtins |
 | `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color) |
 | `src/compile/`        | Code-generation scaffolding targeting QBE (not yet wired up) |
@@ -152,7 +184,7 @@ scoping. Early `return` is implemented by propagating a special
 **Working:** ints, floats, bools, strings; `let`/assignment with lexical
 scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion (each call gets its own scope); arithmetic, comparison, and logical operators;
-optional runtime type checks; built-ins (`print`, `clock`, `sleep`,
+static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser and interpreter unit tests.
 
 **Reserved or partially present, not yet usable:**
@@ -173,19 +205,22 @@ error: expected ';', found 'x'
   = help: add ';' at the end of the statement
 ```
 
-Runtime errors point at the expression that failed, name the types,
-variables, and functions involved, suggest close matches for misspelled
-names, and list the calls that led there (repeated recursive calls are
-collapsed):
+Type errors (see [Type checking](#type-checking)) point at the offending
+expression, say what was expected and what was found, and suggest close
+matches for misspelled names.
+
+Runtime errors, such as division by zero or a failed `assert`, point at the
+expression that failed and list the calls that led there (repeated
+recursive calls are collapsed):
 
 ```
-error: cannot apply '+' to int and str
- --> main.aja:1:11
+error: division by zero
+ --> main.aja:1:23
   |
-1 | fn c(x) { x + "!" }
-  |           ^^^^^^^
-  = note: in function 'c', called at line 2, column 11
-  = note: in function 'b', called at line 3, column 10
+1 | fn c(x: int) -> int { 100 / x }
+  |                       ^^^^^^^
+  = note: in function 'c', called at line 2, column 23
+  = note: in function 'b', called at line 3, column 20
 ```
 
 Every AST expression carries a `Span` (`ast::Expr { kind, span }`), which is

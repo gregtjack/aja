@@ -33,15 +33,12 @@ impl Value {
             Value::Float(_) => Type::Float,
             Value::Bool(_) => Type::Bool,
             Value::String(_) => Type::String,
-            Value::Fn(c) => match c {
-                Function {
-                    params, ret_type, ..
-                } => Type::Fn {
-                    param_types: params.iter().map(|p| p.t.clone()).collect(),
-                    ret_type: Box::new(ret_type.clone()),
-                },
+            // Function values are only checked to be functions at runtime;
+            // their full types are checked statically.
+            Value::Fn(_) | Value::NativeFn(_) => Type::Fn {
+                param_types: vec![],
+                ret_type: Box::new(Type::Void),
             },
-            Value::NativeFn(builtin) => builtin.info().return_type,
             Value::Void => Type::Void,
         }
     }
@@ -51,7 +48,7 @@ impl Value {
 pub struct Function {
     pub params: Vec<Variable>,
     pub body: Statement,
-    pub ret_type: Type,
+    pub ret_type: Option<Type>,
     pub env: Arc<Mutex<RuntimeEnv>>,
 }
 
@@ -65,8 +62,11 @@ impl Display for Value {
                 Function {
                     params, ret_type, ..
                 } => {
-                    let vars: Vec<String> = params.iter().map(|v| v.t.to_string()).collect();
-                    write!(f, "<fn ({}) -> {}>", vars.join(", "), ret_type)
+                    let vars: Vec<String> = params.iter().map(|v| v.to_string()).collect();
+                    match ret_type {
+                        Some(t) => write!(f, "<fn ({}) -> {}>", vars.join(", "), t),
+                        None => write!(f, "<fn ({})>", vars.join(", ")),
+                    }
                 }
             },
             Value::NativeFn(builtin) => write!(f, "<native fn: {}>", builtin.info().name),

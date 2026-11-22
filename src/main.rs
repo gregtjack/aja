@@ -8,6 +8,7 @@ use std::{
 use crate::{diagnostic::Diagnostic, interp::Interpreter};
 use parse::Parser;
 mod ast;
+mod check;
 mod compile;
 mod diagnostic;
 mod interp;
@@ -61,8 +62,13 @@ fn main() -> ExitCode {
         }
     };
 
+    if let Err(errors) = check::check_program(&ast) {
+        report_type_errors(&errors, &script, &path);
+        return ExitCode::FAILURE;
+    }
+
     match Interpreter::new(ast).run() {
-        Ok(value) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::SUCCESS,
         Err(err) => {
             report(&err.to_diagnostic(), &script, &path);
             ExitCode::FAILURE
@@ -78,6 +84,19 @@ fn report(diagnostic: &Diagnostic, source: &str, path: &str) {
     );
 }
 
+/// Print every type error, then a summary line.
+fn report_type_errors(errors: &[check::TypeError], source: &str, path: &str) {
+    for (i, e) in errors.iter().enumerate() {
+        if i > 0 {
+            eprintln!();
+        }
+        report(&e.to_diagnostic(), source, path);
+    }
+    if errors.len() > 1 {
+        eprintln!("\n{} type errors found", errors.len());
+    }
+}
+
 fn run_repl() {
     println!("Welcome to the Aja REPL! Type expressions or statements to evaluate them.");
     println!("Type 'exit' or 'quit' to exit, or 'help' for more information.");
@@ -85,6 +104,7 @@ fn run_repl() {
     let mut interpreter = Interpreter::new(ast::Program {
         definitions: Vec::new(),
     });
+    let mut checker = check::Checker::new();
 
     // Initialize builtins
     if let Err(e) = interpreter.defines() {
@@ -144,7 +164,9 @@ fn run_repl() {
 
                 // Try parsing as a statement first
                 match parser.parse_stmt_only() {
-                    Ok(stmt) => match interpreter.interp_stmt(stmt) {
+                    Ok(stmt) => match checker.check_repl_stmt(&stmt) {
+                        Err(errors) => report_type_errors(&errors, &history, "<repl>"),
+                        Ok(()) => match interpreter.interp_stmt(stmt) {
                         Ok(value) => {
                             // Only print the value if it's not Void
                             if !matches!(value, crate::interp::value::Value::Void) {
@@ -152,14 +174,18 @@ fn run_repl() {
                             }
                         }
                         Err(err) => report(&err.to_diagnostic(), &history, "<repl>"),
+                        },
                     },
                     Err(_) => {
                         // If statement parsing fails, try parsing as an expression
                         let mut parser = Parser::new(tokens.into_iter());
                         match parser.parse_expr_only() {
-                            Ok(expr) => match interpreter.interp_expr(expr) {
-                                Ok(value) => println!("{:?}", value),
-                                Err(err) => report(&err.to_diagnostic(), &history, "<repl>"),
+                            Ok(expr) => match checker.check_repl_expr(&expr) {
+                                Err(errors) => report_type_errors(&errors, &history, "<repl>"),
+                                Ok(()) => match interpreter.interp_expr(expr) {
+                                    Ok(value) => println!("{:?}", value),
+                                    Err(err) => report(&err.to_diagnostic(), &history, "<repl>"),
+                                },
                             },
                             Err(e) => report(&e.to_diagnostic(), &history, "<repl>"),
                         }

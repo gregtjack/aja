@@ -199,7 +199,7 @@ mod tests {
         match result {
             Statement::Let { var, value } => {
                 assert_eq!(var.name, "x");
-                assert_eq!(var.t, Type::Int);
+                assert_eq!(var.t, Some(Type::Int));
                 match value.kind {
                     Expression::Int(42) => {}
                     _ => panic!("Expected value to be 42"),
@@ -244,14 +244,15 @@ mod tests {
                 params,
                 body: _,
                 rtype,
+                ..
             } => {
                 assert_eq!(name, "add");
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].name, "x");
-                assert_eq!(params[0].t, Type::Int);
+                assert_eq!(params[0].t, Some(Type::Int));
                 assert_eq!(params[1].name, "y");
-                assert_eq!(params[1].t, Type::Int);
-                assert_eq!(rtype, &Type::Int);
+                assert_eq!(params[1].t, Some(Type::Int));
+                assert_eq!(rtype, &Some(Type::Int));
             }
             _ => panic!("Expected function definition"),
         }
@@ -299,7 +300,7 @@ mod tests {
         assert_eq!(result.definitions.len(), 0);
     }
 
-    fn parse_closure(src: &str) -> (Vec<crate::ast::Variable>, Type) {
+    fn parse_closure(src: &str) -> (Vec<crate::ast::Variable>, Option<Type>) {
         match create_parser(src).parse_expr_only().unwrap().kind {
             Expression::Closure(params, rt, body) => {
                 assert!(matches!(*body, Statement::Block(..)), "body: {:?}", body);
@@ -313,16 +314,30 @@ mod tests {
     fn test_parse_closures() {
         let (ps, rt) = parse_closure("fn() { 1 }");
         assert!(ps.is_empty());
-        assert_eq!(rt, Type::Any);
+        assert_eq!(rt, None);
 
         let (ps, _) = parse_closure("fn(x) { x * 2 }");
         assert_eq!(ps.len(), 1);
-        assert_eq!(ps[0].t, Type::Any);
+        assert_eq!(ps[0].t, None);
 
         let (ps, rt) = parse_closure("fn(a: int, b: int) -> int { a + b }");
         assert_eq!(ps.len(), 2);
-        assert_eq!(ps[1].t, Type::Int);
-        assert_eq!(rt, Type::Int);
+        assert_eq!(ps[1].t, Some(Type::Int));
+        assert_eq!(rt, Some(Type::Int));
+    }
+
+    #[test]
+    fn test_parse_function_types() {
+        let (ps, rt) = parse_closure("fn(f: fn(int, str) -> bool, g: fn()) -> fn(int) -> int { f }");
+        let fn_t = |ps: Vec<Type>, r: Type| Type::Fn {
+            param_types: ps,
+            ret_type: Box::new(r),
+        };
+        assert_eq!(ps[0].t, Some(fn_t(vec![Type::Int, Type::String], Type::Bool)));
+        assert_eq!(ps[1].t, Some(fn_t(vec![], Type::Void)));
+        assert_eq!(rt, Some(fn_t(vec![Type::Int], Type::Int)));
+        let err = create_parser("fn main() { let x: any = 1; x }").parse().unwrap_err();
+        assert!(err.help.unwrap().contains("no 'any' type"));
     }
 
     #[test]
@@ -436,8 +451,8 @@ where
             return Err(self.expected("a function name after 'fn'"));
         }
 
-        let ident = match self.next() {
-            Some((_, Token::Ident(i), _)) => i,
+        let (ident, name_span) = match self.next() {
+            Some((start, Token::Ident(i), end)) => (i, Span::new(start, end)),
             _ => unreachable!(),
         };
 
@@ -447,6 +462,7 @@ where
 
         Ok(Definition::Function {
             name: ident,
+            name_span,
             params,
             body,
             rtype,
@@ -460,13 +476,13 @@ where
 
         if !tok_matches!(self, Token::RightParen) {
             loop {
-                let name = match self.peek() {
-                    Some((_, Token::Ident(id), _)) => id.clone(),
+                let (name, span) = match self.peek() {
+                    Some((start, Token::Ident(id), end)) => (id.clone(), Span::new(*start, *end)),
                     _ => return Err(self.expected("a parameter name")),
                 };
                 self.next();
-                let vtype: Type = self.parse_type_annotation()?;
-                xs.push(Variable::new(name, vtype));
+                let vtype = self.parse_type_annotation()?;
+                xs.push(Variable::new(name, vtype, span));
 
                 if tok_matches!(self, Token::Comma) {
                     self.next();
@@ -544,13 +560,15 @@ where
     fn parse_let(&mut self) -> ParseResult<Statement> {
         self.consume(Token::Let)?;
 
-        let id = match self.peek() {
-            Some((_, Token::Ident(id), _)) if id != "true" && id != "false" => id.clone(),
+        let (id, span) = match self.peek() {
+            Some((start, Token::Ident(id), end)) if id != "true" && id != "false" => {
+                (id.clone(), Span::new(*start, *end))
+            }
             _ => return Err(self.expected("a variable name after 'let'")),
         };
         self.next();
 
-        let ttype: Type = self.parse_type_annotation()?;
+        let ttype = self.parse_type_annotation()?;
         if !tok_matches!(self, Token::Equal) {
             return Err(self
                 .expected("'='")
@@ -559,7 +577,7 @@ where
         self.consume(Token::Equal)?;
         let e = self.parse_expr()?;
         Ok(Statement::Let {
-            var: Variable::new(id, ttype),
+            var: Variable::new(id, ttype, span),
             value: e,
         })
     }
@@ -850,33 +868,63 @@ where
         Ok(Expr::new(kind, Span::new(span.start, self.last_end())))
     }
 
-    fn parse_type_annotation(&mut self) -> ParseResult<Type> {
+    fn parse_type_annotation(&mut self) -> ParseResult<Option<Type>> {
         if tok_matches!(self, Token::Colon) {
             self.consume(Token::Colon)?;
-            self.parse_type_name()
+            Ok(Some(self.parse_type_name()?))
         } else {
-            Ok(Type::Any)
+            Ok(None)
         }
     }
 
-    fn parse_fn_return_type_annotation(&mut self) -> ParseResult<Type> {
+    fn parse_fn_return_type_annotation(&mut self) -> ParseResult<Option<Type>> {
         if tok_matches!(self, Token::RightArrow) {
             self.consume(Token::RightArrow)?;
-            self.parse_type_name()
+            Ok(Some(self.parse_type_name()?))
         } else {
-            Ok(Type::Any)
+            Ok(None)
         }
     }
 
-    /// Parse a type name such as `int` or `str`.
+    /// Parse a type such as `int`, `str`, or `fn(int, bool) -> str`.
     fn parse_type_name(&mut self) -> ParseResult<Type> {
         let tok = self.peek().cloned();
-        match self.parse_primary()?.kind {
-            Expression::Var(v) => Type::try_from(v.to_string()).map_err(|_| {
-                self.error(tok, format!("unknown type '{v}'"))
-                    .help("valid types are: int, float, bool, str, void, any")
-            }),
-            _ => Err(self.error(tok, "expected a type name".to_string())),
+        match tok {
+            Some((_, Token::Fn, _)) => {
+                self.next();
+                self.consume(Token::LeftParen)?;
+                let mut param_types = Vec::new();
+                if !tok_matches!(self, Token::RightParen) {
+                    loop {
+                        param_types.push(self.parse_type_name()?);
+                        if tok_matches!(self, Token::Comma) {
+                            self.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.consume(Token::RightParen)?;
+                let ret_type = self.parse_fn_return_type_annotation()?.unwrap_or(Type::Void);
+                Ok(Type::Fn {
+                    param_types,
+                    ret_type: Box::new(ret_type),
+                })
+            }
+            Some((_, Token::Ident(ref v), _)) => {
+                let v = v.clone();
+                self.next();
+                Type::try_from(v.to_string()).map_err(|_| {
+                    let help = if v == "any" {
+                        "Aja has no 'any' type; every value has one static type. \
+                         Remove the annotation to have it inferred"
+                    } else {
+                        "valid types are: int, float, bool, str, void, and fn(...) -> ..."
+                    };
+                    self.error(tok, format!("unknown type '{v}'")).help(help)
+                })
+            }
+            _ => Err(self.expected("a type")),
         }
     }
 

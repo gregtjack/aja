@@ -11,11 +11,14 @@ pub struct BuiltinInfo {
     pub description: &'static str,
     pub param_types: Vec<Type>,
     pub return_type: Type,
+    /// Takes any number of arguments of any type (`param_types` is ignored).
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Builtin {
     Print,
+    PrintLn,
     Clock,
     Sleep,
     Assert,
@@ -27,26 +30,37 @@ impl Builtin {
             Builtin::Print => BuiltinInfo {
                 name: "print",
                 description: "Prints values to stdout",
-                param_types: vec![], // Variadic
+                param_types: vec![],
                 return_type: Type::Void,
+                variadic: true,
+            },
+            Builtin::PrintLn => BuiltinInfo {
+                name: "println",
+                description: "Prints values to stdout, appending a new line at the end.",
+                param_types: vec![],
+                return_type: Type::Void,
+                variadic: true,
             },
             Builtin::Clock => BuiltinInfo {
                 name: "clock",
                 description: "Returns current time in milliseconds",
                 param_types: vec![],
                 return_type: Type::Int,
+                variadic: false,
             },
             Builtin::Sleep => BuiltinInfo {
                 name: "sleep",
                 description: "Sleeps for specified milliseconds",
                 param_types: vec![Type::Int],
                 return_type: Type::Void,
+                variadic: false,
             },
             Builtin::Assert => BuiltinInfo {
                 name: "assert",
                 description: "Stops execution if condition is false",
                 param_types: vec![Type::Bool],
                 return_type: Type::Void,
+                variadic: false,
             },
         }
     }
@@ -54,6 +68,7 @@ impl Builtin {
     pub fn all() -> Vec<Builtin> {
         vec![
             Builtin::Print,
+            Builtin::PrintLn,
             Builtin::Clock,
             Builtin::Sleep,
             Builtin::Assert,
@@ -64,6 +79,16 @@ impl Builtin {
         match self {
             Builtin::Print => {
                 print!(
+                    "{}",
+                    args.into_iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<String>>()
+                        .join(" ")
+                );
+                Ok(Value::Void)
+            }
+            Builtin::PrintLn => {
+                println!(
                     "{}",
                     args.into_iter()
                         .map(|a| a.to_string())
@@ -86,9 +111,10 @@ impl Builtin {
                     Ok(Value::Void)
                 } else {
                     Err(RuntimeError::type_error(format!(
-                            "sleep() expects an int (milliseconds), found {}",
-                            args.first().map_or("nothing".to_string(), |a| a.type_name())
-                        )))
+                        "sleep() expects an int (milliseconds), found {}",
+                        args.first()
+                            .map_or("nothing".to_string(), |a| a.type_name())
+                    )))
                 }
             }
             Builtin::Assert => {
@@ -104,7 +130,10 @@ impl Builtin {
                     }
                     Ok(Value::Void)
                 } else {
-                    Err(RuntimeError::type_error(format!("assert() expects a bool, found {}", args[0].type_name())))
+                    Err(RuntimeError::type_error(format!(
+                        "assert() expects a bool, found {}",
+                        args[0].type_name()
+                    )))
                 }
             }
         }

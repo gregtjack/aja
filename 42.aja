@@ -1,12 +1,8 @@
 fn main() {
-  let start = clock();
+  let n = double(5);
+  println(n);
+}
 
-  let c = 0;
-  while (c < 1000) {
-    c = c + 1;
-  }
-
-  let end = clock();
-
-  println("duration:", end - start, "ms");
+fn double(x: int) -> int {
+    x * 2
 }

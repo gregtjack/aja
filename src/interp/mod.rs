@@ -13,7 +13,7 @@ use color_eyre::Result;
 use env::RuntimeEnv;
 use value::{Function, Value};
 
-mod builtin;
+pub mod builtin;
 mod env;
 pub mod value;
 
@@ -171,7 +171,7 @@ impl Interpreter {
         };
 
         let (res, ret_span) = self.run_body(body)?;
-        Self::check_return(&res, &ret_type, Some(&"main".into()), ret_span)?;
+        Self::check_return(&res, ret_type.as_ref(), Some(&"main".into()), ret_span)?;
         Ok(res)
     }
 
@@ -204,6 +204,7 @@ impl Interpreter {
                     params,
                     body,
                     rtype,
+                    ..
                 } => {
                     let existing = self.env.lock().unwrap().values.get(name).cloned();
                     match existing {
@@ -362,12 +363,12 @@ impl Interpreter {
                 // clobber other calls' bindings (e.g. during recursion).
                 let mut call_env = RuntimeEnv::from_enclosing(env);
                 for ((var, value), arg_span) in params.iter().zip(args).zip(arg_spans) {
-                    if !Self::matches_type(&value, &var.t) {
+                    if !Self::matches_type(&value, var.t.as_ref()) {
                         return Err(RuntimeError::type_error(format!(
                             "mismatched types: parameter '{}' of {} expects {}, found {}",
                             var.name,
                             describe(&name),
-                            var.t,
+                            var.t.as_ref().unwrap(),
                             value.type_name()
                         ))
                         .at(arg_span));
@@ -383,7 +384,7 @@ impl Interpreter {
                 // Errors located inside the callee get a note saying where it was called.
                 let frame = |e: RuntimeError| e.called_from(describe(&name), call_site);
                 let (ret, ret_span) = result.map_err(frame)?;
-                Self::check_return(&ret, &ret_type, name.as_ref(), ret_span).map_err(frame)?;
+                Self::check_return(&ret, ret_type.as_ref(), name.as_ref(), ret_span).map_err(frame)?;
                 Ok(ret)
             }
             Value::NativeFn(builtin) => builtin.execute(args),
@@ -401,11 +402,11 @@ impl Interpreter {
     fn interp_let(&mut self, var: Variable, e: Expr) -> Answer {
         let span = e.span;
         let r = self.interp_expr(e)?;
-        if !Self::matches_type(&r, &var.t) {
+        if !Self::matches_type(&r, var.t.as_ref()) {
             return Err(RuntimeError::type_error(format!(
                 "mismatched types: '{}' is declared as {} but was given {}",
                 var.name,
-                var.t,
+                var.t.as_ref().unwrap(),
                 r.type_name()
             ))
             .at(span));
@@ -573,13 +574,20 @@ impl Interpreter {
         }
     }
 
-    fn matches_type(v: &Value, t: &Type) -> bool {
-        matches!(t, Type::Any) || v.to_type() == *t
+    /// Whether `v` fits annotation `t` (no annotation accepts anything).
+    /// Function values only need to be functions; their signatures are
+    /// checked statically.
+    fn matches_type(v: &Value, t: Option<&Type>) -> bool {
+        match t {
+            None => true,
+            Some(Type::Fn { .. }) => matches!(v, Value::Fn(_) | Value::NativeFn(_)),
+            Some(t) => v.to_type() == *t,
+        }
     }
 
     fn check_return(
         v: &Value,
-        t: &Type,
+        t: Option<&Type>,
         name: Option<&Id>,
         span: Option<Span>,
     ) -> Result<(), RuntimeError> {
@@ -591,7 +599,8 @@ impl Interpreter {
             None => "function".to_string(),
         };
         let err = RuntimeError::type_error(format!(
-            "mismatched types: {who} is declared to return {t} but returned {}",
+            "mismatched types: {who} is declared to return {} but returned {}",
+            t.unwrap(),
             v.type_name()
         ));
         // Point at the returned expression when we know it; otherwise the

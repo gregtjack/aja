@@ -53,32 +53,28 @@ impl Expr {
 
 pub type Id = EcoString;
 
+/// A binding introduced by a parameter or `let`, with its optional annotation.
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Id,
-    pub t: Type,
+    /// The annotated type, or `None` when the type is left to inference.
+    pub t: Option<Type>,
+    /// Where the name appears.
+    pub span: Span,
 }
 
 impl Display for Variable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.name, self.t)
+        match &self.t {
+            Some(t) => write!(f, "{}: {}", self.name, t),
+            None => write!(f, "{}", self.name),
+        }
     }
 }
 
 impl Variable {
-    pub fn new(name: Id, t: Type) -> Self {
-        Self { name, t }
-    }
-
-    pub fn any(name: Id) -> Self {
-        Self {
-            name,
-            t: Default::default(),
-        }
-    }
-
-    pub fn to_string(&self) -> String {
-        format!("{}: {}", self.name, self.t)
+    pub fn new(name: Id, t: Option<Type>, span: Span) -> Self {
+        Self { name, t, span }
     }
 }
 
@@ -91,9 +87,12 @@ pub struct Program {
 pub enum Definition {
     Function {
         name: Id,
+        /// Where the function's name appears.
+        name_span: Span,
         params: Vec<Variable>,
         body: Statement,
-        rtype: Type,
+        /// The declared return type; `None` means `void`.
+        rtype: Option<Type>,
     },
     Struct {
         name: Id,
@@ -125,7 +124,8 @@ pub enum Expression {
     Var(Id),
     Call(Box<Expr>, Vec<Expr>),
     Assign(Id, Box<Expr>),
-    Closure(Vec<Variable>, Type, Box<Statement>),
+    /// Parameters, optional return type (inferred when absent), and body.
+    Closure(Vec<Variable>, Option<Type>, Box<Statement>),
 }
 
 #[derive(Debug, Clone)]

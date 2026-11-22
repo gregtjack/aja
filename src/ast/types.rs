@@ -4,7 +4,6 @@ use color_eyre::eyre::bail;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    Any,
     Int,
     Float,
     Bool,
@@ -17,16 +16,9 @@ pub enum Type {
     Void,
 }
 
-impl Default for Type {
-    fn default() -> Self {
-        Self::Any
-    }
-}
-
 impl Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Type::Any => write!(f, "any"),
             Type::Int => write!(f, "int"),
             Type::Float => write!(f, "float"),
             Type::Bool => write!(f, "bool"),
@@ -35,16 +27,8 @@ impl Display for Type {
                 param_types,
                 ret_type,
             } => {
-                write!(
-                    f,
-                    "Fn<{}> -> {}",
-                    param_types
-                        .iter()
-                        .map(|t| format!("{}", t))
-                        .collect::<Vec<String>>()
-                        .join(", "),
-                    ret_type
-                )
+                let params: Vec<String> = param_types.iter().map(|t| t.to_string()).collect();
+                write!(f, "fn({}) -> {}", params.join(", "), ret_type)
             }
             Type::List(t) => write!(f, "List<{}>", t),
             Type::Void => write!(f, "void"),
@@ -62,7 +46,6 @@ impl TryFrom<String> for Type {
             "bool" => Ok(Self::Bool),
             "str" => Ok(Self::String),
             "void" => Ok(Self::Void),
-            "any" => Ok(Self::Any),
             _ => bail!("'{value}' is not a valid type"),
         }
     }

@@ -115,8 +115,10 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
 
 ## Roadmap
 
-1. **Static type checker.** Make annotations required on function signatures,
-   infer local types, and remove `any` as the default type.
+1. **Static type checker.** ✅ Annotations are required on function
+   signatures, local types are inferred by unification (without
+   let-polymorphism), and `any` is gone. Next: drop the interpreter's
+   now-redundant runtime type checks.
 2. **Data types.** Structs, enums with data, exhaustive `match`, `Option`,
    `Result`, and `?`.
 3. **Bytecode VM.** Compile the typed AST to bytecode and retire the
