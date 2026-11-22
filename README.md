@@ -151,9 +151,15 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 | Function         | Description                                      |
 |------------------|--------------------------------------------------|
 | `print(a, b, …)` | Prints its arguments separated by spaces (no trailing newline) |
+| `println(a, b, …)` | Like `print`, followed by a newline            |
 | `clock()`        | Current time in milliseconds, as an `int`        |
 | `sleep(ms)`      | Sleeps for `ms` milliseconds                     |
 | `assert(cond)`   | Stops execution with an error if `cond` is false |
+
+To add a built-in, declare its name and signature in `BUILTINS`
+(`src/builtins.rs`), which the type checker reads, and implement it in each
+backend (for the interpreter, `src/interp/native.rs`). A built-in without an
+implementation fails the tests and stops the interpreter at startup.
 
 ## Architecture
 
@@ -171,7 +177,8 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/parse.rs`        | Recursive-descent parser (plus unit tests) |
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
 | `src/check/`          | Static type checker with local type inference |
-| `src/interp/`         | Tree-walking interpreter, environments, values, builtins |
+| `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends |
+| `src/interp/`         | Tree-walking interpreter, environments, values, built-in implementations |
 | `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color) |
 | `src/compile/`        | Code-generation scaffolding targeting QBE (not yet wired up) |
 

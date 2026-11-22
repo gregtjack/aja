@@ -190,7 +190,7 @@ fn calls() {
     assert_eq!(error("fn main() { assert(); }").0, "function 'assert' takes 1 argument but 0 were given");
     assert_eq!(
         error("fn main() { sleep(\"long\"); }").0,
-        "mismatched types: argument 1 of function 'sleep' expects int, found str"
+        "mismatched types: parameter 'ms' of function 'sleep' expects int, found str"
     );
     let (msg, at) = error("fn main() { let x = 1; x(2); }");
     assert_eq!(msg, "cannot call a value of type int ('x' is not a function)");

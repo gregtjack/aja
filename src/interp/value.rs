@@ -5,7 +5,8 @@ use std::{
 
 use crate::ast::{types::Type, Statement, Variable};
 
-use super::{env::RuntimeEnv, Builtin};
+use super::{env::RuntimeEnv, native::NativeFn};
+use crate::builtins::Builtin;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -14,7 +15,8 @@ pub enum Value {
     Bool(bool),
     String(String),
     Fn(Function),
-    NativeFn(Builtin),
+    /// A built-in: its signature and the interpreter's implementation.
+    NativeFn(&'static Builtin, NativeFn),
     Void,
 }
 
@@ -22,7 +24,7 @@ impl Value {
     /// The type's name as shown in error messages, e.g. `int` or `fn`.
     pub fn type_name(&self) -> String {
         match self {
-            Value::Fn(_) | Value::NativeFn(_) => "fn".to_string(),
+            Value::Fn(_) | Value::NativeFn(..) => "fn".to_string(),
             other => other.to_type().to_string(),
         }
     }
@@ -35,7 +37,7 @@ impl Value {
             Value::String(_) => Type::String,
             // Function values are only checked to be functions at runtime;
             // their full types are checked statically.
-            Value::Fn(_) | Value::NativeFn(_) => Type::Fn {
+            Value::Fn(_) | Value::NativeFn(..) => Type::Fn {
                 param_types: vec![],
                 ret_type: Box::new(Type::Void),
             },
@@ -69,7 +71,7 @@ impl Display for Value {
                     }
                 }
             },
-            Value::NativeFn(builtin) => write!(f, "<native fn: {}>", builtin.info().name),
+            Value::NativeFn(builtin, _) => write!(f, "<native fn: {}>", builtin.name),
             Value::Void => write!(f, "()"),
             Value::Float(n) => write!(f, "{n:?}"),
         }

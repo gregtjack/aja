@@ -25,8 +25,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     ast::{types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Span, Statement, Variable},
+    builtins::{Params, BUILTINS},
     diagnostic::{closest_match, Diagnostic},
-    interp::builtin::Builtin,
 };
 
 #[cfg(test)]
@@ -183,18 +183,19 @@ pub struct Checker {
 impl Checker {
     pub fn new() -> Self {
         let mut globals = HashMap::new();
-        let param_names = HashMap::new();
-        // The interpreter's built-ins are the single source of truth.
-        for builtin in Builtin::all() {
-            let info = builtin.info();
-            let binding = if info.variadic {
-                Binding { ty: Ty::Error, kind: BindingKind::Variadic }
-            } else {
-                let params = info.param_types.iter().map(Self::from_ast).collect();
-                let ty = Ty::Fn(params, Box::new(Self::from_ast(&info.return_type)));
-                Binding { ty, kind: BindingKind::Function }
+        let mut param_names = HashMap::new();
+        for builtin in BUILTINS {
+            let binding = match &builtin.params {
+                Params::Variadic => Binding { ty: Ty::Error, kind: BindingKind::Variadic },
+                Params::Fixed(params) => {
+                    let names = params.iter().map(|(n, _)| Id::from(*n)).collect();
+                    param_names.insert(Id::from(builtin.name), names);
+                    let params = params.iter().map(|(_, t)| Self::from_ast(t)).collect();
+                    let ty = Ty::Fn(params, Box::new(Self::from_ast(&builtin.returns)));
+                    Binding { ty, kind: BindingKind::Function }
+                }
             };
-            globals.insert(Id::from(info.name), binding);
+            globals.insert(Id::from(builtin.name), binding);
         }
 
         Checker {

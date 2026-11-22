@@ -5,16 +5,16 @@ use std::{
 };
 
 use crate::{
+    builtins::BUILTINS,
     ast::{types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Span, Statement, Variable},
     diagnostic::{closest_match, Diagnostic},
-    interp::builtin::Builtin,
 };
 use color_eyre::Result;
 use env::RuntimeEnv;
 use value::{Function, Value};
 
-pub mod builtin;
 mod env;
+mod native;
 pub mod value;
 
 #[derive(Debug, Clone)]
@@ -192,9 +192,19 @@ impl Interpreter {
         }
     }
 
+    /// The interpreter's implementation of a built-in. Every built-in must
+    /// have one; `native::tests` checks this too.
+    fn native(name: &str) -> native::NativeFn {
+        native::implementation(name)
+            .unwrap_or_else(|| panic!("built-in '{name}' has no implementation in the interpreter"))
+    }
+
     pub fn defines(&mut self) -> Result<(), RuntimeError> {
-        for builtin in Builtin::all() {
-            self.define_builtin(builtin)?;
+        for builtin in BUILTINS {
+            self.env
+                .lock()
+                .unwrap()
+                .define(builtin.name.into(), Value::NativeFn(builtin, Self::native(builtin.name)))?;
         }
 
         for def in &self.program.definitions {
@@ -208,7 +218,7 @@ impl Interpreter {
                 } => {
                     let existing = self.env.lock().unwrap().values.get(name).cloned();
                     match existing {
-                        Some(Value::NativeFn(_)) => {
+                        Some(Value::NativeFn(..)) => {
                             return Err(RuntimeError::adhoc(format!(
                                 "function '{name}' conflicts with the built-in function of the same name"
                             )))
@@ -239,14 +249,6 @@ impl Interpreter {
         }
 
         Ok(())
-    }
-
-    fn define_builtin(&mut self, builtin: Builtin) -> Result<(), RuntimeError> {
-        let info = builtin.info();
-        self.env
-            .lock()
-            .unwrap()
-            .define(info.name.into(), Value::NativeFn(builtin))
     }
 
     pub fn interp_stmt(&mut self, stmt: Statement) -> Answer {
@@ -387,7 +389,7 @@ impl Interpreter {
                 Self::check_return(&ret, ret_type.as_ref(), name.as_ref(), ret_span).map_err(frame)?;
                 Ok(ret)
             }
-            Value::NativeFn(builtin) => builtin.execute(args),
+            Value::NativeFn(_, run) => run(&args).map_err(RuntimeError::adhoc),
             other => Err(RuntimeError::type_error(format!(
                 "cannot call a value of type {}{}",
                 other.type_name(),
@@ -580,7 +582,7 @@ impl Interpreter {
     fn matches_type(v: &Value, t: Option<&Type>) -> bool {
         match t {
             None => true,
-            Some(Type::Fn { .. }) => matches!(v, Value::Fn(_) | Value::NativeFn(_)),
+            Some(Type::Fn { .. }) => matches!(v, Value::Fn(_) | Value::NativeFn(..)),
             Some(t) => v.to_type() == *t,
         }
     }

@@ -8,6 +8,7 @@ use std::{
 use crate::{diagnostic::Diagnostic, interp::Interpreter};
 use parse::Parser;
 mod ast;
+mod builtins;
 mod check;
 mod compile;
 mod diagnostic;
