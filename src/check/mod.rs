@@ -24,13 +24,18 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    ast::{types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Span, Statement, Variable},
+    ast::{
+        types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Span, Statement, Variable,
+    },
     builtins::{Params, BUILTINS},
     diagnostic::{closest_match, Diagnostic},
 };
 
+mod data;
 #[cfg(test)]
 mod tests;
+
+use data::{EnumInfo, StructInfo};
 
 /// A type as the checker sees it: like [`Type`], plus inference variables
 /// and two types for special cases.
@@ -42,6 +47,8 @@ pub enum Ty {
     Str,
     Void,
     Fn(Vec<Ty>, Box<Ty>),
+    /// A struct or enum, by name.
+    Named(Id),
     /// An inference variable, indexing [`Checker::vars`].
     Var(usize),
     /// The type of something that never produces a value, such as a block
@@ -57,7 +64,8 @@ pub enum Ty {
 enum Class {
     /// Any type.
     Any,
-    /// A type that supports `==`: int, float, bool, or str.
+    /// A type that supports `==`: int, float, bool, str, or a struct or
+    /// enum made of such types.
     Eq,
     /// A type that supports arithmetic and ordering: int or float.
     Num,
@@ -70,7 +78,8 @@ impl Class {
         self.max(other)
     }
 
-    /// Whether the concrete type `t` belongs to this class.
+    /// Whether the concrete type `t` belongs to this class, for types other
+    /// than structs and enums (see [`Checker::admits`]).
     fn admits(self, t: &Ty) -> bool {
         match (self, t) {
             (_, Ty::Never | Ty::Error) | (Class::Any, _) => true,
@@ -126,13 +135,17 @@ pub enum OperandType {
     Float,
     Bool,
     Str,
+    /// A struct or enum, compared field by field.
+    Data,
 }
 
 /// What the checker learned that the backends need: the operand type of
-/// every arithmetic, comparison, and negation expression.
+/// every arithmetic, comparison, and negation expression, and which field
+/// each field access reads.
 #[derive(Debug, Default)]
 pub struct Types {
     operands: HashMap<SpanKey, OperandType>,
+    fields: HashMap<SpanKey, u16>,
 }
 
 /// Identifies an expression by where it is in the source. Two operator
@@ -151,6 +164,15 @@ impl Types {
             .operands
             .get(&key(e.span))
             .expect("the type checker records the operand type of every operator")
+    }
+
+    /// The index, in declaration order, of the field that the field access
+    /// `e` reads.
+    pub fn field(&self, e: &Expr) -> u16 {
+        *self
+            .fields
+            .get(&key(e.span))
+            .expect("the type checker records the field of every field access")
     }
 }
 
@@ -220,37 +242,48 @@ pub struct Checker {
     /// The operand type of each operator expression, solved once checking
     /// is done.
     operands: Vec<(SpanKey, Ty)>,
+    /// The field index of each field access.
+    fields: HashMap<SpanKey, u16>,
+    structs: HashMap<Id, StructInfo>,
+    enums: HashMap<Id, EnumInfo>,
 }
 
 impl Checker {
     pub fn new() -> Self {
-        let mut globals = HashMap::new();
-        let mut param_names = HashMap::new();
-        for builtin in BUILTINS {
-            let binding = match &builtin.params {
-                Params::Variadic => Binding { ty: Ty::Error, kind: BindingKind::Variadic },
-                Params::Fixed(params) => {
-                    let names = params.iter().map(|(n, _)| Id::from(*n)).collect();
-                    param_names.insert(Id::from(builtin.name), names);
-                    let params = params.iter().map(|(_, t)| Self::from_ast(t)).collect();
-                    let ty = Ty::Fn(params, Box::new(Self::from_ast(&builtin.returns)));
-                    Binding { ty, kind: BindingKind::Function }
-                }
-            };
-            globals.insert(Id::from(builtin.name), binding);
-        }
-
-        Checker {
+        let mut checker = Checker {
             vars: Vec::new(),
-            scopes: vec![globals],
-            param_names,
+            scopes: vec![HashMap::new()],
+            param_names: HashMap::new(),
             user_fns: HashSet::new(),
             fns: Vec::new(),
             pending: Vec::new(),
             errors: Vec::new(),
             infinite: false,
             operands: Vec::new(),
+            fields: HashMap::new(),
+            structs: HashMap::new(),
+            enums: HashMap::new(),
+        };
+        for builtin in BUILTINS {
+            let binding = match &builtin.params {
+                Params::Variadic => Binding {
+                    ty: Ty::Error,
+                    kind: BindingKind::Variadic,
+                },
+                Params::Fixed(params) => {
+                    let names = params.iter().map(|(n, _)| Id::from(*n)).collect();
+                    checker.param_names.insert(Id::from(builtin.name), names);
+                    let params = params.iter().map(|(_, t)| checker.from_ast(t)).collect();
+                    let ty = Ty::Fn(params, Box::new(checker.from_ast(&builtin.returns)));
+                    Binding {
+                        ty,
+                        kind: BindingKind::Function,
+                    }
+                }
+            };
+            checker.scopes[0].insert(Id::from(builtin.name), binding);
         }
+        checker
     }
 
     /// The operand types recorded so far, or the errors found so far in
@@ -266,6 +299,7 @@ impl Checker {
                         Ty::Float => OperandType::Float,
                         Ty::Bool => OperandType::Bool,
                         Ty::Str => OperandType::Str,
+                        Ty::Named(_) => OperandType::Data,
                         // `never` operands are in code that can't run, and
                         // anything still unknown has been reported.
                         _ => OperandType::Int,
@@ -273,7 +307,8 @@ impl Checker {
                     (k, t)
                 })
                 .collect();
-            return Ok(Types { operands });
+            let fields = std::mem::take(&mut self.fields);
+            return Ok(Types { operands, fields });
         }
         errors.sort_by_key(|e| (e.span.start.line, e.span.start.col));
         Err(errors)
@@ -286,29 +321,41 @@ impl Checker {
     // ---- Programs and functions -------------------------------------------
 
     fn program(&mut self, program: &Program) {
+        self.declare_types(program);
+
         // Declare every function first, so bodies can call functions defined
         // later in the file (including mutually recursive ones).
         let mut sigs = Vec::new();
         for def in &program.definitions {
-            let Definition::Function { name, name_span, params, rtype, .. } = def else {
-                continue; // Structs can't be parsed yet; the compiler rejects them.
+            let Definition::Function {
+                name,
+                name_span,
+                params,
+                rtype,
+                ..
+            } = def
+            else {
+                continue;
             };
             let param_tys: Vec<Ty> = params
                 .iter()
                 .map(|p| match &p.t {
-                    Some(t) => Self::from_ast(t),
+                    Some(t) => self.from_ast(t),
                     None => self.fresh(Class::Any),
                 })
                 .collect();
-            let ret = rtype.as_ref().map_or(Ty::Void, Self::from_ast);
-            sigs.push(param_tys.clone());
+            let ret = rtype.as_ref().map_or(Ty::Void, |t| self.from_ast(t));
+            sigs.push((param_tys.clone(), ret.clone()));
 
             match self.scopes[0].get(name) {
                 Some(_) if self.user_fns.contains(name) => {
-                    self.error(TypeError::new(
-                        format!("function '{name}' is defined more than once"),
-                        *name_span,
-                    ).help("rename one of the definitions"));
+                    self.error(
+                        TypeError::new(
+                            format!("function '{name}' is defined more than once"),
+                            *name_span,
+                        )
+                        .help("rename one of the definitions"),
+                    );
                 }
                 Some(_) => {
                     self.error(TypeError::new(
@@ -319,22 +366,32 @@ impl Checker {
                 None => {
                     self.scopes[0].insert(
                         name.clone(),
-                        Binding { ty: Ty::Fn(param_tys, Box::new(ret)), kind: BindingKind::Function },
+                        Binding {
+                            ty: Ty::Fn(param_tys, Box::new(ret)),
+                            kind: BindingKind::Function,
+                        },
                     );
-                    self.param_names.insert(name.clone(), params.iter().map(|p| p.name.clone()).collect());
+                    self.param_names.insert(
+                        name.clone(),
+                        params.iter().map(|p| p.name.clone()).collect(),
+                    );
                     self.user_fns.insert(name.clone());
                 }
             }
         }
 
         let fns = program.definitions.iter().filter_map(|d| match d {
-            Definition::Function { name, name_span, params, body, rtype } => {
-                Some((name, name_span, params, body, rtype))
-            }
+            Definition::Function {
+                name,
+                name_span,
+                params,
+                body,
+                rtype,
+            } => Some((name, name_span, params, body, rtype)),
             _ => None,
         });
-        for ((name, name_span, params, body, rtype), param_tys) in fns.clone().zip(&sigs) {
-            let ret = rtype.as_ref().map_or(Ty::Void, Self::from_ast);
+        for ((name, name_span, params, body, rtype), (param_tys, ret)) in fns.clone().zip(&sigs) {
+            let ret = ret.clone();
             let ctx = FnContext {
                 name: Some(name.clone()),
                 ret,
@@ -347,7 +404,7 @@ impl Checker {
 
         // Signatures must be written out. Report missing parameter types last,
         // so the suggested annotation can use what the bodies revealed.
-        for ((name, _, params, _, _), param_tys) in fns.zip(&sigs) {
+        for ((name, _, params, _, _), (param_tys, _)) in fns.zip(&sigs) {
             for (p, t) in params.iter().zip(param_tys) {
                 if p.t.is_some() {
                     continue;
@@ -371,7 +428,13 @@ impl Checker {
     }
 
     /// Check a function or closure body against its signature.
-    fn function(&mut self, ctx: FnContext, params: &[Variable], param_tys: &[Ty], body: &Statement) {
+    fn function(
+        &mut self,
+        ctx: FnContext,
+        params: &[Variable],
+        param_tys: &[Ty],
+        body: &Statement,
+    ) {
         self.scopes.push(HashMap::new());
         for (p, t) in params.iter().zip(param_tys) {
             self.define(p.name.clone(), t.clone());
@@ -389,7 +452,10 @@ impl Checker {
     /// returned from the current function.
     fn check_return(&mut self, found: &Ty, span: Span) {
         let Some(ctx) = self.fns.last() else {
-            self.error(TypeError::new("'return' can only be used inside a function", span));
+            self.error(TypeError::new(
+                "'return' can only be used inside a function",
+                span,
+            ));
             return;
         };
         let expected = ctx.ret.clone();
@@ -442,11 +508,17 @@ impl Checker {
             reported.extend(free);
             let numeric = matches!(t, Ty::Var(v) if self.vars[v].1 == Class::Num);
             let mut err = TypeError::new(
-                format!("type annotations needed: cannot infer the type of {}", p.what),
+                format!(
+                    "type annotations needed: cannot infer the type of {}",
+                    p.what
+                ),
                 p.span,
             )
             .help(if numeric {
-                format!("add a type, for example `{}: int` or `{}: float`", p.name, p.name)
+                format!(
+                    "add a type, for example `{}: int` or `{}: float`",
+                    p.name, p.name
+                )
             } else {
                 format!("add a type, for example `{}: int`", p.name)
             });
@@ -482,9 +554,12 @@ impl Checker {
                 let found = self.expr(value);
                 let ty = match &var.t {
                     Some(annotation) => {
-                        let declared = Self::from_ast(annotation);
+                        let declared = self.from_ast(annotation);
                         self.expect(&declared, &found, value.span, |e, f| {
-                            format!("mismatched types: '{}' is declared as {e} but was given {f}", var.name)
+                            format!(
+                                "mismatched types: '{}' is declared as {e} but was given {f}",
+                                var.name
+                            )
                         });
                         declared
                     }
@@ -514,7 +589,10 @@ impl Checker {
             Statement::Return(value) => {
                 let (found, span) = match value {
                     Some(e) => (self.expr(e), e.span),
-                    None => (Ty::Void, self.fns.last().map_or(Self::dummy_span(), |f| f.span)),
+                    None => (
+                        Ty::Void,
+                        self.fns.last().map_or(Self::dummy_span(), |f| f.span),
+                    ),
                 };
                 self.check_return(&found, span);
                 Ty::Never
@@ -581,10 +659,14 @@ impl Checker {
                 }
             }
             Expression::Var(name) => match self.lookup(name) {
-                Some(Binding { kind: BindingKind::Variadic, .. }) => {
+                Some(Binding {
+                    kind: BindingKind::Variadic,
+                    ..
+                }) => {
                     self.error(
-                        TypeError::new(format!("'{name}' can only be called directly"), span)
-                            .help(format!("wrap it in a closure, e.g. `fn(x: str) {{ {name}(x) }}`")),
+                        TypeError::new(format!("'{name}' can only be called directly"), span).help(
+                            format!("wrap it in a closure, e.g. `fn(x: str) {{ {name}(x) }}`"),
+                        ),
                     );
                     Ty::Error
                 }
@@ -597,7 +679,10 @@ impl Checker {
             Expression::Assign(name, value) => {
                 let found = self.expr(value);
                 match self.lookup(name).cloned() {
-                    Some(Binding { ty, kind: BindingKind::Local }) => {
+                    Some(Binding {
+                        ty,
+                        kind: BindingKind::Local,
+                    }) => {
                         self.expect(&ty, &found, value.span, |e, f| {
                             format!("mismatched types: cannot assign {f} to '{name}', which has type {e}")
                         });
@@ -621,7 +706,7 @@ impl Checker {
                 let param_tys: Vec<Ty> = params
                     .iter()
                     .map(|p| match &p.t {
-                        Some(t) => Self::from_ast(t),
+                        Some(t) => self.from_ast(t),
                         None => {
                             let t = self.fresh(Class::Any);
                             self.pending.push(Pending {
@@ -635,7 +720,7 @@ impl Checker {
                     })
                     .collect();
                 let ret = match rtype {
-                    Some(t) => Self::from_ast(t),
+                    Some(t) => self.from_ast(t),
                     None => self.fresh(Class::Any),
                 };
                 let ctx = FnContext {
@@ -647,6 +732,12 @@ impl Checker {
                 self.function(ctx, params, &param_tys, body);
                 Ty::Fn(param_tys, Box::new(ret))
             }
+            Expression::Field(obj, name, name_span) => self.field(obj, name, *name_span, span),
+            Expression::Path(enum_name, variant) => self.variant_value(enum_name, variant, span),
+            Expression::StructLit { name, fields, base } => {
+                self.struct_lit(name, fields, base.as_deref(), span)
+            }
+            Expression::Match(scrutinee, arms) => self.match_(scrutinee, arms),
         }
     }
 
@@ -664,9 +755,11 @@ impl Checker {
         }
 
         let (class, result) = match op {
-            Op2::Addition | Op2::Subtraction | Op2::Multiplication | Op2::Division | Op2::Modulo => {
-                (Class::Num, None)
-            }
+            Op2::Addition
+            | Op2::Subtraction
+            | Op2::Multiplication
+            | Op2::Division
+            | Op2::Modulo => (Class::Num, None),
             Op2::LessThan | Op2::LessEqual | Op2::GreaterThan | Op2::GreaterEqual => {
                 (Class::Num, Some(Ty::Bool))
             }
@@ -680,7 +773,10 @@ impl Checker {
             let mut err = TypeError::new(format!("cannot apply '{op}' to {s1} and {s2}"), span);
             err = Self::with_conversion_note(err, &s1, &s2);
             if s1 == s2 && class == Class::Eq {
-                err = err.note("only int, float, bool, and str values can be compared with '==' and '!='");
+                err = err.note(
+                    "only int, float, bool, and str values, and structs and enums made of them, \
+                     can be compared with '==' and '!='",
+                );
             }
             self.error(err);
             self.poison(&[&t1, &t2]);
@@ -691,13 +787,22 @@ impl Checker {
     }
 
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
+        if let Expression::Path(enum_name, variant) = &callee.kind {
+            return self.construct_variant(enum_name, variant, args, callee.span, span);
+        }
         let name = match &callee.kind {
             Expression::Var(n) => Some(n.clone()),
             _ => None,
         };
 
         if let Some(n) = &name {
-            if matches!(self.lookup(n), Some(Binding { kind: BindingKind::Variadic, .. })) {
+            if matches!(
+                self.lookup(n),
+                Some(Binding {
+                    kind: BindingKind::Variadic,
+                    ..
+                })
+            ) {
                 // Variadic built-ins take any number of arguments of any type.
                 for a in args {
                     self.expr(a);
@@ -778,7 +883,10 @@ impl Checker {
             Some(n) => format!(" ('{n}' is not a function)"),
             None => String::new(),
         };
-        self.error(TypeError::new(format!("cannot call a value of type {t}{what}"), span));
+        self.error(TypeError::new(
+            format!("cannot call a value of type {t}{what}"),
+            span,
+        ));
         for a in args {
             self.expr(a);
         }
@@ -786,20 +894,29 @@ impl Checker {
 
     fn undefined(&mut self, name: &Id, span: Span) {
         let names: Vec<Id> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
-        let help = match closest_match(name, names.iter().map(|n| n.as_str())) {
-            Some(s) => format!("a variable with a similar name exists: '{s}'"),
-            None => format!("declare it first with `let {name} = ...;`"),
+        let help = match (
+            self.type_used_as_value(name),
+            closest_match(name, names.iter().map(|n| n.as_str())),
+        ) {
+            (Some(help), _) => help,
+            (None, Some(s)) => format!("a variable with a similar name exists: '{s}'"),
+            (None, None) => format!("declare it first with `let {name} = ...;`"),
         };
-        self.error(TypeError::new(format!("cannot find variable '{name}' in this scope"), span).help(help));
+        self.error(
+            TypeError::new(format!("cannot find variable '{name}' in this scope"), span).help(help),
+        );
     }
 
     // ---- Scopes ------------------------------------------------------------
 
     fn define(&mut self, name: Id, ty: Ty) {
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(name, Binding { ty, kind: BindingKind::Local });
+        self.scopes.last_mut().unwrap().insert(
+            name,
+            Binding {
+                ty,
+                kind: BindingKind::Local,
+            },
+        );
     }
 
     fn lookup(&self, name: &Id) -> Option<&Binding> {
@@ -872,7 +989,7 @@ impl Checker {
         let class = self.vars[v].1;
         if let Ty::Var(w) = t {
             self.vars[*w].1 = self.vars[*w].1.meet(class);
-        } else if !class.admits(t) {
+        } else if !self.admits(class, t) {
             return false;
         } else if Self::free_vars(&self.zonk(t)).contains(&v) {
             // `t` contains `v` itself, e.g. `f(f)`: no finite type fits.
@@ -890,7 +1007,15 @@ impl Checker {
                 self.vars[v].1 = self.vars[v].1.meet(class);
                 true
             }
-            t => class.admits(&t),
+            t => self.admits(class, &t),
+        }
+    }
+
+    /// Whether the concrete type `t` belongs to `class`.
+    fn admits(&self, class: Class, t: &Ty) -> bool {
+        match (class, t) {
+            (Class::Eq, Ty::Named(n)) => self.comparable(n, &mut HashSet::new()),
+            _ => class.admits(t),
         }
     }
 
@@ -937,17 +1062,21 @@ impl Checker {
 
     // ---- Conversions and display ---------------------------------------------
 
-    fn from_ast(t: &Type) -> Ty {
+    fn from_ast(&mut self, t: &Type) -> Ty {
         match t {
             Type::Int => Ty::Int,
             Type::Float => Ty::Float,
             Type::Bool => Ty::Bool,
             Type::String => Ty::Str,
             Type::Void => Ty::Void,
-            Type::Fn { param_types, ret_type } => Ty::Fn(
-                param_types.iter().map(Self::from_ast).collect(),
-                Box::new(Self::from_ast(ret_type)),
+            Type::Fn {
+                param_types,
+                ret_type,
+            } => Ty::Fn(
+                param_types.iter().map(|t| self.from_ast(t)).collect(),
+                Box::new(self.from_ast(ret_type)),
             ),
+            Type::Named(name, span) => self.named_type(name, *span),
             // Not reachable from the parser yet.
             Type::List(_) => Ty::Error,
         }
@@ -964,6 +1093,7 @@ impl Checker {
             Ty::Void => "void".into(),
             Ty::Never => "never".into(),
             Ty::Error => "{unknown}".into(),
+            Ty::Named(name) => name.to_string(),
             Ty::Var(v) => match self.vars[v].1 {
                 Class::Num => "{number}".into(),
                 _ => "_".into(),

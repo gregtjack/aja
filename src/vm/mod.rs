@@ -24,7 +24,7 @@ pub mod value;
 #[cfg(test)]
 mod tests;
 
-use bytecode::{Capture, Op, Proto};
+use bytecode::{Capture, Layout, Op, Proto};
 pub use compile::{Compiled, Compiler};
 use heap::{Closure, Gc, Heap};
 use value::Value;
@@ -172,6 +172,14 @@ impl Vm {
             self.collect_garbage_with(extra);
         }
         self.heap.alloc_closure(Closure { proto, upvalues })
+    }
+
+    fn alloc_data(&mut self, layout: Rc<Layout>, fields: Box<[Value]>) -> Gc {
+        if self.heap.wants_collection() {
+            let extra = fields.iter().filter_map(Value::handle).collect();
+            self.collect_garbage_with(extra);
+        }
+        self.heap.alloc_data(layout, fields)
     }
 
     fn alloc_cell(&mut self, value: Value) -> Gc {
@@ -359,6 +367,22 @@ impl Vm {
                     reg!(dst) = Value::Fn(f);
                 }
 
+                Op::NewData { dst, layout, start, count } => {
+                    let from = base + start as usize;
+                    let fields: Box<[Value]> = self.regs[from..from + count as usize].into();
+                    let layout = proto.layouts[layout as usize].clone();
+                    let data = self.alloc_data(layout, fields);
+                    reg!(dst) = Value::Data(data);
+                }
+                Op::GetField { dst, obj, index } => {
+                    let v = self.heap.data(get!(Data, obj)).1[index as usize].clone();
+                    reg!(dst) = v;
+                }
+                Op::TestTag { dst, obj, tag } => {
+                    let is = self.heap.data(get!(Data, obj)).0.tag == tag;
+                    reg!(dst) = Value::Bool(is);
+                }
+
                 Op::AddI { dst, a, b } => int_op!(dst, a, b, checked_add, "+"),
                 Op::SubI { dst, a, b } => int_op!(dst, a, b, checked_sub, "-"),
                 Op::MulI { dst, a, b } => int_op!(dst, a, b, checked_mul, "*"),
@@ -393,6 +417,10 @@ impl Vm {
                 Op::EqF { dst, a, b } => compare!(dst, a, b, Float, ==),
                 Op::EqB { dst, a, b } => compare!(dst, a, b, Bool, ==),
                 Op::EqS { dst, a, b } => compare!(dst, a, b, Str, ==),
+                Op::EqD { dst, a, b } => {
+                    let v = self.heap.equal(&reg!(a), &reg!(b));
+                    reg!(dst) = Value::Bool(v);
+                }
                 Op::Not { dst, src } => reg!(dst) = Value::Bool(!get!(Bool, src)),
 
                 Op::Jump { target } => ip = target as usize,
@@ -464,6 +492,7 @@ impl Vm {
                     v => internal_error("Fn", &v),
                 },
                 Op::Return { src } => ret!(reg!(src).clone()),
+                Op::NoMatch => throw!("internal error: no arm of this match matched".to_string()),
             }
         }
     }

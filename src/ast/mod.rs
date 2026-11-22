@@ -94,9 +94,74 @@ pub enum Definition {
         /// The declared return type; `None` means `void`.
         rtype: Option<Type>,
     },
+    /// `struct Point { x: int, y: int }`. Every field's `t` is `Some`.
     Struct {
         name: Id,
+        name_span: Span,
         fields: Vec<Variable>,
+    },
+    /// `enum Shape { Circle(float), Rect(float, float), Empty }`.
+    Enum {
+        name: Id,
+        name_span: Span,
+        variants: Vec<VariantDef>,
+    },
+}
+
+/// One variant of an enum definition, with the types of the values it holds.
+#[derive(Debug, Clone)]
+pub struct VariantDef {
+    pub name: Id,
+    pub span: Span,
+    pub fields: Vec<Type>,
+}
+
+/// `name: value` in a struct literal. Shorthand `name` means `name: name`.
+#[derive(Debug, Clone)]
+pub struct FieldInit {
+    pub name: Id,
+    /// Where the field's name appears.
+    pub span: Span,
+    pub value: Expr,
+}
+
+/// One arm of a `match`: `pattern if guard => body`.
+#[derive(Debug, Clone)]
+pub struct Arm {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    /// A block, or a `Statement::Expr`.
+    pub body: Box<Statement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum PatternKind {
+    /// `_`
+    Wildcard,
+    /// A name, which matches anything and binds it.
+    Binding(Variable),
+    Int(i32),
+    Str(EcoString),
+    Bool(bool),
+    /// `Shape::Circle(r)`, or `Shape::Empty` (with `fields` empty and
+    /// `parens` false).
+    Variant {
+        enum_name: Id,
+        variant: Id,
+        fields: Vec<Pattern>,
+        parens: bool,
+    },
+    /// `Point { x, y: 0 }`, with `rest` set when it ends in `..`.
+    Struct {
+        name: Id,
+        fields: Vec<(Id, Span, Pattern)>,
+        rest: bool,
     },
 }
 
@@ -126,6 +191,17 @@ pub enum Expression {
     Assign(Id, Box<Expr>),
     /// Parameters, optional return type (inferred when absent), and body.
     Closure(Vec<Variable>, Option<Type>, Box<Statement>),
+    /// `value.field`, with where the field's name appears.
+    Field(Box<Expr>, Id, Span),
+    /// `Enum::Variant`. Called like a function when the variant holds values.
+    Path(Id, Id),
+    /// `Point { x: 1, y: 2 }`, or `Point { x: 1, ..base }`.
+    StructLit {
+        name: Id,
+        fields: Vec<FieldInit>,
+        base: Option<Box<Expr>>,
+    },
+    Match(Box<Expr>, Vec<Arm>),
 }
 
 #[derive(Debug, Clone)]

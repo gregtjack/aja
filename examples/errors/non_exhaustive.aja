@@ -1,0 +1,42 @@
+// A `match` must handle every case, so adding a variant to an enum is a
+// compile error at every `match` that doesn't handle it yet. The message
+// names the cases that are missing. A pattern that an earlier arm already
+// covers is an error too, and so is a bare name where a variant was meant.
+//
+// expect: non-exhaustive match: `Shape::Triangle(_, _, _)` not covered
+// expect: unreachable pattern
+// expect: this pattern binds a new variable 'Red', which matches anything
+
+struct Point { x: int, y: int }
+
+enum Shape {
+    Circle(Point, int),
+    Rect(Point, Point),
+    Triangle(Point, Point, Point), // new: `area` doesn't handle it yet
+}
+
+enum Color { Red, Green }
+
+fn area(s: Shape) -> int {
+    match s {
+        Shape::Circle(_, r) => 3 * r * r,
+        Shape::Rect(a, b) => (b.x - a.x) * (b.y - a.y),
+    }
+}
+
+fn sign(n: int) -> int {
+    match n {
+        0 => 0,
+        _ => 1,
+        -1 => -1,
+    }
+}
+
+fn hex(c: Color) -> str {
+    match c {
+        Red => "#f00",
+        Color::Green => "#0f0",
+    }
+}
+
+fn main() {}

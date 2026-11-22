@@ -130,16 +130,19 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
 1. **Static type checker.** ✅ Annotations are required on function
    signatures, local types are inferred by unification (without
    let-polymorphism), and `any` is gone.
-2. **Data types.** Structs, enums with data, exhaustive `match`, `Option`,
-   `Result`, and `?`.
+2. **Data types.** Structs ✅, enums with data ✅, and exhaustive `match` ✅
+   (checked with Maranget's usefulness algorithm, which also rejects
+   unreachable arms). Struct and enum values are immutable and compare
+   structurally with `==`. Next: generics, which `Option<T>`, `Result<T, E>`,
+   and `?` need.
 3. **Bytecode VM.** ✅ The type-checked AST compiles to typed, register-based
    bytecode, and the tree-walking interpreter is gone. The checker hands the
    compiler operand types rather than a full typed IR; a typed IR can come
    when data types need it.
 4. **Memory management.** ✅ Closures and captured variables live on a
    garbage-collected heap with a precise mark-and-sweep collector. Strings,
-   which can't form cycles, are still reference-counted. Next: put strings and
-   the data types from step 2 on the heap too.
+   which can't form cycles, are still reference-counted. Struct and enum
+   values live on the heap too. Next: strings.
 5. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.
 6. **Green threads and structured concurrency** in the VM.

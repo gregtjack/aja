@@ -263,3 +263,249 @@ fn repl_keeps_bindings_only_from_inputs_that_check() {
     assert_eq!(errors[0].message, "cannot find variable 'y' in this scope");
     assert!(c.check_repl_stmt(&stmt("return 1")).is_err());
 }
+
+// ---- Structs, enums, and match ----------------------------------------------
+
+const SHAPES: &str = "
+struct Point { x: int, y: int }
+enum Shape { Circle(Point, int), Rect(Point, Point), Empty }
+enum Color { Red, Green, Blue }
+";
+
+/// Check `src` with the definitions in [`SHAPES`] before it.
+fn with_shapes(src: &str) -> String {
+    format!("{SHAPES}{src}")
+}
+
+#[track_caller]
+fn shapes_ok(src: &str) {
+    ok(&with_shapes(src));
+}
+
+#[track_caller]
+fn shapes_error(src: &str) -> (String, String) {
+    error(&with_shapes(src))
+}
+
+#[test]
+fn structs_and_enums_check() {
+    shapes_ok("fn main() -> int { let p = Point { x: 1, y: 2 }; p.x + p.y }");
+    shapes_ok("fn main() -> Shape { Shape::Circle(Point { y: 2, x: 1 }, 3) }");
+    shapes_ok("fn main() -> Color { Color::Red }");
+    shapes_ok("fn origin(p: Point) -> Point { Point { x: 0, ..p } } fn main() { }");
+    // Field shorthand.
+    shapes_ok("fn main() -> Point { let x = 1; let y = 2; Point { x, y } }");
+    // Types can refer to each other and to themselves, in any order.
+    ok("enum List { Nil, Cons(Item, List) } struct Item { n: int } fn main() { }");
+    // Inferred from use.
+    shapes_ok("fn main() -> int { let f = fn(c) { match c { Color::Red => 1, _ => 2 } }; f(Color::Blue) }");
+}
+
+#[test]
+fn struct_and_enum_equality() {
+    shapes_ok("fn main() -> bool { (Point { x: 1, y: 2 } == Point { x: 1, y: 2 }) && (Color::Red != Color::Blue) }");
+    let (msg, _) = error("struct F { f: fn() } fn main() -> bool { let a = F { f: fn() { } }; a == a }");
+    assert_eq!(msg, "cannot apply '==' to F and F");
+    // Comparable types can contain themselves.
+    ok("enum L { Nil, Cons(int, L) } fn main() -> bool { L::Nil == L::Cons(1, L::Nil) }");
+}
+
+#[test]
+fn unknown_types_and_names() {
+    let (msg, at) = error("fn f(p: Pont) { } struct Point { x: int } fn main() { }");
+    assert_eq!(msg, "cannot find type 'Pont'");
+    assert_eq!(at, "Pont");
+    assert_eq!(help("fn f(p: Pont) { } struct Point { x: int } fn main() { }"), "a type with a similar name exists: 'Point'");
+    let (msg, at) = shapes_error("fn main() { let p = Pointt { x: 1, y: 2 }; }");
+    assert_eq!(msg, "cannot find struct 'Pointt'");
+    assert_eq!(at, "Pointt");
+    assert_eq!(shapes_error("fn main() { Shape { x: 1 }; }").0, "'Shape' is an enum, not a struct");
+    assert_eq!(shapes_error("fn main() { Point::Origin; }").0, "'Point' is a struct, not an enum");
+    let (msg, at) = shapes_error("fn main() { Shape::Square; }");
+    assert_eq!(msg, "enum 'Shape' has no variant 'Square'");
+    assert_eq!(at, "Shape::Square");
+    assert_eq!(
+        help(&with_shapes("fn main() { Color::Gren; }")),
+        "a variant with a similar name exists: 'Color::Green'"
+    );
+    assert_eq!(
+        help(&with_shapes("fn main() { let p = Point; }")),
+        "'Point' is a struct; make one with `Point { ... }`"
+    );
+}
+
+#[test]
+fn bad_definitions() {
+    assert_eq!(error("struct A { } enum A { } fn main() { }").0, "type 'A' is defined more than once");
+    assert_eq!(error("struct int { } fn main() { }").0, "'int' is a built-in type, so it can't be redefined");
+    assert_eq!(
+        error("struct P { x: int, x: int } fn main() { }").0,
+        "struct 'P' has more than one field named 'x'"
+    );
+    assert_eq!(error("enum E { A, A } fn main() { }").0, "enum 'E' has more than one variant named 'A'");
+    assert_eq!(error("struct P { q: Q } fn main() { }").0, "cannot find type 'Q'");
+}
+
+#[test]
+fn struct_literal_errors() {
+    let (msg, at) = shapes_error("fn main() { Point { x: 1 }; }");
+    assert_eq!(msg, "missing field 'y' in 'Point'");
+    assert_eq!(at, "Point");
+    assert_eq!(shapes_error("fn main() { Point { }; }").0, "missing fields 'x' and 'y' in 'Point'");
+    let (msg, at) = shapes_error("fn main() { Point { x: 1, y: 2, z: 3 }; }");
+    assert_eq!(msg, "struct 'Point' has no field 'z'");
+    assert_eq!(at, "z");
+    assert_eq!(shapes_error("fn main() { Point { x: 1, x: 2, y: 3 }; }").0, "field 'x' is given more than once");
+    let (msg, at) = shapes_error("fn main() { Point { x: 1, y: true }; }");
+    assert_eq!(msg, "mismatched types: field 'y' of 'Point' is int, but was given bool");
+    assert_eq!(at, "true");
+    assert_eq!(
+        shapes_error("fn main() { Point { x: 1, ..Color::Red }; }").0,
+        "mismatched types: the value after '..' must be a Point, found Color"
+    );
+}
+
+#[test]
+fn field_access_errors() {
+    let (msg, at) = shapes_error("fn main() -> int { let p = Point { x: 1, y: 2 }; p.z }");
+    assert_eq!(msg, "struct 'Point' has no field 'z'");
+    assert_eq!(at, "z");
+    assert_eq!(shapes_error("fn main() { let s = Shape::Empty; s.x; }").0, "'Shape' is an enum, so it has no fields");
+    assert_eq!(shapes_error("fn main() { let n = 1; n.x; }").0, "int has no field 'x'");
+    let (msg, at) = shapes_error("fn main() { let f = fn(p) { p.x }; }");
+    assert!(msg.starts_with("type annotations needed"), "{msg}");
+    assert_eq!(at, "p");
+    // Annotating the parameter fixes it.
+    shapes_ok("fn main() -> int { let f = fn(p: Point) { p.x }; f(Point { x: 1, y: 2 }) }");
+}
+
+#[test]
+fn variant_construction_errors() {
+    let (msg, at) = shapes_error("fn main() { Shape::Circle; }");
+    assert_eq!(msg, "variant 'Shape::Circle' holds 2 values, so it must be given them");
+    assert_eq!(at, "Shape::Circle");
+    assert_eq!(
+        shapes_error("fn main() { Shape::Empty(); }").0,
+        "variant 'Shape::Empty' holds no values, so it can't be called"
+    );
+    assert_eq!(
+        shapes_error("fn main() { Shape::Circle(Point { x: 1, y: 2 }); }").0,
+        "variant 'Shape::Circle' holds 2 values but 1 was given"
+    );
+    let (msg, at) = shapes_error("fn main() { Shape::Circle(Point { x: 1, y: 2 }, 1.5); }");
+    assert_eq!(msg, "mismatched types: value 2 of 'Shape::Circle' is int, found float");
+    assert_eq!(at, "1.5");
+}
+
+#[test]
+fn match_types() {
+    shapes_ok(
+        "fn area(s: Shape) -> int {
+            match s {
+                Shape::Circle(_, r) => 3 * r * r,
+                Shape::Rect(a, b) => (b.x - a.x) * (b.y - a.y),
+                Shape::Empty => 0,
+            }
+        }
+        fn main() { }",
+    );
+    // Arms that return don't need to agree with the others.
+    shapes_ok("fn f(c: Color) -> int { let n = match c { Color::Red => { return 0; }, _ => 1 }; n } fn main() { }");
+    // A match can be a statement.
+    shapes_ok("fn main() { match Color::Red { Color::Red => println(1), _ => { } } }");
+    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { Color::Red => 1, _ => true } } fn main() { }");
+    assert_eq!(msg, "match arms have incompatible types: int and bool");
+    assert_eq!(at, "true");
+    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { 1 => 1, _ => 2 } } fn main() { }");
+    assert_eq!(msg, "mismatched types: this pattern matches int, but the value is Color");
+    assert_eq!(at, "1");
+    let (msg, _) = shapes_error("fn f(c: Color) -> int { match c { Color::Red if 1 => 1, _ => 2 } } fn main() { }");
+    assert_eq!(msg, "a match guard must be a bool, found int");
+}
+
+#[test]
+fn pattern_errors() {
+    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { Red => 1, _ => 2 } } fn main() { }");
+    assert_eq!(msg, "this pattern binds a new variable 'Red', which matches anything");
+    assert_eq!(at, "Red");
+    assert_eq!(
+        help(&with_shapes("fn f(c: Color) -> int { match c { Red => 1, _ => 2 } } fn main() { }")),
+        "to match the variant, write `Color::Red`"
+    );
+    assert_eq!(
+        shapes_error("fn f(s: Shape) -> int { match s { Shape::Circle => 1, _ => 2 } } fn main() { }").0,
+        "variant 'Shape::Circle' holds 2 values"
+    );
+    assert_eq!(
+        shapes_error("fn f(s: Shape) -> int { match s { Shape::Circle(p) => 1, _ => 2 } } fn main() { }").0,
+        "this pattern has 1 field but variant 'Shape::Circle' holds 2 values"
+    );
+    assert_eq!(
+        shapes_error("fn f(p: Point) -> int { match p { Point { x } => x } } fn main() { }").0,
+        "pattern does not mention field 'y'"
+    );
+    shapes_ok("fn f(p: Point) -> int { match p { Point { x, .. } => x } } fn main() { }");
+    assert_eq!(
+        shapes_error("fn f(p: Point) -> int { match p { Point { x: a, y: a } => a } } fn main() { }").0,
+        "'a' is bound more than once in this pattern"
+    );
+}
+
+#[test]
+fn match_must_be_exhaustive() {
+    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { Color::Red => 1, Color::Green => 2 } } fn main() { }");
+    assert_eq!(msg, "non-exhaustive match: `Color::Blue` not covered");
+    assert_eq!(at, "c");
+    assert_eq!(
+        help(&with_shapes("fn f(c: Color) -> int { match c { Color::Red => 1, Color::Green => 2 } } fn main() { }")),
+        "add an arm for it: `Color::Blue => ...`"
+    );
+    assert_eq!(
+        shapes_error("fn f(c: Color) -> int { match c { Color::Red => 1 } } fn main() { }").0,
+        "non-exhaustive match: `Color::Green` and `Color::Blue` not covered"
+    );
+    assert_eq!(
+        shapes_error("fn f(s: Shape) -> int { match s { Shape::Empty => 1 } } fn main() { }").0,
+        "non-exhaustive match: `Shape::Circle(_, _)` and `Shape::Rect(_, _)` not covered"
+    );
+    assert_eq!(shapes_error("fn f(n: int) -> int { match n { 0 => 1 } } fn main() { }").0, "non-exhaustive match: `_` not covered");
+    assert_eq!(shapes_error("fn f(b: bool) -> int { match b { true => 1 } } fn main() { }").0, "non-exhaustive match: `false` not covered");
+    // Nested patterns.
+    assert_eq!(
+        error("enum L { Nil, Cons(int, L) } fn f(l: L) -> int { match l { L::Nil => 0, L::Cons(n, L::Nil) => n } } fn main() { }").0,
+        "non-exhaustive match: `L::Cons(_, L::Cons(_, _))` not covered"
+    );
+    assert_eq!(
+        shapes_error("fn f(p: Point) -> int { match p { Point { x: 0, y } => y } } fn main() { }").0,
+        "non-exhaustive match: `Point { .. }` not covered"
+    );
+    // A guarded arm doesn't count.
+    let src = with_shapes("fn f(c: Color) -> int { match c { Color::Red => 1, Color::Green => 2, Color::Blue if true => 3 } } fn main() { }");
+    let errors = check(&src).unwrap_err();
+    assert_eq!(errors[0].message, "non-exhaustive match: `Color::Blue` not covered");
+    assert!(errors[0].notes.iter().any(|n| n.contains("guard")));
+    // Many missing cases are summarized.
+    assert_eq!(
+        error("enum E { A, B, C, D, E } fn f(e: E) -> int { match e { E::A => 1 } } fn main() { }").0,
+        "non-exhaustive match: `E::B`, `E::C`, `E::D` and more not covered"
+    );
+    // An enum with no variants needs no arms.
+    ok("enum Never { } fn f(n: Never) -> int { match n { } } fn main() { }");
+}
+
+#[test]
+fn unreachable_arms_are_errors() {
+    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { _ => 1, Color::Red => 2 } } fn main() { }");
+    assert_eq!(msg, "unreachable pattern");
+    assert_eq!(at, "Color::Red");
+    assert_eq!(
+        shapes_error("fn f(n: int) -> int { match n { 1 => 1, 1 => 2, _ => 3 } } fn main() { }").0,
+        "unreachable pattern"
+    );
+    assert_eq!(
+        shapes_error("fn f(b: bool) -> int { match b { true => 1, false => 2, _ => 3 } } fn main() { }").0,
+        "unreachable pattern"
+    );
+    // A guarded arm doesn't make later arms unreachable.
+    shapes_ok("fn f(c: Color) -> int { match c { _ if false => 1, Color::Red => 2, _ => 3 } } fn main() { }");
+}

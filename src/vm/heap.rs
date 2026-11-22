@@ -1,7 +1,7 @@
 //! The VM's garbage-collected heap.
 //!
-//! Every object that can refer to other objects (today: closures and the
-//! cells that hold captured variables) lives here and is referred to by a
+//! Every object that can refer to other objects (closures, the cells that
+//! hold captured variables, and struct and enum values) lives here and is referred to by a
 //! [`Gc`] handle. The collector is a precise, non-moving mark-and-sweep: the VM
 //! knows exactly where every value is (registers, globals, call frames), so
 //! it marks everything reachable from those roots and frees the rest,
@@ -16,7 +16,10 @@
 
 use std::rc::Rc;
 
-use super::{bytecode::Proto, value::Value};
+use super::{
+    bytecode::{Layout, Proto},
+    value::Value,
+};
 
 /// A handle to an object on the heap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +41,8 @@ enum Obj {
     Closure(Closure),
     /// A captured variable.
     Cell(Value),
+    /// A struct or enum value. Its fields never change after it is made.
+    Data(Rc<Layout>, Box<[Value]>),
 }
 
 /// Collect once this many objects are live, at the least.
@@ -88,6 +93,10 @@ impl Heap {
         self.alloc(Obj::Cell(value))
     }
 
+    pub fn alloc_data(&mut self, layout: Rc<Layout>, fields: Box<[Value]>) -> Gc {
+        self.alloc(Obj::Data(layout, fields))
+    }
+
     fn alloc(&mut self, obj: Obj) -> Gc {
         self.live += 1;
         match self.free.pop() {
@@ -114,15 +123,53 @@ impl Heap {
     pub fn closure(&self, gc: Gc) -> &Closure {
         match self.get(gc) {
             Obj::Closure(c) => c,
-            Obj::Cell(_) => panic!("internal error: object {gc} is a cell, not a closure"),
+            _ => panic!("internal error: object {gc} is not a closure"),
         }
     }
 
     pub fn cell(&self, gc: Gc) -> &Value {
         match self.get(gc) {
             Obj::Cell(v) => v,
-            Obj::Closure(_) => panic!("internal error: object {gc} is a closure, not a cell"),
+            _ => panic!("internal error: object {gc} is not a cell"),
         }
+    }
+
+    /// A struct or enum value's layout and fields.
+    pub fn data(&self, gc: Gc) -> (&Layout, &[Value]) {
+        match self.get(gc) {
+            Obj::Data(layout, fields) => (layout, fields),
+            _ => panic!("internal error: object {gc} is not a struct or enum value"),
+        }
+    }
+
+    /// Whether two values of the same type are equal, comparing structs and
+    /// enums field by field. Iterative, so long lists can't overflow the stack.
+    pub fn equal(&self, a: &Value, b: &Value) -> bool {
+        let mut work = vec![(a.clone(), b.clone())];
+        while let Some((a, b)) = work.pop() {
+            let same = match (&a, &b) {
+                (Value::Data(x), Value::Data(y)) if x == y => true,
+                (Value::Data(x), Value::Data(y)) => {
+                    let ((lx, fx), (ly, fy)) = (self.data(*x), self.data(*y));
+                    if lx.tag != ly.tag {
+                        return false;
+                    }
+                    work.extend(fx.iter().cloned().zip(fy.iter().cloned()));
+                    true
+                }
+                (Value::Int(x), Value::Int(y)) => x == y,
+                (Value::Float(x), Value::Float(y)) => x == y,
+                (Value::Bool(x), Value::Bool(y)) => x == y,
+                (Value::Str(x), Value::Str(y)) => x == y,
+                (Value::Void, Value::Void) => true,
+                // The type checker only allows `==` on types made of the above.
+                _ => panic!("internal error: comparing {a:?} with {b:?}"),
+            };
+            if !same {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn set_cell(&mut self, gc: Gc, value: Value) {
@@ -146,6 +193,7 @@ impl Heap {
             match self.get(gc) {
                 Obj::Closure(c) => work.extend(c.upvalues.iter().copied()),
                 Obj::Cell(v) => work.extend(v.handle()),
+                Obj::Data(_, fields) => work.extend(fields.iter().filter_map(Value::handle)),
             }
         }
 
@@ -161,25 +209,83 @@ impl Heap {
         self.threshold = (self.live * 2).max(MIN_THRESHOLD);
     }
 
-    /// How `print` shows a value.
+    /// How `print` shows a value. Strings inside structs and enums are quoted.
     pub fn display(&self, value: &Value) -> String {
-        match value {
-            Value::Void => "()".to_string(),
-            Value::Int(i) => i.to_string(),
-            Value::Float(n) => format!("{n:?}"),
-            Value::Bool(b) => b.to_string(),
-            Value::Str(s) => s.to_string(),
-            Value::Fn(gc) => format!("<fn {}>", self.closure(*gc).proto.signature),
-            Value::Native(builtin, _) => format!("<native fn: {}>", builtin.name),
-            Value::Cell(gc) => self.display(self.cell(*gc)),
-        }
+        self.show(value, false)
     }
 
     /// How the REPL shows a value: like `print`, but with strings quoted.
     pub fn repr(&self, value: &Value) -> String {
-        match value {
-            Value::Str(s) => format!("{:?}", &**s),
-            other => self.display(other),
+        self.show(value, true)
+    }
+
+    /// Show a value, e.g. `Shape::Rect(Point { x: 1, y: 2 }, 3.5)`. This
+    /// works from an explicit stack, so deeply nested values (long lists)
+    /// can't overflow the Rust stack.
+    fn show(&self, value: &Value, quote: bool) -> String {
+        enum Item<'a> {
+            Value(&'a Value, bool),
+            Text(&'a str),
         }
+        let mut out = String::new();
+        let mut stack = vec![Item::Value(value, quote)];
+        while let Some(item) = stack.pop() {
+            let value = match item {
+                Item::Text(t) => {
+                    out.push_str(t);
+                    continue;
+                }
+                Item::Value(v, quote) => match v {
+                    Value::Str(s) if quote => format!("{:?}", &**s),
+                    Value::Cell(gc) => {
+                        stack.push(Item::Value(self.cell(*gc), quote));
+                        continue;
+                    }
+                    Value::Data(gc) => {
+                        let (layout, fields) = self.data(*gc);
+                        out.push_str(&layout.name);
+                        if fields.is_empty() {
+                            continue;
+                        }
+                        let mut items = Vec::new();
+                        match &layout.fields {
+                            Some(names) => {
+                                items.push(Item::Text(" { "));
+                                for (i, (name, v)) in names.iter().zip(fields.iter()).enumerate() {
+                                    if i > 0 {
+                                        items.push(Item::Text(", "));
+                                    }
+                                    items.push(Item::Text(name));
+                                    items.push(Item::Text(": "));
+                                    items.push(Item::Value(v, true));
+                                }
+                                items.push(Item::Text(" }"));
+                            }
+                            None => {
+                                items.push(Item::Text("("));
+                                for (i, v) in fields.iter().enumerate() {
+                                    if i > 0 {
+                                        items.push(Item::Text(", "));
+                                    }
+                                    items.push(Item::Value(v, true));
+                                }
+                                items.push(Item::Text(")"));
+                            }
+                        }
+                        stack.extend(items.into_iter().rev());
+                        continue;
+                    }
+                    Value::Void => "()".to_string(),
+                    Value::Int(i) => i.to_string(),
+                    Value::Float(n) => format!("{n:?}"),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Str(s) => s.to_string(),
+                    Value::Fn(gc) => format!("<fn {}>", self.closure(*gc).proto.signature),
+                    Value::Native(builtin, _) => format!("<native fn: {}>", builtin.name),
+                },
+            };
+            out.push_str(&value);
+        }
+        out
     }
 }

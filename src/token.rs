@@ -37,12 +37,15 @@ pub enum Token {
     LessEqual,    // <=
     And,          // &&
     Or,           // ||
+    DotDot,       // ..
     Else,         // else
+    Enum,         // enum
     Fn,           // fn
     If,           // if
     Let,          // let
     Match,        // match
     Return,       // return
+    Struct,       // struct
     While,        // while
 }
 
@@ -85,12 +88,15 @@ impl std::fmt::Display for Token {
             Token::LessEqual => "<=",
             Token::And => "&&",
             Token::Or => "||",
+            Token::DotDot => "..",
             Token::Else => "else",
+            Token::Enum => "enum",
             Token::Fn => "fn",
             Token::If => "if",
             Token::Let => "let",
             Token::Match => "match",
             Token::Return => "return",
+            Token::Struct => "struct",
             Token::While => "while",
         };
         write!(f, "'{sym}'")

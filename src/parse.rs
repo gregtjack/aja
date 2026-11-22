@@ -1,5 +1,8 @@
 use crate::{
-    ast::{types::Type, Definition, Expr, Expression, Location, Program, Span, Statement, Variable},
+    ast::{
+        types::Type, Arm, Definition, Expr, Expression, FieldInit, Location, Pattern, PatternKind,
+        Program, Span, Statement, Variable, VariantDef,
+    },
     diagnostic::Diagnostic,
     lexer::SrcSpan,
     token::Token,
@@ -278,12 +281,52 @@ mod tests {
 
     #[test]
     fn test_parse_reports_bad_input_without_panicking() {
-        // Unknown type name
-        assert!(create_parser("fn main() { let x: foo = 1; x }").parse().is_err());
+        // `any` is not a type
+        assert!(create_parser("fn main() { let x: any = 1; x }").parse().is_err());
         // Trailing tokens after the last definition
         assert!(create_parser("fn main() { 1 } 42").parse().is_err());
         // Input that ends mid-definition
         assert!(create_parser("fn main(").parse().is_err());
+    }
+
+    #[test]
+    fn test_parse_structs_enums_and_match() {
+        let src = "struct P { x: int, y: int, }
+                   enum E { A, B(int, P), }
+                   fn main() -> int {
+                       let p = P { x: 1, y: 2 };
+                       let q = P { x: 3, ..p };
+                       match E::B(p.x, q) {
+                           E::A => 0,
+                           E::B(n, P { x, .. }) if n > 0 => { n + x }
+                           _ => -1
+                       }
+                   }";
+        let program = create_parser(src).parse().unwrap();
+        assert_eq!(program.definitions.len(), 3);
+        match &program.definitions[1] {
+            Definition::Enum { name, variants, .. } => {
+                assert_eq!(name, "E");
+                assert_eq!(variants[1].fields.len(), 2);
+            }
+            d => panic!("expected an enum, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn test_struct_literals_need_parens_in_conditions() {
+        // `p == P` is the condition, and `{ x: 1 }` is a (malformed) body.
+        let err = create_parser("fn main() { if p == P { x: 1 } { } }").parse().unwrap_err();
+        assert!(err.help.unwrap().contains("(P { ... })"));
+        assert!(create_parser("fn main() { if p == (P { x: 1 }) { } }").parse().is_ok());
+        // Plain variables before a block still work.
+        assert!(create_parser("fn main() { while ok { } match v { _ => 1 } }").parse().is_ok());
+    }
+
+    #[test]
+    fn test_fields_cannot_be_assigned() {
+        let err = create_parser("p.x = 1").parse_expr_only().unwrap_err();
+        assert_eq!(err.message, "cannot assign to a field");
     }
 
     #[test]
@@ -399,6 +442,13 @@ pub struct Parser<T: Iterator<Item = SrcSpan>> {
     tokens: Peekable<T>,
     prev_token: Option<SrcSpan>,
     position: u32,
+    /// Set while parsing the head of an `if`, `while`, or `match`, where
+    /// `name {` starts the body rather than a struct literal (as in Rust).
+    /// Parentheses, blocks, and argument lists allow them again.
+    no_struct: bool,
+    /// A name followed by `{` in such a head, which might have been meant
+    /// as a struct literal, for a hint if the body then fails to parse.
+    struct_hint: Option<crate::ast::Id>,
 }
 
 impl<T> Parser<T>
@@ -410,20 +460,22 @@ where
             tokens: input.peekable(),
             position: 0,
             prev_token: None,
+            no_struct: false,
+            struct_hint: None,
         }
     }
 
     pub fn parse(&mut self) -> ParseResult<Program> {
         let mut ds = Vec::new();
-        while tok_matches!(self, Token::Fn) {
+        while tok_matches!(self, Token::Fn | Token::Struct | Token::Enum) {
             let d = self.parse_defn()?;
             ds.push(d);
         }
 
         if !tok_matches!(self, Token::Eof) && self.peek().is_some() {
             return Err(self
-                .expected("a function definition")
-                .help("only 'fn' definitions are allowed at the top level of a file"));
+                .expected("a definition")
+                .help("only 'fn', 'struct', and 'enum' definitions are allowed at the top level of a file"));
         }
 
         Ok(Program { definitions: ds })
@@ -440,7 +492,9 @@ where
     fn parse_defn(&mut self) -> ParseResult<Definition> {
         let res = match self.next() {
             Some((_, Token::Fn, _)) => self.parse_fn_defn(),
-            tok => Err(self.error(tok, "expected a function definition".to_string())),
+            Some((_, Token::Struct, _)) => self.parse_struct_defn(),
+            Some((_, Token::Enum, _)) => self.parse_enum_defn(),
+            tok => Err(self.error(tok, "expected a definition".to_string())),
         };
 
         res
@@ -466,6 +520,132 @@ where
             params,
             body,
             rtype,
+        })
+    }
+
+    /// The name after `struct` or `enum`.
+    fn parse_type_def_name(&mut self, keyword: &str) -> ParseResult<(crate::ast::Id, Span)> {
+        match self.peek().cloned() {
+            Some((start, Token::Ident(name), end)) => {
+                self.next();
+                Ok((name, Span::new(start, end)))
+            }
+            _ => Err(self.expected(&format!("a name after '{keyword}'"))),
+        }
+    }
+
+    /// `struct Name { field: type, ... }`
+    fn parse_struct_defn(&mut self) -> ParseResult<Definition> {
+        let (name, name_span) = self.parse_type_def_name("struct")?;
+        if tok_matches!(self, Token::LeftParen) {
+            return Err(self
+                .expected("'{'")
+                .help(format!("struct fields have names: `struct {name} {{ x: int, y: int }}`")));
+        }
+        self.consume(Token::LeftBrace)?;
+        let mut fields = Vec::new();
+        while !tok_matches!(self, Token::RightBrace) {
+            let (field, span) = match self.peek().cloned() {
+                Some((start, Token::Ident(f), end)) => (f, Span::new(start, end)),
+                _ => return Err(self.expected("a field name")),
+            };
+            self.next();
+            if !tok_matches!(self, Token::Colon) {
+                return Err(self
+                    .expected("':'")
+                    .help(format!("every field needs a type: `{field}: int`")));
+            }
+            let t = self.parse_type_annotation()?;
+            fields.push(Variable::new(field, t, span));
+            if tok_matches!(self, Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+        if !tok_matches!(self, Token::RightBrace) {
+            return Err(self.expected("',' or '}'"));
+        }
+        self.consume(Token::RightBrace)?;
+        Ok(Definition::Struct { name, name_span, fields })
+    }
+
+    /// `enum Name { A, B(int, str), ... }`
+    fn parse_enum_defn(&mut self) -> ParseResult<Definition> {
+        let (name, name_span) = self.parse_type_def_name("enum")?;
+        self.consume(Token::LeftBrace)?;
+        let mut variants = Vec::new();
+        while !tok_matches!(self, Token::RightBrace) {
+            let (variant, span) = match self.peek().cloned() {
+                Some((start, Token::Ident(v), end)) => (v, Span::new(start, end)),
+                _ => return Err(self.expected("a variant name")),
+            };
+            self.next();
+            let mut fields = Vec::new();
+            if tok_matches!(self, Token::LeftParen) {
+                self.next();
+                if !tok_matches!(self, Token::RightParen) {
+                    loop {
+                        fields.push(self.parse_type_name()?);
+                        if tok_matches!(self, Token::Comma) {
+                            self.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.consume(Token::RightParen)?;
+            } else if tok_matches!(self, Token::LeftBrace) {
+                return Err(self.expected("',' or '}'").help(format!(
+                    "a variant's values are positional: `{variant}(int, str)`; \
+                     for named fields, define a struct and hold it: `{variant}({variant}Info)`"
+                )));
+            }
+            variants.push(VariantDef { name: variant, span, fields });
+            if tok_matches!(self, Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+        if !tok_matches!(self, Token::RightBrace) {
+            return Err(self.expected("',' or '}'"));
+        }
+        self.consume(Token::RightBrace)?;
+        Ok(Definition::Enum { name, name_span, variants })
+    }
+
+    /// Parse with struct literals allowed (`true`) or not, restoring the
+    /// previous setting afterwards.
+    fn with_structs<R>(&mut self, allowed: bool, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.no_struct;
+        self.no_struct = !allowed;
+        let r = f(self);
+        self.no_struct = saved;
+        r
+    }
+
+    /// The condition of an `if` or `while`, or the value a `match` matches on.
+    fn parse_head(&mut self) -> ParseResult<Expr> {
+        self.struct_hint = None;
+        self.with_structs(false, |p| p.parse_expr())
+    }
+
+    /// The block after the head of an `if` or `while`.
+    fn parse_body(&mut self) -> ParseResult<Statement> {
+        let hint = self.struct_hint.take();
+        let body = self.parse_block();
+        Self::with_struct_hint(hint, body)
+    }
+
+    /// Add a hint to an error in what follows a head that might have
+    /// contained a struct literal.
+    fn with_struct_hint<R>(hint: Option<crate::ast::Id>, result: ParseResult<R>) -> ParseResult<R> {
+        result.map_err(|e| match hint {
+            Some(name) => e.help(format!(
+                "a struct literal can't appear here without parentheses: `({name} {{ ... }})`"
+            )),
+            None => e,
         })
     }
 
@@ -543,7 +723,7 @@ where
         self.consume(open.clone())?;
         if !self.matches(vec![close.clone()]) {
             loop {
-                let e = self.parse_expr()?;
+                let e = self.with_structs(true, |p| p.parse_expr())?;
                 xs.push(e);
                 match self.peek() {
                     Some((_, tt, _)) if *tt == sep => {
@@ -583,6 +763,10 @@ where
     }
 
     fn parse_block(&mut self) -> ParseResult<Statement> {
+        self.with_structs(true, |p| p.parse_block_inner())
+    }
+
+    fn parse_block_inner(&mut self) -> ParseResult<Statement> {
         let mut stmts = Vec::new();
         let mut tail = None;
         self.consume(Token::LeftBrace)?;
@@ -604,7 +788,7 @@ where
                     // Statements that end in a block need no `;` before the
                     // next statement.
                     Statement::Expr(Expr {
-                        kind: Expression::If(..),
+                        kind: Expression::If(..) | Expression::Match(..),
                         ..
                     })
                     | Statement::If(..)
@@ -632,8 +816,8 @@ where
 
     fn parse_if_stmt(&mut self) -> ParseResult<Statement> {
         let (start, _, _) = self.consume(Token::If)?;
-        let e = self.parse_expr()?;
-        let s1 = self.parse_block()?;
+        let e = self.parse_head()?;
+        let s1 = self.parse_body()?;
 
         if tok_matches!(self, Token::Else) {
             self.consume(Token::Else)?;
@@ -650,15 +834,15 @@ where
 
     fn parse_while(&mut self) -> ParseResult<Statement> {
         self.consume(Token::While)?;
-        let e = self.parse_expr()?;
-        let s1 = self.parse_block()?;
+        let e = self.parse_head()?;
+        let s1 = self.parse_body()?;
         Ok(Statement::While(e, Box::new(s1)))
     }
 
     fn parse_if_expr(&mut self) -> ParseResult<Expr> {
         let (start, _, _) = self.consume(Token::If)?;
-        let e1 = self.parse_expr()?;
-        let e2 = self.parse_block()?;
+        let e1 = self.parse_head()?;
+        let e2 = self.parse_body()?;
         self.consume(Token::Else)?;
         let e3 = self.parse_block()?;
 
@@ -680,6 +864,12 @@ where
                 Expression::Var(v) => {
                     let span = expr.span.to(value.span);
                     return Ok(Expr::new(Expression::Assign(v, Box::new(value)), span));
+                }
+                Expression::Field(..) => {
+                    return Err(self
+                        .error(equals.clone(), "cannot assign to a field".to_string())
+                        .help("struct fields can't be changed; make a new value instead, \
+                               e.g. `p = Point { x: 1, ..p }`"))
                 }
                 _ => {
                     return Err(self
@@ -790,16 +980,29 @@ where
 
     fn parse_call(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_primary()?;
-        while tok_matches!(self, Token::LeftParen) {
-            let es = self.parse_expr_seq(Token::LeftParen, Token::Comma, Token::RightParen)?;
+        loop {
+            if tok_matches!(self, Token::LeftParen) {
+                let es = self.parse_expr_seq(Token::LeftParen, Token::Comma, Token::RightParen)?;
 
-            if es.len() > 255 {
-                let tok = self.prev_token.clone();
-                return Err(self.error(tok, "a call cannot have more than 255 arguments".to_string()));
+                if es.len() > 255 {
+                    let tok = self.prev_token.clone();
+                    return Err(self.error(tok, "a call cannot have more than 255 arguments".to_string()));
+                }
+
+                let span = Span::new(expr.span.start, self.last_end());
+                expr = Expr::new(Expression::Call(Box::new(expr), es), span);
+            } else if tok_matches!(self, Token::Dot) {
+                self.next();
+                let (name, name_span) = match self.peek().cloned() {
+                    Some((start, Token::Ident(name), end)) => (name, Span::new(start, end)),
+                    _ => return Err(self.expected("a field name after '.'")),
+                };
+                self.next();
+                let span = Span::new(expr.span.start, name_span.end);
+                expr = Expr::new(Expression::Field(Box::new(expr), name, name_span), span);
+            } else {
+                break;
             }
-
-            let span = Span::new(expr.span.start, self.last_end());
-            expr = Expr::new(Expression::Call(Box::new(expr), es), span);
         }
 
         return Ok(expr);
@@ -829,14 +1032,38 @@ where
                 match var.as_str() {
                     "true" => Expression::True,
                     "false" => Expression::False,
+                    _ if tok_matches!(self, Token::DoubleColon) => {
+                        self.next();
+                        let variant = match self.peek().cloned() {
+                            Some((_, Token::Ident(v), _)) => v,
+                            _ => return Err(self.expected("a variant name after '::'")),
+                        };
+                        self.next();
+                        Expression::Path(var, variant)
+                    }
+                    _ if tok_matches!(self, Token::LeftBrace) && !self.no_struct => {
+                        self.parse_struct_lit(var)?
+                    }
+                    _ if tok_matches!(self, Token::LeftBrace) => {
+                        self.struct_hint = Some(var.clone());
+                        Expression::Var(var)
+                    }
                     _ => Expression::Var(var),
                 }
             }
             Token::LeftParen => {
                 self.next();
-                let expr = self.parse_expr()?;
+                let expr = self.with_structs(true, |p| p.parse_expr())?;
                 self.consume(Token::RightParen)?;
                 Expression::Grouping(Box::new(expr))
+            }
+            Token::Match => {
+                self.next();
+                let scrutinee = self.parse_head()?;
+                let hint = self.struct_hint.take();
+                let arms = self.with_structs(true, |p| p.parse_arms());
+                let arms = Self::with_struct_hint(hint, arms)?;
+                Expression::Match(Box::new(scrutinee), arms)
             }
             Token::Fn => {
                 self.next();
@@ -866,6 +1093,198 @@ where
 
         // Compound expressions extend to the last token they consumed.
         Ok(Expr::new(kind, Span::new(span.start, self.last_end())))
+    }
+
+    /// The fields of a struct literal, after its name.
+    fn parse_struct_lit(&mut self, name: crate::ast::Id) -> ParseResult<Expression> {
+        self.consume(Token::LeftBrace)?;
+        let mut fields = Vec::new();
+        let mut base = None;
+        while !tok_matches!(self, Token::RightBrace) {
+            if tok_matches!(self, Token::DotDot) {
+                self.next();
+                base = Some(Box::new(self.parse_expr()?));
+                if !tok_matches!(self, Token::RightBrace) {
+                    return Err(self
+                        .expected("'}'")
+                        .help("`..base` comes last in a struct literal: `Point { x: 1, ..p }`"));
+                }
+                break;
+            }
+            let (field, span) = match self.peek().cloned() {
+                Some((start, Token::Ident(f), end)) => (f, Span::new(start, end)),
+                _ => {
+                    return Err(self
+                        .expected("a field name")
+                        .help(format!("struct literals name their fields: `{name} {{ x: 1, y: 2 }}`")))
+                }
+            };
+            self.next();
+            let value = if tok_matches!(self, Token::Colon) {
+                self.next();
+                self.parse_expr()?
+            } else {
+                // Shorthand: `Point { x }` means `Point { x: x }`.
+                Expr::new(Expression::Var(field.clone()), span)
+            };
+            fields.push(FieldInit { name: field, span, value });
+            if tok_matches!(self, Token::Comma) {
+                self.next();
+            } else if !tok_matches!(self, Token::RightBrace) {
+                return Err(self.expected("',' or '}'"));
+            }
+        }
+        self.consume(Token::RightBrace)?;
+        Ok(Expression::StructLit { name, fields, base })
+    }
+
+    /// `{ pattern => body, ... }` after `match value`.
+    fn parse_arms(&mut self) -> ParseResult<Vec<Arm>> {
+        self.consume(Token::LeftBrace)?;
+        let mut arms = Vec::new();
+        while !tok_matches!(self, Token::RightBrace) {
+            let pattern = self.parse_pattern()?;
+            let guard = if tok_matches!(self, Token::If) {
+                self.next();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            if !tok_matches!(self, Token::FatArrow) {
+                let err = self.expected("'=>'");
+                return Err(if guard.is_none() {
+                    err.help("each arm is written `pattern => value`")
+                } else {
+                    err
+                });
+            }
+            self.next();
+            let (body, is_block) = if tok_matches!(self, Token::LeftBrace) {
+                (self.parse_block()?, true)
+            } else {
+                (Statement::Expr(self.parse_expr()?), false)
+            };
+            arms.push(Arm { pattern, guard, body: Box::new(body) });
+            if tok_matches!(self, Token::Comma) {
+                self.next();
+            } else if !is_block && !tok_matches!(self, Token::RightBrace) {
+                return Err(self
+                    .expected("',' or '}'")
+                    .help("separate match arms with ','"));
+            }
+        }
+        self.consume(Token::RightBrace)?;
+        Ok(arms)
+    }
+
+    fn parse_pattern(&mut self) -> ParseResult<Pattern> {
+        let Some((start, tok, _)) = self.peek().cloned() else {
+            return Err(self.expected("a pattern"));
+        };
+        let kind = match tok {
+            Token::Int(i) => {
+                self.next();
+                PatternKind::Int(i)
+            }
+            Token::Minus => {
+                self.next();
+                match self.peek().cloned() {
+                    Some((_, Token::Int(i), _)) => {
+                        self.next();
+                        PatternKind::Int(i.wrapping_neg())
+                    }
+                    _ => return Err(self.expected("an integer after '-' in a pattern")),
+                }
+            }
+            Token::String(s) => {
+                self.next();
+                PatternKind::Str(s)
+            }
+            Token::Float(_) => {
+                let tok = self.peek().cloned();
+                return Err(self
+                    .error(tok, "float literals can't be used as patterns".to_string())
+                    .help("bind the value and compare it in a guard: `x if x < 0.5 => ...`"));
+            }
+            Token::Ident(name) => {
+                let name_end = self.peek().unwrap().2;
+                self.next();
+                match name.as_str() {
+                    "_" => PatternKind::Wildcard,
+                    "true" => PatternKind::Bool(true),
+                    "false" => PatternKind::Bool(false),
+                    _ if tok_matches!(self, Token::DoubleColon) => {
+                        self.next();
+                        let variant = match self.peek().cloned() {
+                            Some((_, Token::Ident(v), _)) => v,
+                            _ => return Err(self.expected("a variant name after '::'")),
+                        };
+                        self.next();
+                        let mut fields = Vec::new();
+                        let parens = tok_matches!(self, Token::LeftParen);
+                        if parens {
+                            self.next();
+                            while !tok_matches!(self, Token::RightParen) {
+                                if tok_matches!(self, Token::DotDot) {
+                                    return Err(self.expected("a pattern").help(
+                                        "a variant's values are matched by position; write `_` for each one to ignore",
+                                    ));
+                                }
+                                fields.push(self.parse_pattern()?);
+                                if tok_matches!(self, Token::Comma) {
+                                    self.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                            self.consume(Token::RightParen)?;
+                        }
+                        PatternKind::Variant { enum_name: name, variant, fields, parens }
+                    }
+                    _ if tok_matches!(self, Token::LeftBrace) => {
+                        self.next();
+                        let mut fields = Vec::new();
+                        let mut rest = false;
+                        while !tok_matches!(self, Token::RightBrace) {
+                            if tok_matches!(self, Token::DotDot) {
+                                self.next();
+                                rest = true;
+                                break;
+                            }
+                            let (field, span) = match self.peek().cloned() {
+                                Some((s, Token::Ident(f), e)) => (f, Span::new(s, e)),
+                                _ => return Err(self.expected("a field name")),
+                            };
+                            self.next();
+                            let pattern = if tok_matches!(self, Token::Colon) {
+                                self.next();
+                                self.parse_pattern()?
+                            } else {
+                                // Shorthand: `Point { x }` binds the field to `x`.
+                                Pattern {
+                                    kind: PatternKind::Binding(Variable::new(field.clone(), None, span)),
+                                    span,
+                                }
+                            };
+                            fields.push((field, span, pattern));
+                            if tok_matches!(self, Token::Comma) {
+                                self.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        if !tok_matches!(self, Token::RightBrace) {
+                            return Err(self.expected("',' or '}'"));
+                        }
+                        self.next();
+                        PatternKind::Struct { name, fields, rest }
+                    }
+                    _ => PatternKind::Binding(Variable::new(name, None, Span::new(start, name_end))),
+                }
+            }
+            _ => return Err(self.expected("a pattern")),
+        };
+        Ok(Pattern { kind, span: Span::new(start, self.last_end()) })
     }
 
     fn parse_type_annotation(&mut self) -> ParseResult<Option<Type>> {
@@ -911,18 +1330,18 @@ where
                     ret_type: Box::new(ret_type),
                 })
             }
-            Some((_, Token::Ident(ref v), _)) => {
+            Some((start, Token::Ident(ref v), end)) => {
                 let v = v.clone();
                 self.next();
-                Type::try_from(v.to_string()).map_err(|_| {
-                    let help = if v == "any" {
+                if v == "any" {
+                    return Err(self.error(tok, "unknown type 'any'".to_string()).help(
                         "Aja has no 'any' type; every value has one static type. \
-                         Remove the annotation to have it inferred"
-                    } else {
-                        "valid types are: int, float, bool, str, void, and fn(...) -> ..."
-                    };
-                    self.error(tok, format!("unknown type '{v}'")).help(help)
-                })
+                         Remove the annotation to have it inferred",
+                    ));
+                }
+                // Anything else that isn't built in names a struct or enum,
+                // which the type checker looks up.
+                Ok(Type::try_from(v.to_string()).unwrap_or(Type::Named(v, Span::new(start, end))))
             }
             _ => Err(self.expected("a type")),
         }

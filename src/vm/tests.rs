@@ -452,6 +452,222 @@ fn collection_runs_without_stress_mode() {
     assert!(vm.heap.live() < 3000, "{} objects live", vm.heap.live());
 }
 
+// ---- Structs, enums, and match ----------------------------------------------
+
+const DATA: &str = "
+struct Point { x: int, y: int }
+enum Shape { Circle(Point, int), Rect(Point, Point), Empty }
+enum List { Nil, Cons(int, List) }
+fn range(n: int) -> List { let l = List::Nil; while n > 0 { n = n - 1; l = List::Cons(n, l); } l }
+";
+
+/// The value `main` returns, shown as `print` shows it, with the
+/// definitions in [`DATA`].
+#[track_caller]
+fn data_value(ret: &str, body: &str) -> String {
+    let (vm, result) = run_vm(&format!("{DATA} fn main() -> {ret} {{ {body} }}"));
+    match result {
+        Ok(v) => vm.heap.display(&v),
+        Err(e) => panic!("program failed: {}", e.message),
+    }
+}
+
+#[test]
+fn structs_are_built_and_read() {
+    assert_eq!(data_value("Point", "Point { x: 1, y: 2 }"), "Point { x: 1, y: 2 }");
+    // Fields can be written in any order.
+    assert_eq!(data_value("Point", "Point { y: 2, x: 1 }"), "Point { x: 1, y: 2 }");
+    assert_eq!(data_value("int", "let p = Point { x: 3, y: 4 }; p.x * 10 + p.y"), "34");
+    assert_eq!(data_value("Point", "let x = 5; let y = 6; Point { x, y }"), "Point { x: 5, y: 6 }");
+    assert_eq!(data_value("Point", "let p = Point { x: 1, y: 2 }; Point { y: 9, ..p }"), "Point { x: 1, y: 9 }");
+    // Fields of fields, and of call results.
+    let src = "struct Line { a: Point, b: Point }
+               fn line() -> Line { Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 } } }";
+    assert_eq!(value(&format!("{DATA} {src} fn main() -> int {{ line().b.x }}")), "Int(3)");
+}
+
+#[test]
+fn fields_are_evaluated_in_the_order_written() {
+    let src = "fn main() -> int {
+                   let order = 0;
+                   let note = fn(n: int) -> int { order = order * 10 + n; n };
+                   let p = Point { y: note(2), x: note(1) };
+                   order * 100 + p.x * 10 + p.y
+               }";
+    assert_eq!(value(&format!("{DATA} {src}")), "Int(2112)");
+}
+
+#[test]
+fn enums_are_built_and_shown() {
+    assert_eq!(data_value("Shape", "Shape::Empty"), "Shape::Empty");
+    assert_eq!(
+        data_value("Shape", "Shape::Rect(Point { x: 0, y: 0 }, Point { x: 2, y: 3 })"),
+        "Shape::Rect(Point { x: 0, y: 0 }, Point { x: 2, y: 3 })"
+    );
+    assert_eq!(data_value("List", "range(3)"), "List::Cons(0, List::Cons(1, List::Cons(2, List::Nil)))");
+    // Strings inside a value are quoted, so `\"1\"` and `1` look different.
+    let src = "enum E { S(str) } fn main() -> E { E::S(\"hi\") }";
+    let (vm, result) = run_vm(src);
+    assert_eq!(vm.heap.display(&result.unwrap()), "E::S(\"hi\")");
+}
+
+#[test]
+fn match_selects_the_first_matching_arm() {
+    let area = "fn area(s: Shape) -> int {
+                    match s {
+                        Shape::Circle(_, r) => 3 * r * r,
+                        Shape::Rect(a, b) => (b.x - a.x) * (b.y - a.y),
+                        Shape::Empty => 0,
+                    }
+                }";
+    let main = "area(Shape::Circle(Point { x: 0, y: 0 }, 2)) * 10000
+                + area(Shape::Rect(Point { x: 1, y: 1 }, Point { x: 4, y: 3 })) * 100
+                + area(Shape::Empty)";
+    assert_eq!(value(&format!("{DATA} {area} fn main() -> int {{ {main} }}")), "Int(120600)");
+
+    let describe = "fn describe(p: Point) -> str {
+                        match p {
+                            Point { x: 0, y: 0 } => \"origin\",
+                            Point { x: 0, .. } => \"y axis\",
+                            Point { y: 0, .. } => \"x axis\",
+                            Point { x, y } if x == y => \"diagonal\",
+                            Point { x: -1, y: _ } => \"left\",
+                            _ => \"elsewhere\",
+                        }
+                    }";
+    for (p, expected) in [
+        ("0, y: 0", "origin"),
+        ("0, y: 5", "y axis"),
+        ("5, y: 0", "x axis"),
+        ("4, y: 4", "diagonal"),
+        ("-1, y: 3", "left"),
+        ("2, y: 3", "elsewhere"),
+    ] {
+        let src = format!("{DATA} {describe} fn main() -> str {{ describe(Point {{ x: {p} }}) }}");
+        assert_eq!(value(&src), format!("Str({expected:?})"), "for Point {{ x: {p} }}");
+    }
+}
+
+#[test]
+fn match_on_literals() {
+    let src = "fn name(n: int) -> str { match n { 1 => \"one\", 2 => \"two\", _ => \"many\" } }
+               fn yes(b: bool) -> int { match b { true => 1, false => 0 } }
+               fn greet(s: str) -> int { match s { \"hi\" => 1, \"bye\" => 2, _ => 0 } }
+               fn main() -> str {
+                   assert(yes(true) == 1); assert(yes(false) == 0);
+                   assert(greet(\"hi\") == 1); assert(greet(\"bye\") == 2); assert(greet(\"x\") == 0);
+                   name(2)
+               }";
+    assert_eq!(value(src), "Str(\"two\")");
+}
+
+#[test]
+fn nested_patterns() {
+    let src = "fn second(l: List) -> int {
+                   match l {
+                       List::Cons(_, List::Cons(x, _)) => x,
+                       List::Cons(x, List::Nil) => -x,
+                       List::Nil => -100,
+                   }
+               }
+               fn main() -> int { second(range(5)) * 100 + second(List::Cons(7, List::Nil)) * 10 + second(List::Nil) }";
+    assert_eq!(value(&format!("{DATA} {src}")), "Int(-70)");
+}
+
+#[test]
+fn match_is_an_expression_and_a_statement() {
+    assert_eq!(
+        data_value("int", "let n = 0; match Shape::Empty { Shape::Empty => { n = 5; }, _ => { } } n"),
+        "5"
+    );
+    assert_eq!(data_value("int", "let s = Shape::Empty; 1 + match s { Shape::Empty => 1, _ => 2 } * 10"), "11");
+    // A `return` inside an arm returns from the function.
+    let src = "fn f(s: Shape) -> int { let n = match s { Shape::Empty => { return 7; }, _ => 1 }; n * 2 }
+               fn main() -> int { f(Shape::Empty) * 10 + f(Shape::Circle(Point { x: 0, y: 0 }, 1)) }";
+    assert_eq!(value(&format!("{DATA} {src}")), "Int(72)");
+}
+
+#[test]
+fn guards_see_bindings_and_fall_through() {
+    let src = "fn classify(l: List) -> int {
+                   match l {
+                       List::Cons(n, _) if n > 10 => 2,
+                       List::Cons(n, _) if n > 0 => 1,
+                       _ => 0,
+                   }
+               }
+               fn main() -> int { classify(List::Cons(50, List::Nil)) * 100 + classify(List::Cons(5, List::Nil)) * 10 + classify(List::Cons(-1, List::Nil)) }";
+    assert_eq!(value(&format!("{DATA} {src}")), "Int(210)");
+    // A guard that changes the value matched on doesn't change what later arms see.
+    let src = "fn main() -> int {
+                   let n = 1;
+                   let bump = fn() { n = 2; false };
+                   match n { _ if bump() => 0, 1 => 1, _ => 2 }
+               }";
+    assert_eq!(value(src), "Int(1)");
+}
+
+#[test]
+fn closures_capture_pattern_bindings() {
+    let src = "fn adder(l: List) -> fn(int) -> int {
+                   match l { List::Cons(n, _) => fn(x) { x + n }, List::Nil => fn(x) { x } }
+               }
+               fn main() -> int { let f = adder(List::Cons(40, List::Nil)); f(2) }";
+    assert_eq!(value(&format!("{DATA} {src}")), "Int(42)");
+}
+
+#[test]
+fn match_arms_are_tail_positions() {
+    let src = "fn len(l: List, acc: int) -> int { match l { List::Nil => acc, List::Cons(_, t) => len(t, acc + 1) } }
+               fn main() -> int { len(range(100000), 0) }";
+    assert_eq!(format!("{:?}", run_limited(&format!("{DATA} {src}"), 4096).unwrap()), "Int(100000)");
+}
+
+#[test]
+fn structural_equality() {
+    assert_eq!(data_value("bool", "Point { x: 1, y: 2 } == Point { x: 1, y: 2 }"), "true");
+    assert_eq!(data_value("bool", "Point { x: 1, y: 2 } != Point { x: 1, y: 3 }"), "true");
+    assert_eq!(data_value("bool", "Shape::Empty == Shape::Empty"), "true");
+    assert_eq!(data_value("bool", "Shape::Empty == Shape::Circle(Point { x: 0, y: 0 }, 1)"), "false");
+    assert_eq!(data_value("bool", "range(3) == range(3)"), "true");
+    assert_eq!(data_value("bool", "range(3) == range(4)"), "false");
+}
+
+#[test]
+fn long_lists_are_compared_and_shown_without_deep_recursion() {
+    // Without the stress-mode collector, which would make building these
+    // lists quadratic.
+    let run = |ret: &str, body: &str| {
+        let src = format!("{DATA} fn main() -> {ret} {{ {body} }}");
+        let ast = Parser::new(tokenize(&src).unwrap().into_iter()).parse().unwrap();
+        let types = check::check_program(&ast).unwrap();
+        let program = Compiler::new().program(&ast, &types).unwrap();
+        let mut vm = Vm::new();
+        let v = vm.run_program(&program).unwrap();
+        vm.heap.display(&v)
+    };
+    let shown = run("List", "range(200000)");
+    assert!(shown.starts_with("List::Cons(0, List::Cons(1, "));
+    assert!(shown.ends_with(&format!("List::Cons(199999, List::Nil{}", ")".repeat(200000))));
+    assert_eq!(run("bool", "range(200000) == range(200000)"), "true");
+}
+
+#[test]
+fn struct_and_enum_values_are_collected() {
+    // Nothing a program builds outlives it; only the top-level functions
+    // stay, as in a program that builds nothing.
+    let busy = format!(
+        "{DATA} fn main() {{
+             let i = 0;
+             let keep = range(10);
+             while i < 20 {{ range(50); keep = List::Cons(i, keep); i = i + 1; }}
+             assert(keep != List::Nil);
+         }}"
+    );
+    let idle = format!("{DATA} fn main() {{ }}");
+    assert_eq!(live_after(&busy), live_after(&idle));
+}
+
 #[test]
 fn statements_ending_in_a_block_need_no_semicolon() {
     // An `if` / `else` followed by more statements.

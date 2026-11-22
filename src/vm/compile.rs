@@ -12,6 +12,10 @@
 //! A local that some closure captures lives in a cell instead of directly in
 //! its register (see [`captured_locals`]), so that the declaring function and
 //! every closure that captured it share one variable.
+//!
+//! A `match` compiles to a test of each arm in turn: the arm's pattern
+//! compiles to checks that jump to the next arm on failure, and to moves
+//! that put the parts it binds into new locals.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -19,14 +23,17 @@ use std::{
 };
 
 use crate::{
-    ast::{types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Span, Statement, Variable},
+    ast::{
+        types::Type, Arm, Definition, Expr, Expression, FieldInit, Id, Op1, Op2, Pattern,
+        PatternKind, Program, Span, Statement, Variable,
+    },
     builtins::BUILTINS,
     check::{OperandType, Types},
     diagnostic::Diagnostic,
 };
 
 use super::{
-    bytecode::{Capture, Op, Proto, Reg},
+    bytecode::{Capture, Layout, Op, Proto, Reg},
     value::Value,
 };
 
@@ -36,6 +43,22 @@ use super::{
 pub struct Compiler {
     globals: HashMap<Id, u32>,
     count: u32,
+    /// The program's structs and enums, by name.
+    data: HashMap<Id, DataDef>,
+}
+
+/// How a struct or enum is laid out at runtime.
+#[derive(Debug, Clone)]
+enum DataDef {
+    Struct {
+        layout: Rc<Layout>,
+        fields: Vec<Id>,
+    },
+    /// Each variant's name and layout, in declaration order (the variant's
+    /// tag is its index).
+    Enum {
+        variants: Vec<(Id, Rc<Layout>)>,
+    },
 }
 
 /// A compiled program: its top-level functions with the global slot each
@@ -51,6 +74,7 @@ impl Compiler {
         let mut compiler = Compiler {
             globals: HashMap::new(),
             count: 0,
+            data: HashMap::new(),
         };
         for b in BUILTINS {
             compiler.define_global(b.name.into());
@@ -81,10 +105,30 @@ impl Compiler {
                     let slot = self.define_global(name.clone());
                     fns.push((slot, name, name_span, params, body, rtype));
                 }
-                Definition::Struct { name, .. } => {
-                    return Err(Diagnostic::new(format!(
-                        "struct '{name}': structs are not supported yet"
-                    )))
+                Definition::Struct { name, fields, .. } => {
+                    let fields: Vec<Id> = fields.iter().map(|f| f.name.clone()).collect();
+                    let layout = Rc::new(Layout {
+                        name: name.to_string(),
+                        tag: 0,
+                        fields: Some(fields.clone()),
+                    });
+                    self.data
+                        .insert(name.clone(), DataDef::Struct { layout, fields });
+                }
+                Definition::Enum { name, variants, .. } => {
+                    let variants = variants
+                        .iter()
+                        .enumerate()
+                        .map(|(tag, v)| {
+                            let layout = Rc::new(Layout {
+                                name: format!("{name}::{}", v.name),
+                                tag: tag as u32,
+                                fields: None,
+                            });
+                            (v.name.clone(), layout)
+                        })
+                        .collect();
+                    self.data.insert(name.clone(), DataDef::Enum { variants });
                 }
             }
         }
@@ -149,6 +193,7 @@ struct FnState {
     spans: Vec<Span>,
     consts: Vec<Value>,
     protos: Vec<Rc<Proto>>,
+    layouts: Vec<Rc<Layout>>,
     captures: Vec<Capture>,
     call_names: HashMap<usize, Id>,
     /// Lexical scopes, innermost last.
@@ -203,6 +248,7 @@ impl<'a> FnCompiler<'a> {
             spans: Vec::new(),
             consts: Vec::new(),
             protos: Vec::new(),
+            layouts: Vec::new(),
             captures: Vec::new(),
             call_names: HashMap::new(),
             scopes: vec![Vec::new()],
@@ -236,6 +282,7 @@ impl<'a> FnCompiler<'a> {
             spans: f.spans,
             consts: f.consts,
             protos: f.protos,
+            layouts: f.layouts,
             captures: f.captures,
             call_names: f.call_names,
         }
@@ -256,9 +303,9 @@ impl<'a> FnCompiler<'a> {
     fn patch(&mut self, at: usize) {
         let here = self.cur().code.len() as u32;
         match &mut self.cur().code[at] {
-            Op::Jump { target } | Op::JumpIfFalse { target, .. } | Op::JumpIfTrue { target, .. } => {
-                *target = here
-            }
+            Op::Jump { target }
+            | Op::JumpIfFalse { target, .. }
+            | Op::JumpIfTrue { target, .. } => *target = here,
             op => unreachable!("patching {op:?}, which is not a jump"),
         }
     }
@@ -280,6 +327,15 @@ impl<'a> FnCompiler<'a> {
         reg
     }
 
+    /// `n` consecutive registers; the first one.
+    fn alloc_n(&mut self, n: usize) -> Reg {
+        let start = self.mark();
+        for _ in 0..n {
+            self.alloc();
+        }
+        start
+    }
+
     fn mark(&mut self) -> Reg {
         self.cur().next
     }
@@ -290,7 +346,11 @@ impl<'a> FnCompiler<'a> {
     }
 
     fn declare(&mut self, name: Id, reg: Reg, cell: bool) {
-        self.cur().scopes.last_mut().unwrap().push(Local { name, reg, cell });
+        self.cur()
+            .scopes
+            .last_mut()
+            .unwrap()
+            .push(Local { name, reg, cell });
     }
 
     fn find_local(&self, f: usize, name: &Id) -> Option<&Local> {
@@ -305,7 +365,10 @@ impl<'a> FnCompiler<'a> {
     fn resolve(&mut self, name: &Id) -> Place {
         let f = self.fns.len() - 1;
         if let Some(l) = self.find_local(f, name) {
-            return Place::Local { reg: l.reg, cell: l.cell };
+            return Place::Local {
+                reg: l.reg,
+                cell: l.cell,
+            };
         }
         if let Some(i) = self.upvalue(f, name) {
             return Place::Upvalue(i);
@@ -420,7 +483,13 @@ impl<'a> FnCompiler<'a> {
         // A REPL input's top-level `let` outlives the input, so it is a global.
         if self.repl && self.fns.len() == 1 && self.cur().scopes.len() == 1 {
             let slot = self.compiler.define_global(var.name.clone());
-            self.emit(Op::SetGlobal { index: slot, src: reg }, var.span);
+            self.emit(
+                Op::SetGlobal {
+                    index: slot,
+                    src: reg,
+                },
+                var.span,
+            );
             self.release(reg);
             return;
         }
@@ -454,7 +523,10 @@ impl<'a> FnCompiler<'a> {
             Expression::Grouping(inner) => return self.expr_any(inner),
             Expression::Var(name) => {
                 let f = self.fns.len() - 1;
-                if let Some(Local { reg, cell: false, .. }) = self.find_local(f, name) {
+                if let Some(Local {
+                    reg, cell: false, ..
+                }) = self.find_local(f, name)
+                {
                     return *reg;
                 }
             }
@@ -502,8 +574,14 @@ impl<'a> FnCompiler<'a> {
                 // Short-circuit: only evaluate `r` if `l` doesn't decide.
                 self.expr(l, dst);
                 let jump = match op {
-                    Op2::And => Op::JumpIfFalse { cond: dst, target: 0 },
-                    _ => Op::JumpIfTrue { cond: dst, target: 0 },
+                    Op2::And => Op::JumpIfFalse {
+                        cond: dst,
+                        target: 0,
+                    },
+                    _ => Op::JumpIfTrue {
+                        cond: dst,
+                        target: 0,
+                    },
                 };
                 let done = self.emit(jump, span);
                 self.expr(r, dst);
@@ -545,6 +623,30 @@ impl<'a> FnCompiler<'a> {
                     self.emit(Op::Move { dst, src }, span);
                 }
             }
+            Expression::Call(callee, args) if matches!(callee.kind, Expression::Path(..)) => {
+                let Expression::Path(enum_name, variant) = &callee.kind else {
+                    unreachable!()
+                };
+                let layout = self.variant_layout(enum_name, variant);
+                let start = self.alloc_n(args.len());
+                for (i, arg) in args.iter().enumerate() {
+                    self.expr(arg, start + i as Reg);
+                }
+                self.new_data(dst, layout, start, args.len(), span);
+            }
+            Expression::Path(enum_name, variant) => {
+                let layout = self.variant_layout(enum_name, variant);
+                self.new_data(dst, layout, 0, 0, span);
+            }
+            Expression::StructLit { name, fields, base } => {
+                self.struct_lit(name, fields, base.as_deref(), dst, span)
+            }
+            Expression::Field(obj, _, _) => {
+                let obj = self.expr_any(obj);
+                let index = self.types.field(e);
+                self.emit(Op::GetField { dst, obj, index }, span);
+            }
+            Expression::Match(scrutinee, arms) => self.match_(scrutinee, arms, dst, span),
             Expression::Call(callee, args) => {
                 let base = self.alloc();
                 self.expr(callee, base);
@@ -553,7 +655,14 @@ impl<'a> FnCompiler<'a> {
                     self.expr(arg, r);
                 }
                 let argc = args.len() as u8;
-                let at = self.emit(Op::Call { dst, callee: base, argc }, span);
+                let at = self.emit(
+                    Op::Call {
+                        dst,
+                        callee: base,
+                        argc,
+                    },
+                    span,
+                );
                 if let Expression::Var(name) = &callee.kind {
                     self.cur().call_names.insert(at, name.clone());
                 }
@@ -608,6 +717,7 @@ impl<'a> FnCompiler<'a> {
                 Float => Op::EqF { dst, a, b },
                 Bool => Op::EqB { dst, a, b },
                 Str => Op::EqS { dst, a, b },
+                OperandType::Data => Op::EqD { dst, a, b },
                 _ => Op::EqI { dst, a, b },
             },
             Op2::And | Op2::Or => unreachable!("logical operators are compiled separately"),
@@ -616,6 +726,244 @@ impl<'a> FnCompiler<'a> {
         if negate {
             self.emit(Op::Not { dst, src: dst }, e.span);
         }
+    }
+}
+
+impl FnCompiler<'_> {
+    // ---- Structs and enums -----------------------------------------------------
+
+    fn variant_layout(&self, enum_name: &Id, variant: &Id) -> Rc<Layout> {
+        match &self.compiler.data[enum_name] {
+            DataDef::Enum { variants } => {
+                let (_, layout) = variants
+                    .iter()
+                    .find(|(v, _)| v == variant)
+                    .expect("the type checker checks variants");
+                layout.clone()
+            }
+            DataDef::Struct { .. } => unreachable!("'{enum_name}' is a struct"),
+        }
+    }
+
+    /// The tag of a variant, which is its index.
+    fn variant_tag(&self, enum_name: &Id, variant: &Id) -> u32 {
+        self.variant_layout(enum_name, variant).tag
+    }
+
+    fn struct_def(&self, name: &Id) -> (Rc<Layout>, Vec<Id>) {
+        match &self.compiler.data[name] {
+            DataDef::Struct { layout, fields } => (layout.clone(), fields.clone()),
+            DataDef::Enum { .. } => unreachable!("'{name}' is an enum"),
+        }
+    }
+
+    /// Make a value with `layout` from the `count` registers from `start`.
+    fn new_data(&mut self, dst: Reg, layout: Rc<Layout>, start: Reg, count: usize, span: Span) {
+        let layouts = &mut self.cur().layouts;
+        let index = match layouts.iter().position(|l| Rc::ptr_eq(l, &layout)) {
+            Some(i) => i,
+            None => {
+                layouts.push(layout);
+                layouts.len() - 1
+            }
+        };
+        let op = Op::NewData {
+            dst,
+            layout: index as u32,
+            start,
+            count: count as u16,
+        };
+        self.emit(op, span);
+    }
+
+    fn struct_lit(
+        &mut self,
+        name: &Id,
+        fields: &[FieldInit],
+        base: Option<&Expr>,
+        dst: Reg,
+        span: Span,
+    ) {
+        let (layout, names) = self.struct_def(name);
+        let start = self.alloc_n(names.len());
+        // Fields are evaluated in the order written, each into its slot.
+        let mut given = vec![false; names.len()];
+        for f in fields {
+            let i = names
+                .iter()
+                .position(|n| *n == f.name)
+                .expect("the type checker checks fields");
+            given[i] = true;
+            self.expr(&f.value, start + i as Reg);
+        }
+        if let Some(base) = base {
+            let obj = self.expr_any(base);
+            for (i, _) in given.iter().enumerate().filter(|(_, g)| !**g) {
+                let op = Op::GetField {
+                    dst: start + i as Reg,
+                    obj,
+                    index: i as u16,
+                };
+                self.emit(op, base.span);
+            }
+        }
+        self.new_data(dst, layout, start, names.len(), span);
+    }
+
+    fn match_(&mut self, scrutinee: &Expr, arms: &[Arm], dst: Reg, span: Span) {
+        // Copy the value, so a guard that assigns to the variable matched on
+        // can't change what later arms see.
+        let value = self.alloc();
+        self.expr(scrutinee, value);
+        let mut ends = Vec::new();
+        for arm in arms {
+            let mark = self.mark();
+            self.cur().scopes.push(Vec::new());
+            let mut fails = Vec::new();
+            self.pattern(&arm.pattern, value, &mut fails);
+            if let Some(guard) = &arm.guard {
+                let m = self.mark();
+                let cond = self.expr_any(guard);
+                fails.push(self.emit(Op::JumpIfFalse { cond, target: 0 }, guard.span));
+                self.release(m);
+            }
+            self.stmt(&arm.body, Some(dst));
+            ends.push(self.emit(Op::Jump { target: 0 }, span));
+            for f in fails {
+                self.patch(f);
+            }
+            self.cur().scopes.pop();
+            self.release(mark);
+        }
+        self.emit(Op::NoMatch, span);
+        for e in ends {
+            self.patch(e);
+        }
+    }
+
+    /// Test that the value in `value` matches `p`, adding a jump to `fails`
+    /// for each check that fails, and bind the names in `p`.
+    fn pattern(&mut self, p: &Pattern, value: Reg, fails: &mut Vec<usize>) {
+        match &p.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Binding(var) => {
+                let reg = self.alloc();
+                self.emit(
+                    Op::Move {
+                        dst: reg,
+                        src: value,
+                    },
+                    p.span,
+                );
+                self.bind(var, reg);
+            }
+            PatternKind::Int(i) => {
+                let t = self.alloc();
+                self.emit(Op::LoadInt { dst: t, value: *i }, p.span);
+                self.emit(
+                    Op::EqI {
+                        dst: t,
+                        a: value,
+                        b: t,
+                    },
+                    p.span,
+                );
+                fails.push(self.emit(Op::JumpIfFalse { cond: t, target: 0 }, p.span));
+            }
+            PatternKind::Str(s) => {
+                let t = self.alloc();
+                let consts = &mut self.cur().consts;
+                consts.push(Value::Str(Rc::from(s.as_str())));
+                let index = (consts.len() - 1) as u32;
+                self.emit(Op::LoadConst { dst: t, index }, p.span);
+                self.emit(
+                    Op::EqS {
+                        dst: t,
+                        a: value,
+                        b: t,
+                    },
+                    p.span,
+                );
+                fails.push(self.emit(Op::JumpIfFalse { cond: t, target: 0 }, p.span));
+            }
+            PatternKind::Bool(b) => {
+                let op = if *b {
+                    Op::JumpIfFalse {
+                        cond: value,
+                        target: 0,
+                    }
+                } else {
+                    Op::JumpIfTrue {
+                        cond: value,
+                        target: 0,
+                    }
+                };
+                fails.push(self.emit(op, p.span));
+            }
+            PatternKind::Variant {
+                enum_name,
+                variant,
+                fields,
+                ..
+            } => {
+                let tag = self.variant_tag(enum_name, variant);
+                let t = self.alloc();
+                self.emit(
+                    Op::TestTag {
+                        dst: t,
+                        obj: value,
+                        tag,
+                    },
+                    p.span,
+                );
+                fails.push(self.emit(Op::JumpIfFalse { cond: t, target: 0 }, p.span));
+                for (i, sub) in fields.iter().enumerate() {
+                    self.sub_pattern(sub, value, i, fails);
+                }
+            }
+            PatternKind::Struct { name, fields, .. } => {
+                let (_, names) = self.struct_def(name);
+                for (field, _, sub) in fields {
+                    let i = names
+                        .iter()
+                        .position(|n| n == field)
+                        .expect("the type checker checks fields");
+                    self.sub_pattern(sub, value, i, fails);
+                }
+            }
+        }
+    }
+
+    /// Match field `index` of the value in `obj` against `p`.
+    fn sub_pattern(&mut self, p: &Pattern, obj: Reg, index: usize, fails: &mut Vec<usize>) {
+        let get = |dst| Op::GetField {
+            dst,
+            obj,
+            index: index as u16,
+        };
+        match &p.kind {
+            PatternKind::Wildcard => {}
+            // Read a bound field straight into its variable's register.
+            PatternKind::Binding(var) => {
+                let reg = self.alloc();
+                self.emit(get(reg), p.span);
+                self.bind(var, reg);
+            }
+            _ => {
+                let reg = self.alloc();
+                self.emit(get(reg), p.span);
+                self.pattern(p, reg, fails);
+            }
+        }
+    }
+
+    /// Declare the variable a pattern binds, whose value is in `reg`.
+    fn bind(&mut self, var: &Variable, reg: Reg) {
+        let cell = self.captured.contains(&decl_key(var));
+        if cell {
+            self.emit(Op::NewCell { dst: reg, src: reg }, var.span);
+        }
+        self.declare(var.name.clone(), reg, cell);
     }
 }
 
@@ -650,8 +998,11 @@ fn is_simple(e: &Expr) -> bool {
         | Expression::String(_)
         | Expression::True
         | Expression::False
-        | Expression::Var(_) => true,
-        Expression::Grouping(e) | Expression::Unary(_, e) => is_simple(e),
+        | Expression::Var(_)
+        | Expression::Path(..) => true,
+        Expression::Grouping(e) | Expression::Unary(_, e) | Expression::Field(e, ..) => {
+            is_simple(e)
+        }
         Expression::BinOp(l, _, r) => is_simple(l) && is_simple(r),
         _ => false,
     }
@@ -677,7 +1028,13 @@ fn signature(params: &[Variable], rtype: Option<&Type>) -> String {
 /// before the closure that captures it is reached.
 fn captured_locals(params: &[Variable], body: &Statement, repl: bool) -> HashSet<DeclKey> {
     let mut finder = CaptureFinder {
-        scopes: vec![(0, params.iter().map(|p| (p.name.clone(), decl_key(p))).collect())],
+        scopes: vec![(
+            0,
+            params
+                .iter()
+                .map(|p| (p.name.clone(), decl_key(p)))
+                .collect(),
+        )],
         depth: 0,
         repl,
         captured: HashSet::new(),
@@ -732,7 +1089,11 @@ impl CaptureFinder {
                 let repl_global = self.repl && self.depth == 0 && self.scopes.len() == 1;
                 if !repl_global {
                     let key = decl_key(var);
-                    self.scopes.last_mut().unwrap().1.push((var.name.clone(), key));
+                    self.scopes
+                        .last_mut()
+                        .unwrap()
+                        .1
+                        .push((var.name.clone(), key));
                 }
             }
             Statement::If(cond, body) | Statement::While(cond, body) => {
@@ -753,8 +1114,32 @@ impl CaptureFinder {
             | Expression::Float(_)
             | Expression::String(_)
             | Expression::True
-            | Expression::False => {}
-            Expression::Grouping(e) | Expression::Unary(_, e) => self.expr(e),
+            | Expression::False
+            | Expression::Path(..) => {}
+            Expression::Grouping(e) | Expression::Unary(_, e) | Expression::Field(e, ..) => {
+                self.expr(e)
+            }
+            Expression::StructLit { fields, base, .. } => {
+                for f in fields {
+                    self.expr(&f.value);
+                }
+                if let Some(b) = base {
+                    self.expr(b);
+                }
+            }
+            Expression::Match(scrutinee, arms) => {
+                self.expr(scrutinee);
+                for arm in arms {
+                    let mut vars = Vec::new();
+                    pattern_bindings(&arm.pattern, &mut vars);
+                    self.scope(vars, |s| {
+                        if let Some(g) = &arm.guard {
+                            s.expr(g);
+                        }
+                        s.stmt(&arm.body);
+                    });
+                }
+            }
             Expression::BinOp(l, _, r) => {
                 self.expr(l);
                 self.expr(r);
@@ -777,10 +1162,28 @@ impl CaptureFinder {
             }
             Expression::Closure(params, _, body) => {
                 self.depth += 1;
-                let vars = params.iter().map(|p| (p.name.clone(), decl_key(p))).collect();
+                let vars = params
+                    .iter()
+                    .map(|p| (p.name.clone(), decl_key(p)))
+                    .collect();
                 self.scope(vars, |s| s.stmt(body));
                 self.depth -= 1;
             }
         }
+    }
+}
+
+/// The variables a pattern binds, with their declaration keys.
+fn pattern_bindings(p: &Pattern, out: &mut Vec<(Id, DeclKey)>) {
+    match &p.kind {
+        PatternKind::Binding(var) => out.push((var.name.clone(), decl_key(var))),
+        PatternKind::Variant { fields, .. } => fields.iter().for_each(|f| pattern_bindings(f, out)),
+        PatternKind::Struct { fields, .. } => {
+            fields.iter().for_each(|(_, _, f)| pattern_bindings(f, out))
+        }
+        PatternKind::Wildcard
+        | PatternKind::Int(_)
+        | PatternKind::Str(_)
+        | PatternKind::Bool(_) => {}
     }
 }
