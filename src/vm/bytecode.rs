@@ -46,6 +46,15 @@ pub enum Op {
     /// [`Proto::captures`] lists.
     Closure { dst: Reg, proto: u32 },
 
+    // ---- Structs and enums ---------------------------------------------------
+    /// Make a struct or enum value described by `layouts[layout]`, holding
+    /// the `count` values in the registers from `start` on.
+    NewData { dst: Reg, layout: u32, start: Reg, count: u16 },
+    /// Read the field (or variant value) at `index` of the value in `obj`.
+    GetField { dst: Reg, obj: Reg, index: u16 },
+    /// Whether the enum value in `obj` is the variant numbered `tag`.
+    TestTag { dst: Reg, obj: Reg, tag: u32 },
+
     // ---- Arithmetic --------------------------------------------------------------
     AddI { dst: Reg, a: Reg, b: Reg },
     SubI { dst: Reg, a: Reg, b: Reg },
@@ -69,6 +78,8 @@ pub enum Op {
     EqF { dst: Reg, a: Reg, b: Reg },
     EqB { dst: Reg, a: Reg, b: Reg },
     EqS { dst: Reg, a: Reg, b: Reg },
+    /// Structural equality of two values of the same struct or enum type.
+    EqD { dst: Reg, a: Reg, b: Reg },
     Not { dst: Reg, src: Reg },
 
     // ---- Control flow -------------------------------------------------------------
@@ -86,6 +97,21 @@ pub enum Op {
     /// returned directly.
     TailCall { callee: Reg, argc: u8 },
     Return { src: Reg },
+    /// The end of a `match` whose arms all failed. The type checker proves
+    /// every `match` exhaustive, so reaching this is a bug in the compiler.
+    NoMatch,
+}
+
+/// What the VM needs to know about a struct or one variant of an enum to
+/// build and show its values.
+#[derive(Debug)]
+pub struct Layout {
+    /// How values are shown: `Point`, or `Shape::Circle`.
+    pub name: String,
+    /// The variant's index in its enum; 0 for a struct.
+    pub tag: u32,
+    /// A struct's field names; `None` for a variant, whose values are positional.
+    pub fields: Option<Vec<Id>>,
 }
 
 /// Where a closure gets one of its captured cells when it is created.
@@ -113,6 +139,8 @@ pub struct Proto {
     pub consts: Vec<Value>,
     /// Closures defined inside this function.
     pub protos: Vec<Rc<Proto>>,
+    /// The struct and variant layouts `NewData` instructions refer to.
+    pub layouts: Vec<Rc<Layout>>,
     /// The cells a closure made from this proto captures, in upvalue order.
     pub captures: Vec<Capture>,
     /// For `Call` instructions whose callee is a name, that name (by

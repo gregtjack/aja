@@ -83,6 +83,55 @@ A program is a sequence of top-level `fn` definitions. Execution starts at
 | `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`      |
 | `void`  | —                       | Result of statements / no value      |
 | `fn(int, str) -> bool` | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
+| structs and enums | `Point { x: 1, y: 2 }`, `Shape::Circle(p, 3)` | Defined at the top level; see below |
+
+### Structs, enums, and `match`
+
+```rust
+struct Point { x: int, y: int }
+
+enum Shape {
+    Circle(Point, int),
+    Rect(Point, Point),
+    Empty,
+}
+
+fn area(s: Shape) -> int {
+    match s {
+        Shape::Circle(_, r) => 3 * r * r,
+        Shape::Rect(a, b) => (b.x - a.x) * (b.y - a.y),
+        Shape::Empty => 0,
+    }
+}
+```
+
+- **Structs** have named fields: build one with `Point { x: 1, y: 2 }` (or
+  `Point { x, y }` when variables have the fields' names) and read a field
+  with `p.x`. Fields can't be assigned; make a new value instead, copying
+  the fields you don't give from another with `Point { y: 5, ..p }`.
+- **Enums** have variants that hold values by position, or none:
+  `Shape::Circle(p, 3)`, `Shape::Empty`. Variants are always written with
+  their enum's name. Types can be recursive (`enum List { Nil, Cons(int, List) }`)
+  and can refer to each other in any order.
+- **`match`** tries its arms in order: `pattern => value,` or
+  `pattern if guard => value,`, where a value can be a block. Patterns are
+  `_`, a name (which binds the value), int, bool, and string literals, variant
+  patterns `Shape::Circle(center, r)`, and struct patterns
+  `Point { x: 0, y }` (end with `..` to skip the other fields). They nest.
+  A `match` is an expression, and its arms are tail positions.
+- **`match` is exhaustive.** Leaving a case out is a compile error that names
+  the missing cases (`Shape::Empty` not covered), so adding a variant
+  points you at every `match` to update. An arm that can never match, because
+  earlier arms cover it, is an error too. Guarded arms don't count toward
+  covering a case.
+- **`==`** compares structs and enums field by field, as long as everything
+  in them can be compared (no functions).
+- In the head of an `if`, `while`, or `match`, a struct literal needs
+  parentheses: `if p == (Point { x: 0, y: 0 }) { ... }`, as in Rust.
+
+The checker for these lives in `src/check/data.rs`. In the VM, struct and
+enum values are immutable heap objects: a tag, and the values they hold.
+`Option` and `Result` need generics, which come next.
 
 ### Type checking
 
@@ -180,7 +229,7 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/lexer.rs`        | Hand-written lexer; tracks line/column for errors |
 | `src/parse.rs`        | Recursive-descent parser (plus unit tests) |
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
-| `src/check/`          | Static type checker with local type inference |
+| `src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness |
 | `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends |
 | `src/vm/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
 | `src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
@@ -212,7 +261,7 @@ A local that a closure captures is stored in a shared cell, so the function
 and its closures see each other's assignments. The compiler finds these
 variables in a pass over each function before compiling it.
 
-Closures and cells live on a garbage-collected heap (`src/vm/heap.rs`). The
+Closures, cells, and struct and enum values live on a garbage-collected heap (`src/vm/heap.rs`). The
 collector is a precise mark-and-sweep: it starts from the registers in use,
 the globals, and the call frames, marks every object reachable from them, and
 frees the rest, so cycles (such as a closure that calls itself through a
@@ -227,12 +276,13 @@ the VM forgets to keep reachable is caught.
 **Working:** ints, floats, bools, strings; `let`/assignment with lexical
 scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
+structs, enums with data, and exhaustive `match`;
 static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 
 **Reserved or partially present, not yet usable:**
-- `match`, `::`, `=>`, `<-`, `[` `]` are lexed but have no grammar.
-- `struct` definitions and a `List<T>` type exist in the AST only.
+- `<-`, `[` `]` are lexed but have no grammar.
+- A `List<T>` type exists in the AST only; generics aren't implemented yet.
 - The QBE compiler backend is a stub; it will be replaced by Cranelift (see
   [DESIGN.md](DESIGN.md)).
 
@@ -276,7 +326,7 @@ Output is colored when stderr is a terminal; set `NO_COLOR` to disable.
 `src/diagnostic.rs` holds the shared renderer.
 
 **Known limitations:**
-- The REPL handles one line at a time and can't define top-level functions.
+- The REPL handles one line at a time and can't define top-level functions, structs, or enums.
 - There is no `else if`; nest an `if` inside the `else` block instead.
 - Only `//` line comments are supported.
 - `==` and `!=` bind more loosely than `&&` and `||`, so write

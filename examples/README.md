@@ -11,6 +11,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [inference.aja](inference.aja) | Type inference inside function bodies, including closure parameters |
 | [math.aja](math.aja) | Float math (Newton's method), primes, Collatz |
 | [garbage.aja](garbage.aja) | The garbage collector freeing a million self-referencing closures |
+| [data.aja](data.aja) | Structs, enums with data, recursive types, and `match` with nested patterns and guards |
 
 ## Errors
 
@@ -27,6 +28,7 @@ there.
 | [call_trace.aja](errors/call_trace.aja) | Division by zero, with the call trace (recursion collapsed, tail calls marked) |
 | [overflow.aja](errors/overflow.aja) | Integer overflow, which is an error rather than a wraparound |
 | [assert.aja](errors/assert.aja) | A failed `assert` |
+| [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
 
 `cargo test` runs every example: the ones here must succeed, and each one in
 `errors/` must fail with exactly the errors listed in its `// expect:` lines.

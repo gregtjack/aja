@@ -1,0 +1,75 @@
+// Structs and enums: data is modeled with named fields and with variants
+// that carry values, and `match` takes it apart. Every `match` must handle
+// every case; the checker says which ones are missing.
+
+struct Point { x: int, y: int }
+
+enum Shape {
+    Circle(Point, int),     // center and radius
+    Rect(Point, Point),     // two corners
+    Empty,
+}
+
+// A recursive type: a list is either empty or a value followed by a list.
+enum List {
+    Nil,
+    Cons(int, List),
+}
+
+fn area(s: Shape) -> int {
+    match s {
+        Shape::Circle(_, r) => 3 * r * r,
+        Shape::Rect(a, b) => (b.x - a.x) * (b.y - a.y),
+        Shape::Empty => 0,
+    }
+}
+
+// Patterns can be nested, match literals, and have `if` guards.
+fn describe(p: Point) -> str {
+    match p {
+        Point { x: 0, y: 0 } => "the origin",
+        Point { x: 0, .. } => "on the y axis",
+        Point { y: 0, .. } => "on the x axis",
+        Point { x, y } if x == y => "on the diagonal",
+        _ => "somewhere else",
+    }
+}
+
+fn range(n: int) -> List {
+    let list = List::Nil;
+    while n > 0 {
+        n = n - 1;
+        list = List::Cons(n, list);
+    }
+    list
+}
+
+// The recursive call is in a match arm, a tail position, so this runs in
+// constant space however long the list is.
+fn sum(list: List, acc: int) -> int {
+    match list {
+        List::Nil => acc,
+        List::Cons(head, tail) => sum(tail, acc + head),
+    }
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 };
+    // Fields can't be changed; `..p` copies the ones not given.
+    let q = Point { y: 5, ..p };
+    println("p =", p, "and q =", q);
+    println("p.x + q.y =", p.x + q.y);
+
+    println("areas:", area(Shape::Circle(p, 2)), area(Shape::Rect(p, Point { x: 4, y: 6 })), area(Shape::Empty));
+
+    println("(0, 0) is", describe(Point { x: 0, y: 0 }));
+    println("(3, 3) is", describe(Point { x: 3, y: 3 }));
+    println("(1, 2) is", describe(p));
+
+    println("range(5) =", range(5));
+    println("sum of 0..50000 =", sum(range(50000), 0));
+
+    // Structs and enums compare field by field.
+    println("p == Point { x: 1, y: 2 }?", p == Point { x: 1, y: 2 });
+    println("range(3) == range(3)?", range(3) == range(3));
+}

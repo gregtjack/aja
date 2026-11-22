@@ -18,6 +18,8 @@ pub enum Value {
     Str(Rc<str>),
     /// A closure on the heap.
     Fn(Gc),
+    /// A struct or enum value on the heap.
+    Data(Gc),
     /// A built-in: its signature and the VM's implementation.
     Native(&'static Builtin, NativeFn),
     /// A local variable captured by a closure, as a cell on the heap. Cells
@@ -30,7 +32,7 @@ impl Value {
     /// The heap object this value refers to, if any.
     pub fn handle(&self) -> Option<Gc> {
         match self {
-            Value::Fn(gc) | Value::Cell(gc) => Some(*gc),
+            Value::Fn(gc) | Value::Cell(gc) | Value::Data(gc) => Some(*gc),
             _ => None,
         }
     }
@@ -45,6 +47,7 @@ impl fmt::Debug for Value {
             Value::Bool(b) => write!(f, "Bool({b})"),
             Value::Str(s) => write!(f, "Str({:?})", &**s),
             Value::Fn(gc) => write!(f, "Fn({gc})"),
+            Value::Data(gc) => write!(f, "Data({gc})"),
             Value::Native(b, _) => write!(f, "Native({})", b.name),
             Value::Cell(gc) => write!(f, "Cell({gc})"),
         }

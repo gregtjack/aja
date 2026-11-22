@@ -98,7 +98,12 @@ where
                     }
                 }
                 ',' => return Ok((start, Token::Comma, self.get_location())),
-                '.' => return Ok((start, Token::Dot, self.get_location())),
+                '.' => {
+                    if self.match_advance('.') {
+                        return Ok((start, Token::DotDot, self.get_location()));
+                    }
+                    return Ok((start, Token::Dot, self.get_location()));
+                }
                 ':' => {
                     if self.match_advance(':') {
                         return Ok((start, Token::DoubleColon, self.get_location()));
@@ -373,6 +378,8 @@ where
             "else" => Some(Token::Else),
             "match" => Some(Token::Match),
             "return" => Some(Token::Return),
+            "struct" => Some(Token::Struct),
+            "enum" => Some(Token::Enum),
             _ => None,
         };
 

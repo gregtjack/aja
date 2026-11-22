@@ -2,6 +2,8 @@ use std::fmt::Display;
 
 use color_eyre::eyre::bail;
 
+use super::{Id, Span};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Int,
@@ -14,6 +16,8 @@ pub enum Type {
     },
     List(Box<Type>),
     Void,
+    /// A struct or enum, by name, with where the name is written.
+    Named(Id, Span),
 }
 
 impl Display for Type {
@@ -32,6 +36,7 @@ impl Display for Type {
             }
             Type::List(t) => write!(f, "List<{}>", t),
             Type::Void => write!(f, "void"),
+            Type::Named(name, _) => write!(f, "{name}"),
         }
     }
 }
