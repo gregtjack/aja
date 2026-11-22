@@ -85,27 +85,26 @@ impl Builtin {
                     sleep(Duration::from_millis(*i as u64));
                     Ok(Value::Void)
                 } else {
-                    Err(RuntimeError::TypeError {
-                        msg: "sleep() expects an integer argument".to_string(),
-                    })
+                    Err(RuntimeError::type_error(format!(
+                            "sleep() expects an int (milliseconds), found {}",
+                            args.first().map_or("nothing".to_string(), |a| a.type_name())
+                        )))
                 }
             }
             Builtin::Assert => {
                 if args.is_empty() {
-                    return Err(RuntimeError::Adhoc(
-                        "assert() requires exactly one argument".to_string(),
+                    return Err(RuntimeError::adhoc(
+                        "assert() takes 1 argument but 0 were given".to_string(),
                     ));
                 }
 
                 if let Value::Bool(condition) = &args[0] {
                     if !condition {
-                        return Err(RuntimeError::Adhoc("Assertion failed".to_string()));
+                        return Err(RuntimeError::adhoc("assertion failed".to_string()));
                     }
                     Ok(Value::Void)
                 } else {
-                    Err(RuntimeError::TypeError {
-                        msg: "assert() expects a boolean argument".to_string(),
-                    })
+                    Err(RuntimeError::type_error(format!("assert() expects a bool, found {}", args[0].type_name())))
                 }
             }
         }

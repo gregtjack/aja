@@ -1,5 +1,6 @@
 use crate::{
-    ast::{types::Type, Definition, Expression, Program, Statement, Variable},
+    ast::{types::Type, Definition, Expr, Expression, Location, Program, Span, Statement, Variable},
+    diagnostic::Diagnostic,
     lexer::SrcSpan,
     token::Token,
 };
@@ -24,7 +25,7 @@ mod tests {
     fn test_parse_integer_literal() {
         let mut parser = create_parser("42");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::Int(42) => {}
             _ => panic!("Expected Expression::Int(42), got {:?}", result),
         }
@@ -34,7 +35,7 @@ mod tests {
     fn test_parse_float_literal() {
         let mut parser = create_parser("3.14");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::Float(f) => assert!((f - 3.14).abs() < 0.001),
             _ => panic!("Expected Expression::Float(3.14), got {:?}", result),
         }
@@ -44,7 +45,7 @@ mod tests {
     fn test_parse_string_literal() {
         let mut parser = create_parser("\"hello world\"");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::String(s) => assert_eq!(s, "hello world"),
             _ => panic!("Expected Expression::String, got {:?}", result),
         }
@@ -54,14 +55,14 @@ mod tests {
     fn test_parse_boolean_literals() {
         let mut parser_true = create_parser("true");
         let result_true = parser_true.parse_expr_only().unwrap();
-        match result_true {
+        match result_true.kind {
             Expression::True => {}
             _ => panic!("Expected Expression::True, got {:?}", result_true),
         }
 
         let mut parser_false = create_parser("false");
         let result_false = parser_false.parse_expr_only().unwrap();
-        match result_false {
+        match result_false.kind {
             Expression::False => {}
             _ => panic!("Expected Expression::False, got {:?}", result_false),
         }
@@ -71,7 +72,7 @@ mod tests {
     fn test_parse_variable() {
         let mut parser = create_parser("x");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::Var(name) => assert_eq!(name, "x"),
             _ => panic!("Expected Expression::Var, got {:?}", result),
         }
@@ -81,8 +82,8 @@ mod tests {
     fn test_parse_grouping() {
         let mut parser = create_parser("(42)");
         let result = parser.parse_expr_only().unwrap();
-        match result {
-            Expression::Grouping(expr) => match *expr {
+        match result.kind {
+            Expression::Grouping(expr) => match expr.kind {
                 Expression::Int(42) => {}
                 _ => panic!("Expected Expression::Int(42) inside grouping"),
             },
@@ -92,10 +93,10 @@ mod tests {
 
     #[test]
     fn test_parse_unary_operations() {
-        // Test negation - the lexer treats -42 as a single negative integer token
+        // Test negation - the parser folds -42 into a single negative integer literal
         let mut parser = create_parser("-42");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::Int(-42) => {}
             _ => panic!("Expected Expression::Int(-42), got {:?}", result),
         }
@@ -103,13 +104,13 @@ mod tests {
         // Test logical not
         let mut parser = create_parser("!true");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::Unary(op, expr) => {
                 match op {
                     crate::ast::Op1::Not => {}
                     _ => panic!("Expected Not operator"),
                 }
-                match *expr {
+                match expr.kind {
                     Expression::True => {}
                     _ => panic!("Expected Expression::True"),
                 }
@@ -120,13 +121,13 @@ mod tests {
         // Test unary minus on a variable (this should create a unary operation)
         let mut parser = create_parser("-x");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::Unary(op, expr) => {
                 match op {
                     crate::ast::Op1::Negate => {}
                     _ => panic!("Expected Negate operator"),
                 }
-                match *expr {
+                match expr.kind {
                     Expression::Var(name) => assert_eq!(name, "x"),
                     _ => panic!("Expected Expression::Var(\"x\")"),
                 }
@@ -140,17 +141,17 @@ mod tests {
         // Test addition
         let mut parser = create_parser("1 + 2");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::BinOp(left, op, right) => {
                 match op {
                     crate::ast::Op2::Addition => {}
                     _ => panic!("Expected Addition operator"),
                 }
-                match *left {
+                match left.kind {
                     Expression::Int(1) => {}
                     _ => panic!("Expected left operand to be 1"),
                 }
-                match *right {
+                match right.kind {
                     Expression::Int(2) => {}
                     _ => panic!("Expected right operand to be 2"),
                 }
@@ -163,10 +164,10 @@ mod tests {
     fn test_parse_assignment() {
         let mut parser = create_parser("x = 42");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::Assign(name, value) => {
                 assert_eq!(name, "x");
-                match *value {
+                match value.kind {
                     Expression::Int(42) => {}
                     _ => panic!("Expected value to be 42"),
                 }
@@ -179,9 +180,9 @@ mod tests {
     fn test_parse_function_call() {
         let mut parser = create_parser("foo()");
         let result = parser.parse_expr_only().unwrap();
-        match result {
+        match result.kind {
             Expression::Call(func, args) => {
-                match *func {
+                match func.kind {
                     Expression::Var(name) => assert_eq!(name, "foo"),
                     _ => panic!("Expected function to be a variable"),
                 }
@@ -199,7 +200,7 @@ mod tests {
             Statement::Let { var, value } => {
                 assert_eq!(var.name, "x");
                 assert_eq!(var.t, Type::Int);
-                match value {
+                match value.kind {
                     Expression::Int(42) => {}
                     _ => panic!("Expected value to be 42"),
                 }
@@ -214,7 +215,7 @@ mod tests {
         let mut parser = create_parser("return 42;");
         let result = parser.parse_stmt_only().unwrap();
         match result {
-            Statement::Return(Some(value)) => match value {
+            Statement::Return(Some(value)) => match value.kind {
                 Expression::Int(42) => {}
                 _ => panic!("Expected return value to be 42"),
             },
@@ -275,6 +276,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_reports_bad_input_without_panicking() {
+        // Unknown type name
+        assert!(create_parser("fn main() { let x: foo = 1; x }").parse().is_err());
+        // Trailing tokens after the last definition
+        assert!(create_parser("fn main() { 1 } 42").parse().is_err());
+        // Input that ends mid-definition
+        assert!(create_parser("fn main(").parse().is_err());
+    }
+
+    #[test]
+    fn test_lexer_reports_errors() {
+        assert!(crate::lexer::tokenize("let x = @;").is_err());
+        assert!(crate::lexer::tokenize("\"unterminated").is_err());
+        assert!(crate::lexer::tokenize("99999999999").is_err());
+    }
+
+    #[test]
     fn test_parse_empty_program() {
         let mut parser = create_parser("");
         let result = parser.parse().unwrap();
@@ -294,27 +312,31 @@ macro_rules! tok_matches {
 }
 
 #[derive(Debug)]
-pub enum ParseError {
-    InvalidToken {
-        line: u32,
-        col: u32,
-        message: String,
-    },
-    Eof,
-    Unknown,
+pub struct ParseError {
+    pub start: Location,
+    pub end: Location,
+    pub message: String,
+    pub help: Option<String>,
+}
+
+impl ParseError {
+    fn help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    pub fn to_diagnostic(&self) -> Diagnostic {
+        Diagnostic::new(self.message.clone())
+            .with_span(self.start, self.end)
+            .with_help(self.help.clone())
+    }
 }
 
 impl std::error::Error for ParseError {}
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidToken { line, col, message } => {
-                write!(f, "ParseError: [line {}:{}] {}", line, col, message)
-            }
-            Self::Eof => write!(f, "End of token stream"),
-            _ => write!(f, "unknown error"),
-        }
+        write!(f, "{}:{}: {}", self.start.line, self.start.col, self.message)
     }
 }
 
@@ -345,10 +367,16 @@ where
             ds.push(d);
         }
 
+        if !tok_matches!(self, Token::Eof) && self.peek().is_some() {
+            return Err(self
+                .expected("a function definition")
+                .help("only 'fn' definitions are allowed at the top level of a file"));
+        }
+
         Ok(Program { definitions: ds })
     }
 
-    pub fn parse_expr_only(&mut self) -> ParseResult<Expression> {
+    pub fn parse_expr_only(&mut self) -> ParseResult<Expr> {
         self.parse_expr()
     }
 
@@ -359,7 +387,7 @@ where
     fn parse_defn(&mut self) -> ParseResult<Definition> {
         let res = match self.next() {
             Some((_, Token::Fn, _)) => self.parse_fn_defn(),
-            tok => Err(self.error(tok, "Unknown definition".to_string())),
+            tok => Err(self.error(tok, "expected a function definition".to_string())),
         };
 
         res
@@ -367,8 +395,7 @@ where
 
     fn parse_fn_defn(&mut self) -> ParseResult<Definition> {
         if !tok_matches!(self, Token::Ident(_)) {
-            let tok = self.peek().cloned();
-            return Err(self.error(tok, "Expected identifier".to_string()));
+            return Err(self.expected("a function name after 'fn'"));
         }
 
         let ident = match self.next() {
@@ -399,18 +426,13 @@ where
 
         if !tok_matches!(self, Token::RightParen) {
             loop {
-                let e = self.parse_primary()?;
-                let vtype: Type = self.parse_type_annotation()?;
-                let v = match e {
-                    Expression::Var(id) => Variable::new(id, vtype),
-                    _ => {
-                        return Err(self.error(
-                            self.prev_token.clone(),
-                            "Function parameter must be an identifier".to_string(),
-                        ))
-                    }
+                let name = match self.peek() {
+                    Some((_, Token::Ident(id), _)) => id.clone(),
+                    _ => return Err(self.expected("a parameter name")),
                 };
-                xs.push(v);
+                self.next();
+                let vtype: Type = self.parse_type_annotation()?;
+                xs.push(Variable::new(name, vtype));
 
                 if tok_matches!(self, Token::Comma) {
                     self.next();
@@ -432,7 +454,7 @@ where
     /// Parse a statement
     fn parse_stmt(&mut self) -> ParseResult<Statement> {
         let Some(tok) = self.peek() else {
-            return Err(ParseError::Eof);
+            return Err(self.expected("a statement"));
         };
 
         match tok.1 {
@@ -452,9 +474,9 @@ where
     }
 
     /// Parse an expression
-    fn parse_expr(&mut self) -> ParseResult<Expression> {
+    fn parse_expr(&mut self) -> ParseResult<Expr> {
         let Some(tok) = self.peek() else {
-            return Err(ParseError::Eof);
+            return Err(self.expected("an expression"));
         };
 
         match tok.1 {
@@ -470,7 +492,7 @@ where
         open: Token,
         sep: Token,
         close: Token,
-    ) -> ParseResult<Vec<Expression>> {
+    ) -> ParseResult<Vec<Expr>> {
         let mut xs = Vec::new();
         self.consume(open.clone())?;
         if !self.matches(vec![close.clone()]) {
@@ -492,24 +514,24 @@ where
     fn parse_let(&mut self) -> ParseResult<Statement> {
         self.consume(Token::Let)?;
 
-        let ident = self.parse_primary()?;
+        let id = match self.peek() {
+            Some((_, Token::Ident(id), _)) if id != "true" && id != "false" => id.clone(),
+            _ => return Err(self.expected("a variable name after 'let'")),
+        };
+        self.next();
 
-        match ident {
-            Expression::Var(id) => {
-                let ttype: Type = self.parse_type_annotation()?;
-
-                self.consume(Token::Equal)?;
-                let e = self.parse_expr()?;
-                Ok(Statement::Let {
-                    var: Variable::new(id, ttype),
-                    value: e,
-                })
-            }
-            _ => Err(self.error(
-                self.prev_token.clone(),
-                "variable declaration must be an identifier".to_string(),
-            )),
+        let ttype: Type = self.parse_type_annotation()?;
+        if !tok_matches!(self, Token::Equal) {
+            return Err(self
+                .expected("'='")
+                .help(format!("variables must be initialized: `let {id} = <value>;`")));
         }
+        self.consume(Token::Equal)?;
+        let e = self.parse_expr()?;
+        Ok(Statement::Let {
+            var: Variable::new(id, ttype),
+            value: e,
+        })
     }
 
     fn parse_block(&mut self) -> ParseResult<Statement> {
@@ -540,12 +562,7 @@ where
                         tail = t;
                         break;
                     }
-                    _ => {
-                        return Err(self.error(
-                            self.prev_token.clone(),
-                            "Expected expression at tail position".to_string(),
-                        ))
-                    }
+                    _ => return Err(self.missing_semicolon()),
                 };
             }
         }
@@ -566,17 +583,17 @@ where
     }
 
     fn parse_if_stmt(&mut self) -> ParseResult<Statement> {
-        self.consume(Token::If)?;
+        let (start, _, _) = self.consume(Token::If)?;
         let e = self.parse_expr()?;
         let s1 = self.parse_block()?;
 
         if tok_matches!(self, Token::Else) {
             self.consume(Token::Else)?;
             let s2 = self.parse_block()?;
-            return Ok(Statement::Expr(Expression::If(
-                Box::new(e),
-                Box::new(s1),
-                Box::new(s2),
+            let span = Span::new(start, self.last_end());
+            return Ok(Statement::Expr(Expr::new(
+                Expression::If(Box::new(e), Box::new(s1), Box::new(s2)),
+                span,
             )));
         }
 
@@ -590,17 +607,20 @@ where
         Ok(Statement::While(e, Box::new(s1)))
     }
 
-    fn parse_if_expr(&mut self) -> ParseResult<Expression> {
-        self.consume(Token::If)?;
+    fn parse_if_expr(&mut self) -> ParseResult<Expr> {
+        let (start, _, _) = self.consume(Token::If)?;
         let e1 = self.parse_expr()?;
         let e2 = self.parse_block()?;
         self.consume(Token::Else)?;
         let e3 = self.parse_block()?;
 
-        Ok(Expression::If(Box::new(e1), Box::new(e2), Box::new(e3)))
+        Ok(Expr::new(
+            Expression::If(Box::new(e1), Box::new(e2), Box::new(e3)),
+            Span::new(start, self.last_end()),
+        ))
     }
 
-    fn parse_assignment(&mut self) -> ParseResult<Expression> {
+    fn parse_assignment(&mut self) -> ParseResult<Expr> {
         let expr = self.parse_equality()?;
 
         if tok_matches!(self, Token::Equal) {
@@ -608,10 +628,15 @@ where
             let equals = self.prev_token.clone();
             let value = self.parse_assignment()?;
 
-            match expr.clone() {
-                Expression::Var(v) => return Ok(Expression::Assign(v, Box::new(value))),
+            match expr.kind {
+                Expression::Var(v) => {
+                    let span = expr.span.to(value.span);
+                    return Ok(Expr::new(Expression::Assign(v, Box::new(value)), span));
+                }
                 _ => {
-                    return Err(self.error(equals.clone(), "invalid assignment target".to_string()))
+                    return Err(self
+                        .error(equals.clone(), "invalid assignment target".to_string())
+                        .help("only variables can be assigned to, e.g. `x = 1`"))
                 }
             };
         }
@@ -619,43 +644,43 @@ where
         Ok(expr)
     }
 
-    fn parse_equality(&mut self) -> ParseResult<Expression> {
+    fn parse_equality(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_logical_or()?;
 
         while self.matches(vec![Token::EqualEqual, Token::BangEqual]) {
             let op = self.next().unwrap();
             let right = self.parse_logical_or()?;
-            expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
+            expr = Self::binop(expr, op.1, right)
         }
 
         Ok(expr)
     }
 
-    fn parse_logical_or(&mut self) -> ParseResult<Expression> {
+    fn parse_logical_or(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_logical_and()?;
 
         while tok_matches!(self, Token::Or) {
             let op = self.next().unwrap();
             let right = self.parse_logical_and()?;
-            expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
+            expr = Self::binop(expr, op.1, right)
         }
 
         Ok(expr)
     }
 
-    fn parse_logical_and(&mut self) -> ParseResult<Expression> {
+    fn parse_logical_and(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_comparison()?;
 
         while tok_matches!(self, Token::And) {
             let op = self.next().unwrap();
             let right = self.parse_comparison()?;
-            expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
+            expr = Self::binop(expr, op.1, right)
         }
 
         Ok(expr)
     }
 
-    fn parse_comparison(&mut self) -> ParseResult<Expression> {
+    fn parse_comparison(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_term()?;
 
         while tok_matches!(
@@ -664,114 +689,124 @@ where
         ) {
             let op = self.next().unwrap();
             let right = self.parse_term()?;
-            expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
+            expr = Self::binop(expr, op.1, right)
         }
 
         Ok(expr)
     }
 
-    fn parse_term(&mut self) -> ParseResult<Expression> {
+    fn parse_term(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_factor()?;
 
         while tok_matches!(self, Token::Plus | Token::Minus) {
             let op = self.next().unwrap();
             let right = self.parse_factor()?;
-            expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
+            expr = Self::binop(expr, op.1, right)
         }
 
         Ok(expr)
     }
 
-    fn parse_factor(&mut self) -> ParseResult<Expression> {
+    fn parse_factor(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_unary()?;
 
         // TODO: include src spans
-        while tok_matches!(self, Token::Mult | Token::Div) {
+        while tok_matches!(self, Token::Mult | Token::Div | Token::Modulo) {
             let op = self.next().unwrap();
             let right = self.parse_unary()?;
-            expr = Expression::BinOp(Box::new(expr), op.1.try_into().unwrap(), Box::new(right))
+            expr = Self::binop(expr, op.1, right)
         }
 
         Ok(expr)
     }
 
-    fn parse_unary(&mut self) -> ParseResult<Expression> {
+    fn parse_unary(&mut self) -> ParseResult<Expr> {
         if tok_matches!(self, Token::Bang | Token::Minus) {
             let op = self.next().unwrap();
             let right = self.parse_unary()?;
-            return Ok(Expression::Unary(op.1.try_into().unwrap(), Box::new(right)));
+            let span = Span::new(op.0, right.span.end);
+            // Fold negated numeric literals so `-42` is a literal, not a unary op.
+            let kind = match (&op.1, right.kind) {
+                (Token::Minus, Expression::Int(i)) => Expression::Int(i.wrapping_neg()),
+                (Token::Minus, Expression::Float(f)) => Expression::Float(-f),
+                (_, kind) => Expression::Unary(
+                    op.1.try_into().unwrap(),
+                    Box::new(Expr::new(kind, right.span)),
+                ),
+            };
+            return Ok(Expr::new(kind, span));
         }
 
         self.parse_call()
     }
 
-    fn parse_call(&mut self) -> ParseResult<Expression> {
+    fn parse_call(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_primary()?;
         while tok_matches!(self, Token::LeftParen) {
             let es = self.parse_expr_seq(Token::LeftParen, Token::Comma, Token::RightParen)?;
 
             if es.len() > 255 {
-                return Err(self.error(None, "Number of arguments exceeds 255".to_string()));
+                let tok = self.prev_token.clone();
+                return Err(self.error(tok, "a call cannot have more than 255 arguments".to_string()));
             }
 
-            expr = Expression::Call(Box::new(expr), es);
+            let span = Span::new(expr.span.start, self.last_end());
+            expr = Expr::new(Expression::Call(Box::new(expr), es), span);
         }
 
         return Ok(expr);
     }
 
-    fn parse_primary(&mut self) -> ParseResult<Expression> {
-        let next = self.peek().cloned();
+    fn parse_primary(&mut self) -> ParseResult<Expr> {
+        let Some((start, tok, end)) = self.peek().cloned() else {
+            return Err(self.expected("an expression"));
+        };
+        let span = Span::new(start, end);
 
-        if let Some(next_tok) = next {
-            match &next_tok.1 {
-                Token::Int(i) => {
-                    self.next();
-                    Ok(Expression::Int(*i))
-                }
-                Token::Float(f) => {
-                    self.next();
-                    Ok(Expression::Float(*f))
-                }
-                Token::String(s) => {
-                    self.next();
-                    Ok(Expression::String(s.clone()))
-                }
-                Token::Ident(var) => {
-                    self.next();
-                    match var.as_str() {
-                        "true" => Ok(Expression::True),
-                        "false" => Ok(Expression::False),
-                        _ => Ok(Expression::Var(var.clone())),
-                    }
-                }
-                Token::LeftParen => {
-                    self.next();
-                    let expr = self.parse_expr()?;
-                    self.consume(Token::RightParen)?;
-                    Ok(Expression::Grouping(Box::new(expr)))
-                }
-                Token::Pipe => {
-                    let params = self.parse_fn_params(true)?;
-                    let rt = self.parse_fn_return_type_annotation()?;
-                    let body = Box::new(self.parse_stmt()?);
-                    Ok(Expression::Closure(params, rt, body))
-                }
-                _ => Err(self.error(Some(next_tok.clone()), "Unexpected token".to_string())),
+        let kind = match tok {
+            Token::Int(i) => {
+                self.next();
+                Expression::Int(i)
             }
-        } else {
-            Err(ParseError::Eof)
-        }
+            Token::Float(f) => {
+                self.next();
+                Expression::Float(f)
+            }
+            Token::String(s) => {
+                self.next();
+                Expression::String(s)
+            }
+            Token::Ident(var) => {
+                self.next();
+                match var.as_str() {
+                    "true" => Expression::True,
+                    "false" => Expression::False,
+                    _ => Expression::Var(var),
+                }
+            }
+            Token::LeftParen => {
+                self.next();
+                let expr = self.parse_expr()?;
+                self.consume(Token::RightParen)?;
+                Expression::Grouping(Box::new(expr))
+            }
+            Token::Pipe => {
+                let params = self.parse_fn_params(true)?;
+                let rt = self.parse_fn_return_type_annotation()?;
+                let body = Box::new(self.parse_stmt()?);
+                Expression::Closure(params, rt, body)
+            }
+            _ => return Err(self.expected("an expression")),
+        };
+
+        // Compound expressions extend to the last token they consumed.
+        Ok(Expr::new(kind, Span::new(span.start, self.last_end())))
     }
 
     fn parse_type_annotation(&mut self) -> ParseResult<Type> {
         if tok_matches!(self, Token::Colon) {
             self.consume(Token::Colon)?;
-            let type_expr = self.parse_primary()?;
-            match type_expr {
-                Expression::Var(v) => Ok(v.to_string().try_into().unwrap()),
-                _ => return Err(self.error(self.prev_token.clone(), "type must be ".to_string())),
-            }
+            self.parse_type_name()
         } else {
             Ok(Type::Any)
         }
@@ -780,18 +815,21 @@ where
     fn parse_fn_return_type_annotation(&mut self) -> ParseResult<Type> {
         if tok_matches!(self, Token::RightArrow) {
             self.consume(Token::RightArrow)?;
-            let type_expr = self.parse_primary()?;
-            match type_expr {
-                Expression::Var(v) => Ok(v.to_string().try_into().unwrap()),
-                _ => {
-                    return Err(self.error(
-                        self.prev_token.clone(),
-                        "variable declaration must be an identifier".to_string(),
-                    ))
-                }
-            }
+            self.parse_type_name()
         } else {
             Ok(Type::Any)
+        }
+    }
+
+    /// Parse a type name such as `int` or `str`.
+    fn parse_type_name(&mut self) -> ParseResult<Type> {
+        let tok = self.peek().cloned();
+        match self.parse_primary()?.kind {
+            Expression::Var(v) => Type::try_from(v.to_string()).map_err(|_| {
+                self.error(tok, format!("unknown type '{v}'"))
+                    .help("valid types are: int, float, bool, str, void, any")
+            }),
+            _ => Err(self.error(tok, "expected a type name".to_string())),
         }
     }
 
@@ -799,8 +837,10 @@ where
         if self.matches(vec![t.clone()]) {
             return Ok(self.next().unwrap());
         }
-        let tok = self.peek().unwrap().clone();
-        Err(self.error(Some(tok.clone()), format!("expected '{:?}'", t)))
+        if t == Token::Semicolon {
+            return Err(self.missing_semicolon());
+        }
+        Err(self.expected(&t.to_string()))
     }
 
     fn matches(&mut self, ts: Vec<Token>) -> bool {
@@ -817,22 +857,57 @@ where
         self.tokens.next()
     }
 
+    fn binop(left: Expr, op: Token, right: Expr) -> Expr {
+        let span = left.span.to(right.span);
+        Expr::new(
+            Expression::BinOp(Box::new(left), op.try_into().unwrap(), Box::new(right)),
+            span,
+        )
+    }
+
+    /// Where the most recently consumed token ends.
+    fn last_end(&self) -> Location {
+        self.prev_token
+            .as_ref()
+            .map_or(Location::new(0, 1, 1), |(_, _, end)| *end)
+    }
+
+    /// An error at `tok` (or, if absent, just after the last consumed token).
     fn error(&mut self, tok: Option<SrcSpan>, msg: String) -> ParseError {
-        match tok {
-            Some((start, Token::Eof, _)) => ParseError::InvalidToken {
-                line: start.line,
-                col: start.col,
-                message: msg,
-            },
-            Some((start, _, _)) => ParseError::InvalidToken {
-                line: start.line,
-                col: start.col,
-                message: msg,
-            },
+        let (start, end) = match tok.or_else(|| self.prev_token.clone()) {
+            Some((start, _, end)) => (start, end),
             None => {
-                println!("[unknown error]: {}", msg);
-                ParseError::Unknown
+                let loc = Location::new(0, 1, 1);
+                (loc, loc)
             }
+        };
+        ParseError {
+            start,
+            end,
+            message: msg,
+            help: None,
         }
+    }
+
+    /// "expected <what>, found <next token>", pointing at the next token.
+    fn expected(&mut self, what: &str) -> ParseError {
+        let tok = self.peek().cloned();
+        let found = match &tok {
+            Some((_, t, _)) => t.to_string(),
+            None => Token::Eof.to_string(),
+        };
+        self.error(tok, format!("expected {what}, found {found}"))
+    }
+
+    /// Error for a statement that isn't followed by ';', pointing just after it.
+    fn missing_semicolon(&mut self) -> ParseError {
+        let found = match self.peek() {
+            Some((_, t, _)) => t.to_string(),
+            None => Token::Eof.to_string(),
+        };
+        let mut err = self.error(None, format!("expected ';', found {found}"));
+        err.start = err.end;
+        err.end.col += 1;
+        err.help("add ';' at the end of the statement")
     }
 }

@@ -1,14 +1,15 @@
-use lexer::Lexer;
 use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
+    process::ExitCode,
 };
 
-use crate::interp::Interpreter;
+use crate::{diagnostic::Diagnostic, interp::Interpreter};
 use parse::Parser;
 mod ast;
 mod compile;
+mod diagnostic;
 mod interp;
 mod lexer;
 mod parse;
@@ -21,27 +22,60 @@ struct Cli {
     file: Option<PathBuf>,
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = <Cli as clap::Parser>::parse();
 
-    if let Some(file) = cli.file {
-        // File mode
-        let script = fs::read_to_string(file).unwrap();
-        let lexer = Lexer::new(script.chars());
-        let mut parser = Parser::new(lexer);
-        let ast = match parser.parse() {
-            Ok(ast) => ast,
-            Err(e) => panic!("failed to parse the source files: {:?}", e),
-        };
-
-        match Interpreter::new(ast).run() {
-            Ok(value) => println!("{:?}", value),
-            Err(err) => eprintln!("Runtime Error: {}", err),
-        }
-    } else {
+    let Some(file) = cli.file else {
         // REPL mode
         run_repl();
+        return ExitCode::SUCCESS;
+    };
+
+    // File mode
+    let path = file.display().to_string();
+    let script = match fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            report(
+                &Diagnostic::new(format!("could not read '{path}': {e}")),
+                "",
+                &path,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let tokens = match lexer::tokenize(&script) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            report(&e.to_diagnostic(), &script, &path);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let ast = match Parser::new(tokens.into_iter()).parse() {
+        Ok(ast) => ast,
+        Err(e) => {
+            report(&e.to_diagnostic(), &script, &path);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match Interpreter::new(ast).run() {
+        Ok(value) => ExitCode::SUCCESS,
+        Err(err) => {
+            report(&err.to_diagnostic(), &script, &path);
+            ExitCode::FAILURE
+        }
     }
+}
+
+/// Print a diagnostic to stderr, with a source snippet when it has a location.
+fn report(diagnostic: &Diagnostic, source: &str, path: &str) {
+    eprint!(
+        "{}",
+        diagnostic.render(source, path, diagnostic::use_color())
+    );
 }
 
 fn run_repl() {
@@ -54,9 +88,14 @@ fn run_repl() {
 
     // Initialize builtins
     if let Err(e) = interpreter.defines() {
-        eprintln!("Failed to initialize builtins: {}", e);
+        report(&e.to_diagnostic(), "", "<repl>");
         return;
     }
+
+    // Every input becomes the next line of one session, so errors in code from
+    // earlier inputs (e.g. a closure defined earlier) still point at the right line.
+    let mut history = String::new();
+    let mut line_no: u32 = 0;
 
     loop {
         print!("> ");
@@ -64,6 +103,11 @@ fn run_repl() {
 
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
+            // End of input (e.g. Ctrl-D)
+            Ok(0) => {
+                println!();
+                break;
+            }
             Ok(_) => {
                 let input = input.trim();
 
@@ -85,8 +129,18 @@ fn run_repl() {
                 }
 
                 // Parse and evaluate the input (try statement first, then expression)
-                let lexer = Lexer::new(input.chars());
-                let mut parser = Parser::new(lexer);
+                line_no += 1;
+                history.push_str(input);
+                history.push('\n');
+
+                let tokens = match lexer::tokenize_from_line(input, line_no) {
+                    Ok(tokens) => tokens,
+                    Err(e) => {
+                        report(&e.to_diagnostic(), &history, "<repl>");
+                        continue;
+                    }
+                };
+                let mut parser = Parser::new(tokens.clone().into_iter());
 
                 // Try parsing as a statement first
                 match parser.parse_stmt_only() {
@@ -97,24 +151,27 @@ fn run_repl() {
                                 println!("{:?}", value);
                             }
                         }
-                        Err(err) => eprintln!("Runtime Error: {}", err),
+                        Err(err) => report(&err.to_diagnostic(), &history, "<repl>"),
                     },
                     Err(_) => {
                         // If statement parsing fails, try parsing as an expression
-                        let lexer = Lexer::new(input.chars());
-                        let mut parser = Parser::new(lexer);
+                        let mut parser = Parser::new(tokens.into_iter());
                         match parser.parse_expr_only() {
                             Ok(expr) => match interpreter.interp_expr(expr) {
                                 Ok(value) => println!("{:?}", value),
-                                Err(err) => eprintln!("Runtime Error: {}", err),
+                                Err(err) => report(&err.to_diagnostic(), &history, "<repl>"),
                             },
-                            Err(e) => eprintln!("Parse Error: {}", e),
+                            Err(e) => report(&e.to_diagnostic(), &history, "<repl>"),
                         }
                     }
                 }
             }
             Err(error) => {
-                eprintln!("Error reading input: {}", error);
+                report(
+                    &Diagnostic::new(format!("could not read input: {error}")),
+                    "",
+                    "<repl>",
+                );
                 break;
             }
         }

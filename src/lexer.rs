@@ -1,36 +1,44 @@
 use crate::token::Token;
-use core::panic;
 use ecow::EcoString;
 use std::{fmt, iter::Peekable};
 
-use crate::ast::Location;
+use crate::{ast::Location, diagnostic::Diagnostic};
 
 #[derive(Debug)]
 pub struct LexicalError {
-    line: u32,
-    col: u32,
-    message: String,
+    pub start: Location,
+    pub end: Location,
+    pub message: String,
+    pub help: Option<String>,
 }
 
 impl std::error::Error for LexicalError {}
 
 impl LexicalError {
-    fn new(line: u32, col: u32, msg: String) -> Self {
+    fn new(start: Location, end: Location, msg: impl Into<String>) -> Self {
         LexicalError {
-            line,
-            col,
-            message: msg,
+            start,
+            end,
+            message: msg.into(),
+            help: None,
         }
+    }
+
+    fn help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    pub fn to_diagnostic(&self) -> Diagnostic {
+        Diagnostic::new(self.message.clone())
+            .with_span(self.start, self.end)
+            .with_help(self.help.clone())
     }
 }
 
 impl fmt::Display for LexicalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "SyntaxError: [line {}:{}] {}",
-            self.line, self.col, self.message
-        )
+        write!(f, "{}:{}: {}", self.start.line, self.start.col, self.message)
     }
 }
 
@@ -64,11 +72,11 @@ where
 
     /// Process one token.
     pub fn token(&mut self) -> LexResult {
-        let start = self.get_location();
+        let mut start = self.get_location();
         while let Some(c) = self.inner_next() {
             match c {
                 '0'..='9' => {
-                    return self.tok_number(c, start, false);
+                    return self.tok_number(c, start);
                 }
                 'a'..='z' | 'A'..='Z' | '_' => {
                     return self.tok_keyword_or_ident(c, start);
@@ -105,10 +113,7 @@ where
                 }
                 '+' => return Ok((start, Token::Plus, self.get_location())),
                 '-' => {
-                    if self.match_number() {
-                        let c = self.inner_next().unwrap();
-                        return self.tok_number(c, start, true);
-                    } else if self.match_advance('>') {
+                    if self.match_advance('>') {
                         return Ok((start, Token::RightArrow, self.get_location()));
                     } else {
                         return Ok((start, Token::Minus, self.get_location()));
@@ -129,12 +134,14 @@ where
                 '%' => return Ok((start, Token::Modulo, self.get_location())),
                 _ => {
                     return Err(LexicalError::new(
-                        self.get_location().line,
-                        self.get_location().col - 1,
-                        format!("Unrecognized char: '{}'", c),
+                        start,
+                        self.get_location(),
+                        format!("unexpected character '{}'", c),
                     ))
                 }
             }
+            // Only whitespace and comments reach here: the next token starts after them.
+            start = self.get_location();
         }
 
         self.eof = true;
@@ -174,14 +181,6 @@ where
         }
     }
 
-    /// Check if the next char is a number
-    fn match_number(&mut self) -> bool {
-        match self.inner_peek() {
-            None => false,
-            Some(&c) => c.is_ascii_digit(),
-        }
-    }
-
     fn get_location(&self) -> Location {
         Location {
             line: self.line,
@@ -192,10 +191,12 @@ where
 
     /// Tokenize double slash (//) comments
     fn tok_comment(&mut self) {
-        while let Some(c) = self.inner_next() {
+        while let Some(&c) = self.inner_peek() {
             if c == '\n' {
+                // Leave the newline for `token` so line counting stays in one place.
                 return;
             }
+            self.inner_next();
         }
     }
 
@@ -238,14 +239,13 @@ where
                 if self.match_advance('&') {
                     Ok((start, Token::And, self.get_location()))
                 } else {
-                    Err(LexicalError::new(
-                        self.line,
-                        self.col,
-                        "Invalid operator: '&'. Expected '&&'".to_string(),
-                    ))
+                    Err(
+                        LexicalError::new(start, self.get_location(), "unexpected character '&'")
+                            .help("use '&&' for logical and"),
+                    )
                 }
             }
-            _ => Err(LexicalError::new(self.line, self.col, "Invalid operator".to_string()).into()),
+            _ => Err(LexicalError::new(start, self.get_location(), "invalid operator")),
         }
     }
 
@@ -281,7 +281,7 @@ where
                                 literal.push('\\')
                             }
                             _ => {
-                                self.warn("Invalid escape sequence".to_string());
+                                self.warn(format!("unknown escape sequence '\\{}'", c));
                                 self.inner_next();
                                 literal.push('\\');
                                 literal.push(c)
@@ -301,14 +301,13 @@ where
             };
         }
 
-        Err(LexicalError::new(
-            self.line,
-            self.col,
-            "Unterminated string".to_string(),
-        ))
+        let mut quote_end = start;
+        quote_end.col += 1;
+        Err(LexicalError::new(start, quote_end, "unterminated string literal")
+            .help("add a closing '\"' to end the string"))
     }
 
-    fn tok_number(&mut self, c: char, start: Location, negative: bool) -> LexResult {
+    fn tok_number(&mut self, c: char, start: Location) -> LexResult {
         let mut is_float = false;
         let mut num_str = String::new();
         num_str.push(c);
@@ -331,25 +330,25 @@ where
             }
         }
 
-        let sign: i8 = if negative { -1 } else { 1 };
         if is_float {
-            let num = num_str
-                .parse::<f32>()
-                .expect("Number should have been a 32-bit float");
-            Ok((
-                start,
-                Token::Float(f32::from(sign) * num),
-                self.get_location(),
-            ))
+            match num_str.parse::<f32>() {
+                Ok(num) => Ok((start, Token::Float(num), self.get_location())),
+                Err(_) => Err(LexicalError::new(
+                    start,
+                    self.get_location(),
+                    format!("invalid float literal '{}'", num_str),
+                )),
+            }
         } else {
-            let num = num_str
-                .parse::<i32>()
-                .expect("Number should have been a 32-bit integer");
-            Ok((
-                start,
-                Token::Int(i32::from(sign) * num),
-                self.get_location(),
-            ))
+            match num_str.parse::<i32>() {
+                Ok(num) => Ok((start, Token::Int(num), self.get_location())),
+                Err(_) => Err(LexicalError::new(
+                    start,
+                    self.get_location(),
+                    format!("integer literal '{}' is too large", num_str),
+                )
+                .help(format!("int values must be between {} and {}", i32::MIN, i32::MAX))),
+            }
         }
     }
 
@@ -358,7 +357,7 @@ where
         raw.push(c);
         while let Some(&c) = self.inner_peek() {
             match c {
-                'a'..='z' | 'A'..='Z' | '_' | '-' | '0'..='9' => {
+                'a'..='z' | 'A'..='Z' | '_' | '0'..='9' => {
                     self.inner_next();
                     raw.push(c);
                 }
@@ -385,9 +384,31 @@ where
     }
 
     fn warn(&self, msg: String) {
-        println!("Syntax warning [line {}:{}]: {}", self.line, self.col, msg)
+        eprintln!("warning: {} (line {}, column {})", msg, self.line, self.col)
     }
 }
+/// Tokenize a whole source string, stopping at the first lexical error.
+/// The returned tokens always end with `Token::Eof`.
+pub fn tokenize(src: &str) -> Result<Vec<SrcSpan>, LexicalError> {
+    tokenize_from_line(src, 1)
+}
+
+/// Like [`tokenize`], but numbering lines from `first_line` (used by the REPL,
+/// where each input is a new line of one growing session).
+pub fn tokenize_from_line(src: &str, first_line: u32) -> Result<Vec<SrcSpan>, LexicalError> {
+    let mut lexer = Lexer::new(src.chars());
+    lexer.line = first_line;
+    let mut tokens = Vec::new();
+    loop {
+        let span = lexer.token()?;
+        let eof = span.1 == Token::Eof;
+        tokens.push(span);
+        if eof {
+            return Ok(tokens);
+        }
+    }
+}
+
 impl<T> Iterator for Lexer<T>
 where
     T: Iterator<Item = char>,

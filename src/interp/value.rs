@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::ast::{types::Type, Id, Statement, Variable};
+use crate::ast::{types::Type, Statement, Variable};
 
 use super::{env::RuntimeEnv, Builtin};
 
@@ -19,6 +19,14 @@ pub enum Value {
 }
 
 impl Value {
+    /// The type's name as shown in error messages, e.g. `int` or `fn`.
+    pub fn type_name(&self) -> String {
+        match self {
+            Value::Fn(_) | Value::NativeFn(_) => "fn".to_string(),
+            other => other.to_type().to_string(),
+        }
+    }
+
     pub fn to_type(&self) -> Type {
         match self {
             Value::Int(_) => Type::Int,

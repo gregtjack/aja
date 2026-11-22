@@ -20,8 +20,36 @@ impl Location {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct Span(Location, Location);
+/// A region of source code; `end` is exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: Location,
+    pub end: Location,
+}
+
+impl Span {
+    pub fn new(start: Location, end: Location) -> Self {
+        Span { start, end }
+    }
+
+    /// The span from the start of `self` to the end of `other`.
+    pub fn to(self, other: Span) -> Span {
+        Span::new(self.start, other.end)
+    }
+}
+
+/// An expression together with where it appears in the source.
+#[derive(Debug, Clone)]
+pub struct Expr {
+    pub kind: Expression,
+    pub span: Span,
+}
+
+impl Expr {
+    pub fn new(kind: Expression, span: Span) -> Self {
+        Expr { kind, span }
+    }
+}
 
 pub type Id = EcoString;
 
@@ -75,12 +103,12 @@ pub enum Definition {
 
 #[derive(Debug, Clone)]
 pub enum Statement {
-    Block(Vec<Statement>, Option<Expression>),
-    Expr(Expression),
-    Let { var: Variable, value: Expression },
-    If(Expression, Box<Statement>),
-    While(Expression, Box<Statement>),
-    Return(Option<Expression>),
+    Block(Vec<Statement>, Option<Expr>),
+    Expr(Expr),
+    Let { var: Variable, value: Expr },
+    If(Expr, Box<Statement>),
+    While(Expr, Box<Statement>),
+    Return(Option<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -90,13 +118,13 @@ pub enum Expression {
     String(EcoString),
     True,
     False,
-    Unary(Op1, Box<Expression>),
-    BinOp(Box<Expression>, Op2, Box<Expression>),
-    Grouping(Box<Expression>),
-    If(Box<Expression>, Box<Statement>, Box<Statement>),
+    Unary(Op1, Box<Expr>),
+    BinOp(Box<Expr>, Op2, Box<Expr>),
+    Grouping(Box<Expr>),
+    If(Box<Expr>, Box<Statement>, Box<Statement>),
     Var(Id),
-    Call(Box<Expression>, Vec<Expression>),
-    Assign(Id, Box<Expression>),
+    Call(Box<Expr>, Vec<Expr>),
+    Assign(Id, Box<Expr>),
     Closure(Vec<Variable>, Type, Box<Statement>),
 }
 
@@ -143,6 +171,7 @@ impl TryFrom<Token> for Op2 {
             Token::Plus => Ok(Self::Addition),
             Token::Mult => Ok(Self::Multiplication),
             Token::Div => Ok(Self::Division),
+            Token::Modulo => Ok(Self::Modulo),
             Token::EqualEqual => Ok(Self::Equal),
             Token::BangEqual => Ok(Self::NotEqual),
             Token::GreaterThan => Ok(Self::GreaterThan),
@@ -153,5 +182,26 @@ impl TryFrom<Token> for Op2 {
             Token::Or => Ok(Self::Or),
             _ => bail!("Token {:?} is not a valid op2", value),
         }
+    }
+}
+
+impl Display for Op2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sym = match self {
+            Op2::Addition => "+",
+            Op2::Subtraction => "-",
+            Op2::Multiplication => "*",
+            Op2::Division => "/",
+            Op2::Modulo => "%",
+            Op2::LessThan => "<",
+            Op2::LessEqual => "<=",
+            Op2::GreaterThan => ">",
+            Op2::GreaterEqual => ">=",
+            Op2::Equal => "==",
+            Op2::NotEqual => "!=",
+            Op2::And => "&&",
+            Op2::Or => "||",
+        };
+        write!(f, "{sym}")
     }
 }

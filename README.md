@@ -89,7 +89,8 @@ let s: str = 5;      // TypeError: cannot cast int to str
 ### Syntax
 
 - **Variables:** `let name: type = expr;` declares; `name = expr` assigns.
-  Blocks introduce a new lexical scope.
+  Blocks introduce a new lexical scope, and a later `let` with the same name
+  shadows the earlier one.
 - **Functions:** `fn name(a: int, b) -> int { ... }`. Parameter and return
   annotations are optional.
 - **Closures:** `|a, b| expr` or `|a: int| -> int { ... }`. Closures capture
@@ -100,8 +101,10 @@ let s: str = 5;      // TypeError: cannot cast int to str
   `else` is a statement.
 - **`while`:** `while cond { ... }`.
 - **Operators** (lowest to highest precedence):
-  `=` → `==` `!=` → `||` → `&&` → `<` `<=` `>` `>=` → `+` `-` → `*` `/`
+  `=` → `==` `!=` → `||` → `&&` → `<` `<=` `>` `>=` → `+` `-` → `*` `/` `%`
   → unary `!` `-` → calls `f(x)(y)`.
+  `&&` and `||` short-circuit. Integer division or modulo by zero is a
+  runtime error.
   Arithmetic and comparison require both operands to be the same numeric
   type (no implicit int/float conversion).
 - **Comments:** `// to end of line`.
@@ -131,6 +134,7 @@ source ──► Lexer ──► Parser ──► AST ──► Interpreter
 | `src/parse.rs`        | Recursive-descent parser (plus unit tests) |
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
 | `src/interp/`         | Tree-walking interpreter, environments, values, builtins |
+| `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color) |
 | `src/compile/`        | Code-generation scaffolding targeting QBE (not yet wired up) |
 
 The interpreter uses a chain of reference-counted environments for lexical
@@ -146,18 +150,47 @@ optional runtime type checks; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser and interpreter unit tests.
 
 **Reserved or partially present, not yet usable:**
-- `%` is lexed but not parsed or evaluated.
 - `match`, `::`, `=>`, `<-`, `[` `]` are lexed but have no grammar.
 - `struct` definitions and a `List<T>` type exist in the AST only.
 - The QBE compiler backend is a stub.
 
-**Known issues:**
-- Identifiers may contain `-`, so `a-b` is read as a single name; write
-  `a - b`. Similarly, `x -1` lexes `-1` as a negative literal.
-- `&&` and `||` evaluate both operands (no short-circuiting).
-- Redeclaring a variable in the same scope (`let a = 1; let a = 2;`) errors
-  with a misleading "Undefined variable" message.
-- Unary `-` does not work on floats.
-- Some errors panic instead of being reported cleanly: parse errors, wrong
-  argument counts, and errors raised while evaluating call arguments.
-- `test_assert.aja` currently fails on `assert(b && true)` where `b` is false.
+**Errors:** errors are reported in a rustc-like format and exit with a
+non-zero status. Syntax and parse errors point at the offending source:
+
+```
+error: expected ';', found 'x'
+ --> main.aja:2:12
+  |
+2 |   let x = 1
+  |            ^
+  = help: add ';' at the end of the statement
+```
+
+Runtime errors point at the expression that failed, name the types,
+variables, and functions involved, suggest close matches for misspelled
+names, and list the calls that led there (repeated recursive calls are
+collapsed):
+
+```
+error: cannot apply '+' to int and str
+ --> main.aja:1:11
+  |
+1 | fn c(x) { x + "!" }
+  |           ^^^^^^^
+  = note: in function 'c', called at line 2, column 11
+  = note: in function 'b', called at line 3, column 10
+```
+
+Every AST expression carries a `Span` (`ast::Expr { kind, span }`), which is
+how runtime errors know their location. In the REPL, each input counts as a
+new line of the session, so errors in code from an earlier input still point
+at that input.
+
+Output is colored when stderr is a terminal; set `NO_COLOR` to disable.
+`src/diagnostic.rs` holds the shared renderer.
+
+**Known limitations:**
+- Zero-argument closures (`|| expr`) don't parse, because `||` is read as
+  logical or.
+- The REPL handles one line at a time and can't define top-level functions.
+- `main`'s return value is printed in debug form (e.g. `Int(0)`).

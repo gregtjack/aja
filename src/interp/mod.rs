@@ -5,11 +5,11 @@ use std::{
 };
 
 use crate::{
-    ast::{types::Type, Definition, Expression, Op1, Op2, Program, Statement, Variable},
+    ast::{types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Span, Statement, Variable},
+    diagnostic::{closest_match, Diagnostic},
     interp::builtin::Builtin,
 };
 use color_eyre::Result;
-use ecow::EcoString;
 use env::RuntimeEnv;
 use value::{Function, Value};
 
@@ -18,22 +18,127 @@ mod env;
 pub mod value;
 
 #[derive(Debug, Clone)]
-pub enum RuntimeError {
+pub enum ErrorKind {
     Adhoc(String),
-    UndefinedVariable { var: EcoString },
+    UndefinedVariable { var: Id, suggestion: Option<Id> },
     TypeError { msg: String },
-    Return(Value),
+    /// Not a real error: unwinds a `return` to the enclosing call, carrying
+    /// the returned value and the span of the returned expression.
+    Return(Value, Option<Span>),
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeError {
+    pub kind: ErrorKind,
+    /// Where the error happened, when known.
+    pub span: Option<Span>,
+    /// Function calls the error unwound through, innermost first:
+    /// (description of the function, where it was called).
+    pub trace: Vec<(String, Span)>,
+}
+
+impl RuntimeError {
+    fn new(kind: ErrorKind) -> Self {
+        RuntimeError {
+            kind,
+            span: None,
+            trace: Vec::new(),
+        }
+    }
+
+    pub fn adhoc(msg: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Adhoc(msg.into()))
+    }
+
+    pub fn type_error(msg: impl Into<String>) -> Self {
+        Self::new(ErrorKind::TypeError { msg: msg.into() })
+    }
+
+    pub fn undefined(var: Id) -> Self {
+        Self::new(ErrorKind::UndefinedVariable {
+            var,
+            suggestion: None,
+        })
+    }
+
+    fn ret(value: Value, span: Option<Span>) -> Self {
+        Self::new(ErrorKind::Return(value, span))
+    }
+
+    /// Attach `span`, unless the error already has a more precise location.
+    pub fn at(mut self, span: Span) -> Self {
+        if self.span.is_none() && !matches!(self.kind, ErrorKind::Return(..)) {
+            self.span = Some(span);
+        }
+        self
+    }
+
+    /// Record that this error unwound out of a call to `function` at `call_site`.
+    fn called_from(mut self, function: String, call_site: Span) -> Self {
+        if self.span.is_some() && !matches!(self.kind, ErrorKind::Return(..)) {
+            self.trace.push((function, call_site));
+        }
+        self
+    }
+
+    pub fn to_diagnostic(&self) -> Diagnostic {
+        let help = match &self.kind {
+            ErrorKind::UndefinedVariable {
+                suggestion: Some(s),
+                ..
+            } => Some(format!("a variable with a similar name exists: '{s}'")),
+            ErrorKind::UndefinedVariable { var, .. } => {
+                Some(format!("declare it first with `let {var} = ...;`"))
+            }
+            _ => None,
+        };
+        // Collapse runs of identical frames (e.g. deep recursion) into one note.
+        let mut frames: Vec<(&str, Span, usize)> = Vec::new();
+        for (function, site) in &self.trace {
+            match frames.last_mut() {
+                Some((f, s, count)) if *f == function.as_str() && *s == *site => *count += 1,
+                _ => frames.push((function, *site, 1)),
+            }
+        }
+        const MAX_FRAMES: usize = 8;
+        let mut notes: Vec<String> = frames
+            .iter()
+            .take(MAX_FRAMES)
+            .map(|(function, site, count)| {
+                let repeat = if *count > 1 {
+                    format!(" ({count} times)")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "in {function}, called at line {}, column {}{repeat}",
+                    site.start.line, site.start.col
+                )
+            })
+            .collect();
+        if frames.len() > MAX_FRAMES {
+            notes.push(format!("... and {} more calls", frames.len() - MAX_FRAMES));
+        }
+
+        let d = Diagnostic::new(self.to_string())
+            .with_help(help)
+            .with_notes(notes);
+        match self.span {
+            Some(span) => d.with_span(span.start, span.end),
+            None => d,
+        }
+    }
 }
 
 impl Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RuntimeError::UndefinedVariable { var } => write!(f, "Undefined variable: {var}"),
-            RuntimeError::TypeError { msg } => write!(f, "TypeError: {msg}"),
-            RuntimeError::Return(_) => write!(f, "return statement"),
-            RuntimeError::Adhoc(msg) => {
-                write!(f, "{msg}")
+        match &self.kind {
+            ErrorKind::UndefinedVariable { var, .. } => {
+                write!(f, "cannot find variable '{var}' in this scope")
             }
+            ErrorKind::TypeError { msg } => write!(f, "{msg}"),
+            ErrorKind::Return(..) => write!(f, "'return' used outside of a function"),
+            ErrorKind::Adhoc(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -49,42 +154,42 @@ pub struct Interpreter {
 
 impl Interpreter {
     pub fn new(prog: Program) -> Self {
-        let mut i = Interpreter {
+        Interpreter {
             program: prog,
             env: Arc::new(Mutex::new(RuntimeEnv::new())),
-        };
-        i.defines()
-            .unwrap_or_else(|e| panic!("Failed to initialize builtins: {}", e));
-        i
+        }
     }
 
+    /// Define builtins and top-level functions, then run `main`.
     pub fn run(mut self) -> Answer {
-        let bs = self.env.lock().unwrap().values.clone();
-        for binding in &bs {
-            if binding.0 != "main" {
-                continue;
-            }
+        self.defines()?;
+        let main = self.env.lock().unwrap().values.get("main").cloned();
+        let Some(Value::Fn(Function { body, ret_type, .. })) = main else {
+            return Err(RuntimeError::adhoc(
+                "no 'main' function found; add `fn main() { ... }` as the entry point",
+            ));
+        };
 
-            match &binding.1 {
-                Value::Fn(c) => match c {
-                    Function { body, ret_type, .. } => {
-                        let res = match self.interp_stmt(body.clone()) {
-                            Ok(v) => Ok(v),
-                            Err(err) => match err {
-                                RuntimeError::Return(v) => Ok(v),
-                                _ => Err(err),
-                            },
-                        }?;
-                        Self::type_check(&res, ret_type.clone())?;
-                        return Ok(res);
-                    }
-                    _ => unreachable!(),
-                },
-                _ => unreachable!(),
-            }
+        let (res, ret_span) = self.run_body(body)?;
+        Self::check_return(&res, &ret_type, Some(&"main".into()), ret_span)?;
+        Ok(res)
+    }
+
+    /// Run a function body, catching `return`. Also yields the span of the
+    /// expression that produced the value (the tail or `return` expression).
+    fn run_body(&mut self, body: Statement) -> Result<(Value, Option<Span>), RuntimeError> {
+        let tail_span = match &body {
+            Statement::Block(_, Some(tail)) => Some(tail.span),
+            _ => None,
+        };
+        match self.interp_stmt(body) {
+            Ok(v) => Ok((v, tail_span)),
+            Err(RuntimeError {
+                kind: ErrorKind::Return(v, span),
+                ..
+            }) => Ok((v, span)),
+            Err(err) => Err(err),
         }
-
-        return Err(RuntimeError::Adhoc("No entrypoint found".to_string()));
     }
 
     pub fn defines(&mut self) -> Result<(), RuntimeError> {
@@ -100,6 +205,20 @@ impl Interpreter {
                     body,
                     rtype,
                 } => {
+                    let existing = self.env.lock().unwrap().values.get(name).cloned();
+                    match existing {
+                        Some(Value::NativeFn(_)) => {
+                            return Err(RuntimeError::adhoc(format!(
+                                "function '{name}' conflicts with the built-in function of the same name"
+                            )))
+                        }
+                        Some(_) => {
+                            return Err(RuntimeError::adhoc(format!(
+                                "function '{name}' is defined more than once"
+                            )))
+                        }
+                        None => {}
+                    }
                     self.env.lock().unwrap().define(
                         name.clone(),
                         Value::Fn(Function {
@@ -110,7 +229,11 @@ impl Interpreter {
                         }),
                     )?;
                 }
-                _ => unimplemented!(),
+                Definition::Struct { name, .. } => {
+                    return Err(RuntimeError::adhoc(format!(
+                        "struct '{name}': structs are not supported yet"
+                    )));
+                }
             }
         }
 
@@ -129,16 +252,19 @@ impl Interpreter {
         match stmt {
             Statement::Block(stmts, tail) => {
                 let prev = self.env.clone();
-                let mut tail_val: Value = Value::Void;
                 self.env = Arc::new(Mutex::new(RuntimeEnv::from_enclosing(prev.clone())));
-                for stmt in stmts {
-                    self.interp_stmt(stmt.clone())?;
-                }
-                if let Some(tail) = tail {
-                    tail_val = self.interp_expr(tail)?;
-                }
+                let result = (|| {
+                    for stmt in stmts {
+                        self.interp_stmt(stmt)?;
+                    }
+                    match tail {
+                        Some(tail) => self.interp_expr(tail),
+                        None => Ok(Value::Void),
+                    }
+                })();
+                // Leave the block's scope even when it exits early with an error or `return`.
                 self.env = prev;
-                Ok(tail_val)
+                result
             }
             Statement::Expr(e) => self.interp_expr(e),
             Statement::Let { var, value } => self.interp_let(var, value),
@@ -148,8 +274,9 @@ impl Interpreter {
         }
     }
 
-    pub fn interp_expr(&mut self, expr: Expression) -> Answer {
-        let ans = match expr {
+    pub fn interp_expr(&mut self, expr: Expr) -> Answer {
+        let span = expr.span;
+        let result = match expr.kind {
             Expression::Int(i) => Ok(Value::Int(i)),
             Expression::Float(f) => Ok(Value::Float(f)),
             Expression::True => Ok(Value::Bool(true)),
@@ -159,11 +286,15 @@ impl Interpreter {
             Expression::BinOp(e1, op, e2) => self.interp_binop(*e1, op, *e2),
             Expression::Grouping(e) => self.interp_expr(*e),
             Expression::If(e1, s1, s2) => self.interp_if(*e1, *s1, Some(*s2)),
-            Expression::Var(id) => self.env.lock().unwrap().get(id),
-            Expression::Call(callee, args) => self.interp_call(*callee, args),
+            Expression::Var(id) => {
+                let res = self.env.lock().unwrap().get(id);
+                res.map_err(|e| self.with_suggestion(e))
+            }
+            Expression::Call(callee, args) => self.interp_call(*callee, args, span),
             Expression::Assign(lhs, rhs) => {
                 let value = self.interp_expr(*rhs)?;
-                self.env.lock().unwrap().assign(lhs, value)
+                let res = self.env.lock().unwrap().assign(lhs, value);
+                res.map_err(|e| self.with_suggestion(e))
             }
             Expression::Closure(ps, ret_type, stmt) => Ok(Value::Fn(Function {
                 params: ps,
@@ -172,254 +303,333 @@ impl Interpreter {
                 env: self.env.clone(),
             })),
         };
-        ans
+        // The innermost expression that fails supplies the error's location.
+        result.map_err(|e| e.at(span))
     }
 
-    fn interp_call(&mut self, callee: Expression, args: Vec<Expression>) -> Answer {
-        let callee = self.interp_expr(callee)?;
-
-        let args: Vec<Value> = args
-            .iter()
-            .map(|e| self.interp_expr(e.clone()).unwrap())
-            .collect();
-
-        match callee {
-            Value::Fn(c) => match c {
-                Function {
-                    params,
-                    body,
-                    ret_type,
-                    env,
-                } => {
-                    assert_eq!(args.len(), params.len(), "Number of arguments passed to function does not equal the number of parameters.");
-
-                    // Each call gets a fresh scope whose parent is the
-                    // function's captured environment, so parameters never
-                    // clobber other calls' bindings (e.g. during recursion).
-                    let mut call_env = RuntimeEnv::from_enclosing(env);
-                    for (var, value) in params.iter().zip(args.into_iter()) {
-                        Self::type_check(&value, var.t.clone())?;
-                        call_env.define(var.name.clone(), value)?;
-                    }
-
-                    let prev_env = std::mem::replace(
-                        &mut self.env,
-                        Arc::new(Mutex::new(call_env)),
-                    );
-                    let result = self.interp_stmt(body);
-                    // Restore the caller's environment even if the body failed.
-                    self.env = prev_env;
-
-                    let ret = match result {
-                        Ok(v) => v,
-                        Err(RuntimeError::Return(v)) => v,
-                        Err(err) => return Err(err),
-                    };
-                    Self::type_check(&ret, ret_type)?;
-                    Ok(ret)
+    /// Attach a "did you mean" suggestion to an undefined-variable error.
+    fn with_suggestion(&self, err: RuntimeError) -> RuntimeError {
+        match err.kind {
+            ErrorKind::UndefinedVariable { var, .. } => {
+                let names = self.env.lock().unwrap().names();
+                let suggestion = closest_match(&var, names.iter().map(|n| n.as_str())).map(Id::from);
+                RuntimeError {
+                    kind: ErrorKind::UndefinedVariable { var, suggestion },
+                    ..err
                 }
-            },
-            Value::NativeFn(builtin) => builtin.execute(args),
-            _ => {
-                return Err(RuntimeError::TypeError {
-                    msg: "Can't call non-callable".to_string(),
-                })
             }
+            _ => err,
         }
     }
 
-    fn interp_let(&mut self, var: Variable, e: Expression) -> Answer {
+    fn interp_call(&mut self, callee: Expr, args: Vec<Expr>, call_site: Span) -> Answer {
+        let name: Option<Id> = match &callee.kind {
+            Expression::Var(id) => Some(id.clone()),
+            _ => None,
+        };
+        let describe = |name: &Option<Id>| match name {
+            Some(n) => format!("function '{n}'"),
+            None => "an anonymous function".to_string(),
+        };
+
+        let callee = self.interp_expr(callee)?;
+
+        let arg_spans: Vec<Span> = args.iter().map(|a| a.span).collect();
+        let args = args
+            .into_iter()
+            .map(|e| self.interp_expr(e))
+            .collect::<Result<Vec<Value>, RuntimeError>>()?;
+
+        match callee {
+            Value::Fn(Function {
+                params,
+                body,
+                ret_type,
+                env,
+            }) => {
+                if args.len() != params.len() {
+                    return Err(RuntimeError::adhoc(format!(
+                        "{} takes {} but {} {} given",
+                        describe(&name),
+                        plural(params.len(), "argument"),
+                        args.len(),
+                        if args.len() == 1 { "was" } else { "were" },
+                    )));
+                }
+
+                // Each call gets a fresh scope whose parent is the
+                // function's captured environment, so parameters never
+                // clobber other calls' bindings (e.g. during recursion).
+                let mut call_env = RuntimeEnv::from_enclosing(env);
+                for ((var, value), arg_span) in params.iter().zip(args).zip(arg_spans) {
+                    if !Self::matches_type(&value, &var.t) {
+                        return Err(RuntimeError::type_error(format!(
+                            "mismatched types: parameter '{}' of {} expects {}, found {}",
+                            var.name,
+                            describe(&name),
+                            var.t,
+                            value.type_name()
+                        ))
+                        .at(arg_span));
+                    }
+                    call_env.define(var.name.clone(), value)?;
+                }
+
+                let prev_env = std::mem::replace(&mut self.env, Arc::new(Mutex::new(call_env)));
+                let result = self.run_body(body);
+                // Restore the caller's environment even if the body failed.
+                self.env = prev_env;
+
+                // Errors located inside the callee get a note saying where it was called.
+                let frame = |e: RuntimeError| e.called_from(describe(&name), call_site);
+                let (ret, ret_span) = result.map_err(frame)?;
+                Self::check_return(&ret, &ret_type, name.as_ref(), ret_span).map_err(frame)?;
+                Ok(ret)
+            }
+            Value::NativeFn(builtin) => builtin.execute(args),
+            other => Err(RuntimeError::type_error(format!(
+                "cannot call a value of type {}{}",
+                other.type_name(),
+                match &name {
+                    Some(n) => format!(" ('{n}' is not a function)"),
+                    None => String::new(),
+                }
+            ))),
+        }
+    }
+
+    fn interp_let(&mut self, var: Variable, e: Expr) -> Answer {
+        let span = e.span;
         let r = self.interp_expr(e)?;
-        Self::type_check(&r, var.t)?;
+        if !Self::matches_type(&r, &var.t) {
+            return Err(RuntimeError::type_error(format!(
+                "mismatched types: '{}' is declared as {} but was given {}",
+                var.name,
+                var.t,
+                r.type_name()
+            ))
+            .at(span));
+        }
         self.env.lock().unwrap().define(var.name, r)?;
         Ok(Value::Void)
     }
 
-    fn interp_return(&mut self, e: Option<Expression>) -> Answer {
+    fn interp_return(&mut self, e: Option<Expr>) -> Answer {
         if let Some(expr) = e {
+            let span = expr.span;
             let value = self.interp_expr(expr)?;
-            Err(RuntimeError::Return(value))
+            Err(RuntimeError::ret(value, Some(span)))
         } else {
-            Err(RuntimeError::Return(Value::Void))
+            Err(RuntimeError::ret(Value::Void, None))
         }
     }
 
-    fn interp_if(&mut self, e1: Expression, s1: Statement, s2: Option<Statement>) -> Answer {
-        let cond = self.interp_expr(e1)?;
-        match cond {
+    fn interp_if(&mut self, e1: Expr, s1: Statement, s2: Option<Statement>) -> Answer {
+        let cond_span = e1.span;
+        match self.interp_expr(e1)? {
             Value::Bool(true) => self.interp_stmt(s1),
-            Value::Bool(false) => {
-                if let Some(s) = s2 {
-                    self.interp_stmt(s)
-                } else {
-                    Ok(Value::Void)
+            Value::Bool(false) => match s2 {
+                Some(s) => self.interp_stmt(s),
+                None => Ok(Value::Void),
+            },
+            other => Err(RuntimeError::type_error(format!(
+                "'if' condition must be a bool, found {}",
+                other.type_name()
+            ))
+            .at(cond_span)),
+        }
+    }
+
+    fn interp_while(&mut self, e: Expr, s: Statement) -> Answer {
+        let cond_span = e.span;
+        loop {
+            match self.interp_expr(e.clone())? {
+                Value::Bool(true) => self.interp_stmt(s.clone())?,
+                Value::Bool(false) => return Ok(Value::Void),
+                other => {
+                    return Err(RuntimeError::type_error(format!(
+                        "'while' condition must be a bool, found {}",
+                        other.type_name()
+                    ))
+                    .at(cond_span))
                 }
-            }
-            _ => {
-                return Err(RuntimeError::TypeError {
-                    msg: "Expected a boolean expression in if condition".to_string(),
-                })
-            }
+            };
         }
     }
 
-    fn interp_while(&mut self, e: Expression, s: Statement) -> Answer {
-        while match self.interp_expr(e.clone())? {
-            Value::Bool(true) => true,
-            Value::Bool(false) => false,
-            _ => {
-                return Err(RuntimeError::TypeError {
-                    msg: "Expected a boolean expression in while condition".to_string(),
-                })
-            }
-        } {
-            self.interp_stmt(s.clone())?;
+    /// Evaluate `&&` / `||`, only evaluating the right operand when needed.
+    fn interp_logical(&mut self, e1: Expr, op: Op2, e2: Expr) -> Answer {
+        let type_err = |side: &str, v: &Value, span: Span| {
+            RuntimeError::type_error(format!(
+                "'{op}' expects bool operands, but the {side} operand is {}",
+                v.type_name()
+            ))
+            .at(span)
+        };
+
+        let (left_span, right_span) = (e1.span, e2.span);
+        let left = match self.interp_expr(e1)? {
+            Value::Bool(b) => b,
+            other => return Err(type_err("left", &other, left_span)),
+        };
+        match (&op, left) {
+            (Op2::And, false) => return Ok(Value::Bool(false)),
+            (Op2::Or, true) => return Ok(Value::Bool(true)),
+            _ => {}
         }
-        Ok(Value::Void)
+        match self.interp_expr(e2)? {
+            Value::Bool(right) => Ok(Value::Bool(right)),
+            other => Err(type_err("right", &other, right_span)),
+        }
     }
 
-    fn interp_binop(&mut self, e1: Expression, op: Op2, e2: Expression) -> Answer {
+    fn interp_binop(&mut self, e1: Expr, op: Op2, e2: Expr) -> Answer {
+        use Value::{Bool, Float, Int, String as Str};
+
+        if matches!(op, Op2::And | Op2::Or) {
+            return self.interp_logical(e1, op, e2);
+        }
+
         let r1 = self.interp_expr(e1)?;
         let r2 = self.interp_expr(e2)?;
 
-        match op {
-            Op2::Addition => match (r1, r2) {
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 + i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Float(f1 + f2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: "cannot add non-integers".to_string(),
-                }),
-            },
-            Op2::Subtraction => match (r1, r2) {
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 - i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Float(f1 - f2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: "cannot subtract non-integers".to_string(),
-                }),
-            },
-            Op2::Multiplication => match (r1, r2) {
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 * i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Float(f1 * f2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: "cannot multiply non-integers".to_string(),
-                }),
-            },
-            Op2::Division => match (r1, r2) {
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Int(i1 / i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Float(f1 / f2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: "cannot divide non-integers".to_string(),
-                }),
-            },
-            // Equality
-            Op2::Equal => match (r1, r2) {
-                (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 == b2)),
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 == i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 == f2)),
-                (Value::String(s1), Value::String(s2)) => Ok(Value::Bool(s1.eq(&s2))),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!("equality operator expects operands of the same (supported) type"),
-                }),
-            },
-            Op2::NotEqual => match (r1, r2) {
-                (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 != b2)),
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 != i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 != f2)),
-                (Value::String(s1), Value::String(s2)) => Ok(Value::Bool(s1.ne(&s2))),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!(
-                        "inequality operator expects operands of the same (supported) type"
-                    ),
-                }),
-            },
-            // Comparison
-            Op2::GreaterThan => match (r1, r2) {
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 > i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 > f2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!("> operator expects operands of the same (supported) type"),
-                }),
-            },
-            Op2::GreaterEqual => match (r1, r2) {
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 >= i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 >= f2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!(">= operator expects operands of the same (supported) type"),
-                }),
-            },
-            Op2::LessThan => match (r1, r2) {
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 < i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 < f2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!("< operator expects operands of the same (supported) type"),
-                }),
-            },
-            Op2::LessEqual => match (r1, r2) {
-                (Value::Int(i1), Value::Int(i2)) => Ok(Value::Bool(i1 <= i2)),
-                (Value::Float(f1), Value::Float(f2)) => Ok(Value::Bool(f1 <= f2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!("<= operator expects operands of the same (supported) type"),
-                }),
-            },
-            // Logical operators
-            Op2::And => match (r1, r2) {
-                (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 && b2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!("&& operator expects boolean operands"),
-                }),
-            },
-            Op2::Or => match (r1, r2) {
-                (Value::Bool(b1), Value::Bool(b2)) => Ok(Value::Bool(b1 || b2)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!("|| operator expects boolean operands"),
-                }),
-            },
-            _ => Err(RuntimeError::Adhoc(format!("unsupported binary operator"))),
-        }
+        let overflow = || RuntimeError::adhoc(format!("integer overflow in '{op}'"));
+        let int_op = |r: Option<i32>| r.map(Int).ok_or_else(overflow);
+
+        let result = match (&op, &r1, &r2) {
+            (Op2::Addition, Int(a), Int(b)) => int_op(a.checked_add(*b)),
+            (Op2::Subtraction, Int(a), Int(b)) => int_op(a.checked_sub(*b)),
+            (Op2::Multiplication, Int(a), Int(b)) => int_op(a.checked_mul(*b)),
+            (Op2::Division | Op2::Modulo, Int(_), Int(0)) => Err(RuntimeError::adhoc(
+                if matches!(op, Op2::Division) {
+                    "division by zero".to_string()
+                } else {
+                    "modulo by zero".to_string()
+                },
+            )),
+            (Op2::Division, Int(a), Int(b)) => int_op(a.checked_div(*b)),
+            (Op2::Modulo, Int(a), Int(b)) => int_op(a.checked_rem(*b)),
+
+            (Op2::Addition, Float(a), Float(b)) => Ok(Float(a + b)),
+            (Op2::Subtraction, Float(a), Float(b)) => Ok(Float(a - b)),
+            (Op2::Multiplication, Float(a), Float(b)) => Ok(Float(a * b)),
+            (Op2::Division, Float(a), Float(b)) => Ok(Float(a / b)),
+            (Op2::Modulo, Float(a), Float(b)) => Ok(Float(a % b)),
+
+            (Op2::Equal, _, _) | (Op2::NotEqual, _, _) => {
+                let eq = match (&r1, &r2) {
+                    (Bool(a), Bool(b)) => Some(a == b),
+                    (Int(a), Int(b)) => Some(a == b),
+                    (Float(a), Float(b)) => Some(a == b),
+                    (Str(a), Str(b)) => Some(a == b),
+                    _ => None,
+                };
+                match eq {
+                    Some(eq) => Ok(Bool(if matches!(op, Op2::Equal) { eq } else { !eq })),
+                    None => Err(Self::operand_error(&op, &r1, &r2)),
+                }
+            }
+
+            (Op2::LessThan, Int(a), Int(b)) => Ok(Bool(a < b)),
+            (Op2::LessEqual, Int(a), Int(b)) => Ok(Bool(a <= b)),
+            (Op2::GreaterThan, Int(a), Int(b)) => Ok(Bool(a > b)),
+            (Op2::GreaterEqual, Int(a), Int(b)) => Ok(Bool(a >= b)),
+            (Op2::LessThan, Float(a), Float(b)) => Ok(Bool(a < b)),
+            (Op2::LessEqual, Float(a), Float(b)) => Ok(Bool(a <= b)),
+            (Op2::GreaterThan, Float(a), Float(b)) => Ok(Bool(a > b)),
+            (Op2::GreaterEqual, Float(a), Float(b)) => Ok(Bool(a >= b)),
+
+            _ => Err(Self::operand_error(&op, &r1, &r2)),
+        };
+        result
     }
 
-    fn interp_unary(&mut self, op: Op1, expr: Expression) -> Answer {
+    fn operand_error(op: &Op2, r1: &Value, r2: &Value) -> RuntimeError {
+        let (t1, t2) = (r1.type_name(), r2.type_name());
+        let mut msg = format!("cannot apply '{op}' to {t1} and {t2}");
+        if t1 != t2 && matches!((t1.as_str(), t2.as_str()), ("int", "float") | ("float", "int")) {
+            msg += " (int and float are not converted automatically)";
+        }
+        RuntimeError::type_error(msg)
+    }
+
+    fn interp_unary(&mut self, op: Op1, expr: Expr) -> Answer {
         let e = self.interp_expr(expr)?;
-        match op {
-            Op1::Not => match e {
-                Value::Bool(b) => Ok(Value::Bool(!b)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!("expected bool, found {}", e),
-                }),
-            },
-            Op1::Negate => match e {
-                Value::Int(i) => Ok(Value::Int(-i)),
-                _ => Err(RuntimeError::TypeError {
-                    msg: format!("expected int, found {}", e),
-                }),
-            },
+        match (op, e) {
+            (Op1::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+            (Op1::Negate, Value::Int(i)) => i
+                .checked_neg()
+                .map(Value::Int)
+                .ok_or_else(|| RuntimeError::adhoc("integer overflow in '-'".to_string())),
+            (Op1::Negate, Value::Float(f)) => Ok(Value::Float(-f)),
+            (Op1::Not, other) => Err(RuntimeError::type_error(format!(
+                "cannot apply '!' to {}; it expects a bool",
+                other.type_name()
+            ))),
+            (Op1::Negate, other) => Err(RuntimeError::type_error(format!(
+                "cannot apply '-' to {}; it expects an int or float",
+                other.type_name()
+            ))),
         }
     }
 
-    fn type_check(v: &Value, t: Type) -> Result<(), RuntimeError> {
-        if matches!(t, Type::Any) {
+    fn matches_type(v: &Value, t: &Type) -> bool {
+        matches!(t, Type::Any) || v.to_type() == *t
+    }
+
+    fn check_return(
+        v: &Value,
+        t: &Type,
+        name: Option<&Id>,
+        span: Option<Span>,
+    ) -> Result<(), RuntimeError> {
+        if Self::matches_type(v, t) {
             return Ok(());
         }
+        let who = match name {
+            Some(n) => format!("function '{n}'"),
+            None => "function".to_string(),
+        };
+        let err = RuntimeError::type_error(format!(
+            "mismatched types: {who} is declared to return {t} but returned {}",
+            v.type_name()
+        ));
+        // Point at the returned expression when we know it; otherwise the
+        // caller's span (the call site) is attached as the error propagates.
+        Err(match span {
+            Some(span) => err.at(span),
+            None => err,
+        })
+    }
+}
 
-        let other: Type = v.clone().to_type();
-        if other == t {
-            Ok(())
-        } else {
-            Err(RuntimeError::TypeError {
-                msg: format!("cannot cast {other} to {t}"),
-            })
-        }
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{lexer::Lexer, parse::Parser};
+    use crate::{lexer::tokenize, parse::Parser};
 
     fn run(src: &str) -> Answer {
-        let ast = Parser::new(Lexer::new(src.chars())).parse().unwrap();
+        let ast = Parser::new(tokenize(src).unwrap().into_iter())
+            .parse()
+            .unwrap();
         Interpreter::new(ast).run()
+    }
+
+    /// View a result's error as its kind, for matching in assertions.
+    fn kind(v: &Answer) -> Result<&Value, &ErrorKind> {
+        v.as_ref().map_err(|e| &e.kind)
+    }
+
+    fn run_main(body: &str) -> Answer {
+        run(&format!("fn main() {{ {body} }}"))
     }
 
     #[test]
@@ -428,14 +638,14 @@ mod tests {
             "fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
              fn main() -> int { fib(10) }",
         );
-        assert!(matches!(v, Ok(Value::Int(55))), "got {:?}", v);
+        assert!(matches!(kind(&v), Ok(Value::Int(55))), "got {:?}", v);
     }
 
     #[test]
     fn params_do_not_leak_into_caller_scope() {
         let v = run("fn g(x: int) -> int { x } fn main() -> int { g(4); x }");
         assert!(
-            matches!(v, Err(RuntimeError::UndefinedVariable { .. })),
+            matches!(kind(&v), Err(ErrorKind::UndefinedVariable { .. })),
             "got {:?}",
             v
         );
@@ -448,7 +658,7 @@ mod tests {
             "fn bad(x: int) -> int { assert(false); x }
              fn main() -> int { let a = 7; bad(1); a }",
         );
-        assert!(matches!(v, Err(RuntimeError::Adhoc(_))), "got {:?}", v);
+        assert!(matches!(kind(&v), Err(ErrorKind::Adhoc(_))), "got {:?}", v);
     }
 
     #[test]
@@ -457,6 +667,117 @@ mod tests {
             "fn mk() { let c = 0; |x| { c = c + x; c } }
              fn main() { let k = mk(); k(1); k(1); k(5) }",
         );
-        assert!(matches!(v, Ok(Value::Int(7))), "got {:?}", v);
+        assert!(matches!(kind(&v), Ok(Value::Int(7))), "got {:?}", v);
+    }
+
+    #[test]
+    fn modulo() {
+        assert!(matches!(kind(&run_main("7 % 3")), Ok(Value::Int(1))));
+        assert!(matches!(kind(&run_main("2 + 7 % 3 * 2")), Ok(Value::Int(4))));
+        assert!(matches!(kind(&run_main("7 % 0")), Err(ErrorKind::Adhoc(_))));
+        assert!(matches!(kind(&run_main("7 / 0")), Err(ErrorKind::Adhoc(_))));
+    }
+
+    #[test]
+    fn minus_is_an_operator() {
+        assert!(matches!(kind(&run_main("let a = 5; let b = 2; a-b")), Ok(Value::Int(3))));
+        assert!(matches!(kind(&run_main("let a = 5; a -1")), Ok(Value::Int(4))));
+        assert!(matches!(kind(&run_main("5-1")), Ok(Value::Int(4))));
+        assert!(matches!(kind(&run_main("-3 * -2")), Ok(Value::Int(6))));
+    }
+
+    #[test]
+    fn logical_operators_short_circuit() {
+        let boom = "fn boom() -> bool { assert(false); true }";
+        let v = run(&format!("{boom} fn main() -> bool {{ false && boom() }}"));
+        assert!(matches!(kind(&v), Ok(Value::Bool(false))), "got {:?}", v);
+        let v = run(&format!("{boom} fn main() -> bool {{ true || boom() }}"));
+        assert!(matches!(kind(&v), Ok(Value::Bool(true))), "got {:?}", v);
+        let v = run(&format!("{boom} fn main() -> bool {{ true && boom() }}"));
+        assert!(matches!(kind(&v), Err(ErrorKind::Adhoc(_))), "got {:?}", v);
+        assert!(matches!(kind(&run_main("true && 1")), Err(ErrorKind::TypeError { .. })));
+    }
+
+    #[test]
+    fn let_shadowing_in_same_scope() {
+        assert!(matches!(kind(&run_main("let a = 1; let a = a + 1; a")), Ok(Value::Int(2))));
+        assert!(matches!(kind(&run_main("let a: int = 1; let a: str = \"s\"; a")),
+            Ok(Value::String(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_function_definitions_error() {
+        let v = run("fn f() { 1 } fn f() { 2 } fn main() { f() }");
+        assert!(matches!(kind(&v), Err(ErrorKind::Adhoc(m)) if m.contains("defined more than once")));
+    }
+
+    #[test]
+    fn negate_float() {
+        let v = run_main("let x = 1.5; -x");
+        assert!(matches!(kind(&v), Ok(Value::Float(f)) if *f == -1.5), "got {:?}", v);
+    }
+
+    #[test]
+    fn call_errors_are_reported_not_panics() {
+        let v = run("fn g(x: int) -> int { x } fn main() -> int { g(1, 2) }");
+        assert!(matches!(kind(&v), Err(ErrorKind::Adhoc(_))), "got {:?}", v);
+        let v = run("fn g(x: int) -> int { x } fn main() -> int { g(\"s\") }");
+        assert!(matches!(kind(&v), Err(ErrorKind::TypeError { .. })), "got {:?}", v);
+        assert!(matches!(kind(&run_main("print(nope)")),
+            Err(ErrorKind::UndefinedVariable { .. })
+        ));
+    }
+
+    /// The source text an error points at, plus its call-trace notes.
+    fn located(src: &str) -> (String, Vec<String>) {
+        let err = run(src).expect_err("program should fail");
+        let span = err.span.expect("error should have a location");
+        let line = src.lines().nth(span.start.line as usize - 1).unwrap();
+        let text: String = line
+            .chars()
+            .skip(span.start.col as usize - 1)
+            .take((span.end.col - span.start.col) as usize)
+            .collect();
+        (text, err.to_diagnostic().notes)
+    }
+
+    #[test]
+    fn runtime_errors_point_at_the_failing_expression() {
+        assert_eq!(located("fn main() { let a = 1; a + \"s\" }").0, "a + \"s\"");
+        assert_eq!(located("fn main() { let count = 1; cout }").0, "cout");
+        assert_eq!(located("fn main() { if 1 { 2 } else { 3 } }").0, "1");
+        assert_eq!(located("fn main() { let x: str = 5; x }").0, "5");
+        assert_eq!(located("fn f(n: int) { n } fn main() { f(true) }").0, "true");
+        assert_eq!(located("fn f() -> int { \"s\" } fn main() { f() }").0, "\"s\"");
+        assert_eq!(located("fn main() { assert(1 == 2) }").0, "assert(1 == 2)");
+        assert_eq!(located("fn main() { true && 5 }").0, "5");
+    }
+
+    #[test]
+    fn runtime_errors_carry_a_call_trace() {
+        let (text, notes) = located(
+            "fn c(x) { x / 0 }\nfn b(x) { c(x) }\nfn main() { b(1) }",
+        );
+        assert_eq!(text, "x / 0");
+        assert_eq!(
+            notes,
+            vec![
+                "in function 'c', called at line 2, column 11",
+                "in function 'b', called at line 3, column 13",
+            ]
+        );
+
+        // Recursive frames collapse into a single note.
+        let (_, notes) = located(
+            "fn down(n: int) -> int { if n == 0 { 1 / n } else { down(n - 1) } }\nfn main() { down(5) }",
+        );
+        assert_eq!(
+            notes,
+            vec![
+                "in function 'down', called at line 1, column 53 (5 times)",
+                "in function 'down', called at line 2, column 13",
+            ]
+        );
     }
 }

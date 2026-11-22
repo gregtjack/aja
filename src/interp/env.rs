@@ -40,14 +40,13 @@ impl RuntimeEnv {
             return env.lock().unwrap().get(id);
         }
 
-        return Err(RuntimeError::UndefinedVariable { var: id });
+        return Err(RuntimeError::undefined(id));
     }
 
+    /// Bind `id` in this scope. Re-declaring a name in the same scope
+    /// shadows the previous binding (like Rust's `let`).
     pub fn define(&mut self, id: Id, value: Value) -> Result<(), RuntimeError> {
-        if let Some(_) = self.values.insert(id.clone(), value) {
-            return Err(RuntimeError::UndefinedVariable { var: id });
-        }
-
+        self.values.insert(id, value);
         Ok(())
     }
 
@@ -61,6 +60,15 @@ impl RuntimeEnv {
             return env.lock().unwrap().assign(id, value);
         }
 
-        return Err(RuntimeError::UndefinedVariable { var: id });
+        return Err(RuntimeError::undefined(id));
+    }
+
+    /// All names visible from this scope, innermost first.
+    pub fn names(&self) -> Vec<Id> {
+        let mut names: Vec<Id> = self.values.keys().cloned().collect();
+        if let Some(env) = &self.enclosing {
+            names.extend(env.lock().unwrap().names());
+        }
+        names
     }
 }
