@@ -1162,7 +1162,7 @@ impl Checker {
             },
             Ty::Fn(params, ret) => {
                 let params: Vec<String> = params.iter().map(|p| self.show(p)).collect();
-                format!("fn({}) -> {}", params.join(", "), self.show(&ret))
+                format!("({}) -> {}", params.join(", "), self.show(&ret))
             }
         }
     }

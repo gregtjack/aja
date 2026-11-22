@@ -88,6 +88,9 @@ and people will ask for them. Each one conflicts with a rule above.
   `fn(x) { x * 2 }`. No `|x| x * 2`, no `x => x * 2`, and no brace-less
   bodies. Requiring braces also removes any ambiguity between a return type
   and the start of the body. (Rule 10)
+- **`fn` in function types.** A function type is written `(int) -> bool`,
+  never `fn(int) -> bool`, so a type can't be mistaken for a closure, and
+  its return type is always written (`() -> void`). (Rules 5, 10)
 - **`async`/`await` or any other function coloring.** (Rule 8)
 - **Manual memory management or lifetimes in the surface language.** (Rule 7)
 - **Formatter options or style configuration.** (Rule 10)

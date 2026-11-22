@@ -14,7 +14,6 @@ use parse::Parser;
 mod ast;
 mod builtins;
 mod check;
-mod compile;
 mod diagnostic;
 mod lexer;
 mod parse;
@@ -229,6 +228,12 @@ impl Repl {
 /// The span of the most recent REPL input: the last line of `history`.
 fn input_span(history: &str) -> ast::Span {
     let line = history.lines().count() as u32;
-    let len = history.lines().last().map_or(0, |l| l.chars().count() as u32);
-    ast::Span::new(ast::Location::new(0, line, 1), ast::Location::new(len, line, len + 1))
+    let len = history
+        .lines()
+        .last()
+        .map_or(0, |l| l.chars().count() as u32);
+    ast::Span::new(
+        ast::Location::new(0, line, 1),
+        ast::Location::new(len, line, len + 1),
+    )
 }

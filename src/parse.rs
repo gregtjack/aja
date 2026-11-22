@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_parse_function_types() {
-        let (ps, rt) = parse_closure("fn(f: fn(int, str) -> bool, g: fn()) -> fn(int) -> int { f }");
+        let (ps, rt) = parse_closure("fn(f: (int, str) -> bool, g: () -> void) -> (int) -> int { f }");
         let fn_t = |ps: Vec<Type>, r: Type| Type::Fn {
             param_types: ps,
             ret_type: Box::new(r),
@@ -399,6 +399,28 @@ mod tests {
         assert_eq!(rt, Some(fn_t(vec![Type::Int], Type::Int)));
         let err = create_parser("fn main() { let x: any = 1; x }").parse().unwrap_err();
         assert!(err.help.unwrap().contains("no 'any' type"));
+    }
+
+    #[test]
+    fn test_function_type_errors_have_help() {
+        let err = |src: &str| create_parser(src).parse().unwrap_err();
+        // The old spelling with `fn`, with the exact fix when it parses.
+        let e = err("fn apply(f: fn(int, str) -> bool) {}");
+        assert_eq!(e.message, "function types are written without 'fn'");
+        assert_eq!(e.help.as_deref(), Some("write `(int, str) -> bool`"));
+        assert_eq!(err("fn run(f: fn()) {}").help.as_deref(), Some("write `() -> void`"));
+        assert!(err("fn run(f: fn) {}").help.unwrap().contains("`(int, str) -> bool`"));
+        // The return type can't be left out.
+        let e = err("fn run(f: (int)) {}");
+        assert_eq!(e.message, "expected '->' and a return type, found ')'");
+        assert_eq!(
+            e.help.as_deref(),
+            Some("a function type always names its return type: `(int) -> void` if it returns nothing")
+        );
+        // Function types nest, and `->` groups to the right.
+        let (_, rt) = parse_closure("fn() -> (int) -> (str) -> bool { f }");
+        let fn_t = |ps: Vec<Type>, r: Type| Type::Fn { param_types: ps, ret_type: Box::new(r) };
+        assert_eq!(rt, Some(fn_t(vec![Type::Int], fn_t(vec![Type::String], Type::Bool))));
     }
 
     #[test]
@@ -1327,31 +1349,33 @@ where
         }
     }
 
-    /// Parse a type such as `int`, `str`, or `fn(int, bool) -> str`.
+    /// Parse a type such as `int`, `str`, or `(int, bool) -> str`.
+    ///
+    /// A function type is its parameter types in parentheses, then `->` and
+    /// the return type, which is always written (`() -> void`). Unlike a
+    /// closure it has no `fn`, so a type can't be mistaken for a closure.
     fn parse_type_name(&mut self) -> ParseResult<Type> {
         let tok = self.peek().cloned();
         match tok {
             Some((_, Token::Fn, _)) => {
+                // The old spelling, `fn(int) -> int` or `fn(int)`: say how to
+                // write it now, giving the exact type when it parses.
                 self.next();
-                self.consume(Token::LeftParen)?;
-                let mut param_types = Vec::new();
-                if !tok_matches!(self, Token::RightParen) {
-                    loop {
-                        param_types.push(self.parse_type_name()?);
-                        if tok_matches!(self, Token::Comma) {
-                            self.next();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                self.consume(Token::RightParen)?;
-                let ret_type = self.parse_fn_return_type_annotation()?.unwrap_or(Type::Void);
-                Ok(Type::Fn {
-                    param_types,
-                    ret_type: Box::new(ret_type),
+                let err = self.error(tok, "function types are written without 'fn'".to_string());
+                let fixed = if tok_matches!(self, Token::LeftParen) {
+                    self.parse_fn_type(false).ok()
+                } else {
+                    None
+                };
+                Err(match fixed {
+                    Some(t) => err.help(format!("write `{t}`")),
+                    None => err.help(
+                        "write the parameter types in parentheses and the return type after '->', \
+                         e.g. `(int, str) -> bool`, or `() -> void` for a function that returns nothing",
+                    ),
                 })
             }
+            Some((_, Token::LeftParen, _)) => self.parse_fn_type(true),
             Some((start, Token::Ident(ref v), end)) => {
                 let v = v.clone();
                 self.next();
@@ -1367,6 +1391,37 @@ where
             }
             _ => Err(self.expected("a type")),
         }
+    }
+
+    /// Parse a function type, `(int, bool) -> str`, from its `(`. With
+    /// `require_return` false, a missing `-> T` means `void` (used to suggest
+    /// a fix for the old `fn(int)` spelling).
+    fn parse_fn_type(&mut self, require_return: bool) -> ParseResult<Type> {
+        self.consume(Token::LeftParen)?;
+        let mut param_types = Vec::new();
+        if !tok_matches!(self, Token::RightParen) {
+            loop {
+                param_types.push(self.parse_type_name()?);
+                if tok_matches!(self, Token::Comma) {
+                    self.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.consume(Token::RightParen)?;
+        if require_return && !tok_matches!(self, Token::RightArrow) {
+            let params: Vec<String> = param_types.iter().map(|t| t.to_string()).collect();
+            return Err(self.expected("'->' and a return type").help(format!(
+                "a function type always names its return type: `({}) -> void` if it returns nothing",
+                params.join(", ")
+            )));
+        }
+        let ret_type = self.parse_fn_return_type_annotation()?.unwrap_or(Type::Void);
+        Ok(Type::Fn {
+            param_types,
+            ret_type: Box::new(ret_type),
+        })
     }
 
     fn consume(&mut self, t: Token) -> ParseResult<SrcSpan> {

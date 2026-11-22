@@ -19,7 +19,11 @@ fn repeat(s: str, times: int) -> str {
 }
 
 fn main() {
-    println(greet(Person { name: "Lovelace", title: "Countess" }));
+    let lovelace = Person {
+        name: "Lovelace",
+        title: "Countess"
+    };
+    println(greet(lovelace));
     println(repeat("ab", 3) == "ababab");
 
     // Builds a 64 KiB string ten thousand times (about 640 MB in all) and

@@ -2,7 +2,7 @@
 // can capture the variables around them.
 
 // Returns a function that remembers and updates its own `count`.
-fn counter() -> fn() -> int {
+fn counter() -> () -> int {
     var count = 0;
     fn() {
         count = count + 1;
@@ -12,16 +12,16 @@ fn counter() -> fn() -> int {
 
 // Returns a function that adds `n`. The closure's parameter type is inferred
 // from the declared return type.
-fn adder(n: int) -> fn(int) -> int {
+fn adder(n: int) -> (int) -> int {
     fn(x) { x + n }
 }
 
-fn compose(f: fn(int) -> int, g: fn(int) -> int) -> fn(int) -> int {
+fn compose(f: (int) -> int, g: (int) -> int) -> (int) -> int {
     fn(x) { f(g(x)) }
 }
 
 // Apply `f` to `x`, `times` times.
-fn repeat(f: fn(int) -> int, times: int, x: int) -> int {
+fn repeat(f: (int) -> int, times: int, x: int) -> int {
     var x = x;
     var i = 0;
     while i < times {

@@ -8,7 +8,7 @@ fn main() {
     let ratio = 0.5;
 
     // Closure parameters are inferred from how they're used: `+` with a
-    // float argument makes this fn(float, float) -> float.
+    // float argument makes this (float, float) -> float.
     let add = fn(a, b) { a + b };
     println("add:", add(1.5, 2.25));
 

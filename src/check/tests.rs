@@ -59,7 +59,7 @@ fn closure_types_are_inferred_from_use() {
     // A parameter's type can come from a later call.
     ok("fn main() -> float { let add = fn(a, b) { a + b }; add(1.5, 2.0) }");
     // Closures capture and mutate their environment.
-    ok("fn counter() -> fn(int) -> int { var c = 0; fn(x) { c = c + x; c } }
+    ok("fn counter() -> (int) -> int { var c = 0; fn(x) { c = c + x; c } }
         fn main() -> int { let k = counter(); k(1); k(5) }");
 }
 
@@ -73,15 +73,15 @@ fn closures_are_not_polymorphic() {
 
 #[test]
 fn function_types_in_signatures() {
-    ok("fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+    ok("fn apply(f: (int) -> int, x: int) -> int { f(x) }
         fn main() -> int { apply(fn(n) { n * 3 }, 2) }");
     let (msg, at) = error(
-        "fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+        "fn apply(f: (int) -> int, x: int) -> int { f(x) }
 fn main() -> int { apply(fn(s: str) { 1 }, 2) }",
     );
     assert_eq!(
         msg,
-        "mismatched types: parameter 'f' of function 'apply' expects fn(int) -> int, found fn(str) -> int"
+        "mismatched types: parameter 'f' of function 'apply' expects (int) -> int, found (str) -> int"
     );
     assert_eq!(at, "fn(s: str) { 1 }");
 }
@@ -148,7 +148,7 @@ fn operator_errors() {
     assert_eq!(msg, "'&&' expects bool operands, but the right operand is int");
     assert_eq!(at, "5");
     let (msg, _) = error("fn main() { let f = fn() { 1 }; f == f; }");
-    assert_eq!(msg, "cannot apply '==' to fn() -> int and fn() -> int");
+    assert_eq!(msg, "cannot apply '==' to () -> int and () -> int");
 }
 
 #[test]
@@ -190,11 +190,11 @@ fn closures_can_call_themselves() {
     // The return type is inferred through the recursive call.
     ok("fn main() -> int { let fact = fn(n: int) { if n == 0 { 1 } else { n * fact(n - 1) } }; fact(5) }");
     ok("fn main() -> int { let fib = fn(n) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }; fib(10) }");
-    ok("fn main() { let f: fn(int) -> int = fn(n) { f(n) }; }");
+    ok("fn main() { let f: (int) -> int = fn(n) { f(n) }; }");
     let (msg, _) = error("fn main() { let f = fn(x) { f(true); x + 1 }; }");
     assert_eq!(
         msg,
-        "mismatched types: 'f' is used as fn(bool) -> _ inside its own definition, but it is fn(int) -> int"
+        "mismatched types: 'f' is used as (bool) -> _ inside its own definition, but it is (int) -> int"
     );
     // Only a closure sees its own name; other values see the earlier one.
     let (msg, _) = error("fn main() { let x = x + 1; }");
@@ -276,7 +276,7 @@ fn one_mistake_gives_one_error() {
 #[test]
 fn infinite_types_are_rejected() {
     let (msg, at) = error("fn main() { let f = fn(g) { g(g) }; }");
-    assert_eq!(msg, "mismatched types: argument 1 of function 'g' expects _, found fn(_) -> _");
+    assert_eq!(msg, "mismatched types: argument 1 of function 'g' expects _, found (_) -> _");
     assert_eq!(at, "g");
     let errors = check("fn main() { let f = fn(g) { g(g) }; }").unwrap_err();
     assert!(errors[0].notes[0].contains("infinite type"));
@@ -346,7 +346,7 @@ fn structs_and_enums_check() {
 #[test]
 fn struct_and_enum_equality() {
     shapes_ok("fn main() -> bool { (Point { x: 1, y: 2 } == Point { x: 1, y: 2 }) && (Color::Red != Color::Blue) }");
-    let (msg, _) = error("struct F { f: fn() } fn main() -> bool { let a = F { f: fn() { } }; a == a }");
+    let (msg, _) = error("struct F { f: () -> void } fn main() -> bool { let a = F { f: fn() { } }; a == a }");
     assert_eq!(msg, "cannot apply '==' to F and F");
     // Comparable types can contain themselves.
     ok("enum L { Nil, Cons(int, L) } fn main() -> bool { L::Nil == L::Cons(1, L::Nil) }");

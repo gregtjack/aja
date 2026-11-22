@@ -82,7 +82,7 @@ A program is a sequence of top-level `fn` definitions. Execution starts at
 | `bool`  | `true`, `false`         |                                      |
 | `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`; join with `+` |
 | `void`  | —                       | Result of statements / no value      |
-| `fn(int, str) -> bool` | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
+| `(int, str) -> bool` | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
 | structs and enums | `Point { x: 1, y: 2 }`, `Shape::Circle(p, 3)` | Defined at the top level; see below |
 
 ### Structs, enums, and `match`
@@ -141,15 +141,18 @@ is no `any` type: every value has one static type.
 
 - **Signatures are written out.** Top-level functions annotate every
   parameter. A function with no `-> T` returns `void`. Function types are
-  written `fn(int, str) -> bool` (or `fn(int)` for a `void` result), so
-  higher-order functions can be declared:
-  `fn apply(f: fn(int) -> int, x: int) -> int { f(x) }`.
+  written without `fn`, as the parameter types in parentheses and the
+  return type, which is always given: `(int, str) -> bool`, or
+  `(int) -> void` for one that returns nothing. Leaving out `fn` keeps a
+  type from looking like a closure. Higher-order functions are declared
+  with them:
+  `fn apply(f: (int) -> int, x: int) -> int { f(x) }`.
 - **Everything inside a body is inferred.** `let` bindings, closure
   parameters, and closure return types need no annotations; their types come
   from how they're used:
 
   ```rust
-  let twice = fn(f, x) { f(f(x)) };       // f: fn(int) -> int, x: int
+  let twice = fn(f, x) { f(f(x)) };       // f: (int) -> int, x: int
   twice(fn(y) { y * 2 }, 3)
   ```
 
@@ -261,8 +264,9 @@ frame, so tail recursion runs in constant space, like a loop. Other calls
 keep their frame until they return. Frames are kept in a growable array, not
 on the Rust stack, so deep recursion can't crash the VM. The call stack may
 use up to 256 MB (about 1.5 million simple non-tail calls); beyond that the
-program stops with a stack overflow error. In error traces, a tail call is
-marked "tail-called", because the caller it replaced is no longer listed.
+program stops with a stack overflow error. Error traces list a tail call
+like any other call, without mentioning tail calls; the caller it replaced
+is no longer on the stack, so it isn't listed.
 
 A closure copies the variables it captures when it is made, which is all an
 immutable variable needs. A `var` that a closure captures is stored in a

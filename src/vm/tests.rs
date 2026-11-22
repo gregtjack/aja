@@ -205,7 +205,7 @@ fn let_shadowing() {
 
 #[test]
 fn closures_capture_and_mutate() {
-    let src = "fn mk() -> fn(int) -> int { var c = 0; fn(x) { c = c + x; c } }
+    let src = "fn mk() -> (int) -> int { var c = 0; fn(x) { c = c + x; c } }
                fn main() -> int { let k = mk(); k(1); k(1); k(5) }";
     assert_eq!(value(src), "Int(7)");
 }
@@ -226,7 +226,7 @@ fn closures_share_variables_with_their_function() {
 
 #[test]
 fn each_counter_has_its_own_variable() {
-    let src = "fn counter() -> fn() -> int { var c = 0; fn() { c = c + 1; c } }
+    let src = "fn counter() -> () -> int { var c = 0; fn() { c = c + 1; c } }
                fn main() -> int { let a = counter(); let b = counter(); a(); a(); b(); a() * 10 + b() }";
     assert_eq!(value(src), "Int(32)");
 }
@@ -248,7 +248,7 @@ fn cells_made(src: &str) -> usize {
 fn only_captured_vars_get_cells() {
     // Captured `let`s, parameters, and pattern bindings are copied into the
     // closure, and a closure that calls itself captures itself.
-    let src = "fn make(n: int) -> fn() -> int {
+    let src = "fn make(n: int) -> () -> int {
                    let m = n * 2;
                    let f = fn(k: int) -> int { if k == 0 { m } else { f(k - 1) } };
                    match Option::Some(n) { Option::Some(p) => fn() { f(p) + n + m }, Option::None => fn() { 0 } }
@@ -304,7 +304,7 @@ fn closures_can_call_themselves() {
 fn closures_capture_through_several_levels() {
     let src = "fn main() -> int {
                    var x = 1;
-                   let outer = fn() -> fn() -> int { fn() { x = x + 1; x } };
+                   let outer = fn() -> () -> int { fn() { x = x + 1; x } };
                    let inner = outer();
                    inner();
                    inner() + x
@@ -314,7 +314,7 @@ fn closures_capture_through_several_levels() {
 
 #[test]
 fn closures_capture_parameters() {
-    let src = "fn adder(n: int) -> fn(int) -> int { fn(x) { x + n } }
+    let src = "fn adder(n: int) -> (int) -> int { fn(x) { x + n } }
                fn main() -> int { let add2 = adder(2); add2(40) }";
     assert_eq!(value(src), "Int(42)");
 }
@@ -342,7 +342,7 @@ fn shadowing_does_not_change_captured_variables() {
 
 #[test]
 fn functions_are_values() {
-    let src = "fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+    let src = "fn apply(f: (int) -> int, x: int) -> int { f(x) }
                fn triple(n: int) -> int { n * 3 }
                fn main() -> int { apply(triple, 2) + apply(fn(n) { n + 1 }, 2) }";
     assert_eq!(value(src), "Int(9)");
@@ -357,8 +357,8 @@ fn values_display_like_print() {
     };
     assert_eq!(shown("fn main() -> float { 1.0 }"), "1.0");
     assert_eq!(shown("fn main() -> str { \"a\\tb\" }"), "a\tb");
-    assert_eq!(shown("fn main() -> fn(int) -> int { fn(x: int) -> int { x } }"), "<fn (x: int) -> int>");
-    assert_eq!(shown("fn main() -> fn() -> int { clock }"), "<native fn: clock>");
+    assert_eq!(shown("fn main() -> (int) -> int { fn(x: int) -> int { x } }"), "<fn (x: int) -> int>");
+    assert_eq!(shown("fn main() -> () -> int { clock }"), "<native fn: clock>");
     assert_eq!(shown("fn main() { }"), "()");
 }
 
@@ -443,11 +443,12 @@ fn runtime_errors_carry_a_call_trace() {
         ]
     );
 
-    // A tail call replaces its caller's frame, so the caller isn't listed.
+    // A tail call replaces its caller's frame, so the caller isn't listed,
+    // but the note doesn't mention tail calls: it reads like any other call.
     let (_, notes) = located(
         "fn c(x: int) -> int { x / 0 }\nfn b(x: int) -> int { c(x) }\nfn main() { b(1); }",
     );
-    assert_eq!(notes, vec!["in function 'c', tail-called at line 2, column 23"]);
+    assert_eq!(notes, vec!["in function 'c', called at line 2, column 23"]);
 
     // Closures are described by the name they were called through.
     let (_, notes) = located("fn main() { let f = fn() { assert(false); }; f(); }");
@@ -516,7 +517,7 @@ fn cycles_through_closures_are_freed() {
 fn reachable_objects_survive_collection() {
     // Every allocation collects (stress mode), while counters and their
     // cells are only reachable from registers and other closures.
-    let src = "fn counter() -> fn() -> int { var c = 0; fn() { c = c + 1; c } }
+    let src = "fn counter() -> () -> int { var c = 0; fn() { c = c + 1; c } }
                fn main() -> int {
                    let a = counter();
                    var total = 0;
@@ -706,7 +707,7 @@ fn guards_see_bindings_and_fall_through() {
 
 #[test]
 fn closures_capture_pattern_bindings() {
-    let src = "fn adder(l: List) -> fn(int) -> int {
+    let src = "fn adder(l: List) -> (int) -> int {
                    match l { List::Cons(n, _) => fn(x) { x + n }, List::Nil => fn(x) { x } }
                }
                fn main() -> int { let f = adder(List::Cons(40, List::Nil)); f(2) }";

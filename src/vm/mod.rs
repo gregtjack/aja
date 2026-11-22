@@ -51,9 +51,6 @@ pub struct TraceEntry {
     pub function: String,
     /// The call expression.
     pub site: Span,
-    /// The call was a tail call, which replaced its caller's frame, so the
-    /// caller isn't in the trace.
-    pub tail: bool,
     /// How many times in a row this call is on the stack.
     pub count: usize,
 }
@@ -71,9 +68,8 @@ impl RuntimeError {
                 } else {
                     String::new()
                 };
-                let called = if e.tail { "tail-called" } else { "called" };
                 format!(
-                    "in {}, {called} at line {}, column {}{repeat}",
+                    "in {}, called at line {}, column {}{repeat}",
                     e.function, e.site.start.line, e.site.start.col
                 )
             })
@@ -561,25 +557,27 @@ impl Vm {
         let top = self.frames.last().unwrap();
         let span = top.proto.spans[top.ip - 1];
 
-        // For each frame, innermost first, the call that started it: the
-        // instruction (as the calling function's code and an index), and
-        // whether it was a tail call. The outermost frame has none, unless
-        // its function made a tail call.
+        // For each frame, innermost first, the call that started it, as the
+        // calling function's code and the call instruction's index. A frame
+        // a tail call reused records that call, since its original caller's
+        // instruction no longer describes it. The outermost frame has none,
+        // unless its function made a tail call. Tail calls are an
+        // implementation detail, so the trace doesn't distinguish them.
         let calls = self.frames.iter().enumerate().rev().filter_map(|(i, frame)| {
             match &frame.tail_call {
-                Some((proto, at)) => Some((proto, *at, true)),
+                Some((proto, at)) => Some((proto, *at)),
                 None if i > 0 => {
                     let caller = &self.frames[i - 1];
-                    Some((&caller.proto, caller.ip - 1, false))
+                    Some((&caller.proto, caller.ip - 1))
                 }
                 None => None,
             }
         });
 
         let mut trace: Vec<TraceEntry> = Vec::new();
-        let mut last: Option<(*const Proto, usize, bool)> = None;
-        for (proto, at, tail) in calls {
-            let key = (Rc::as_ptr(proto), at, tail);
+        let mut last: Option<(*const Proto, usize)> = None;
+        for (proto, at) in calls {
+            let key = (Rc::as_ptr(proto), at);
             if last == Some(key) {
                 trace.last_mut().unwrap().count += 1;
                 continue;
@@ -592,7 +590,6 @@ impl Vm {
             trace.push(TraceEntry {
                 function,
                 site: proto.spans[at],
-                tail,
                 count: 1,
             });
         }

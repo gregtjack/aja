@@ -32,7 +32,7 @@ impl Display for Type {
                 ret_type,
             } => {
                 let params: Vec<String> = param_types.iter().map(|t| t.to_string()).collect();
-                write!(f, "fn({}) -> {}", params.join(", "), ret_type)
+                write!(f, "({}) -> {}", params.join(", "), ret_type)
             }
             Type::List(t) => write!(f, "List<{}>", t),
             Type::Void => write!(f, "void"),
