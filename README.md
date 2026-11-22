@@ -35,7 +35,7 @@ fn main() -> int {
 ## Getting started
 
 Requires a Rust toolchain. A Nix flake (`flake.nix`, with `.envrc` for direnv)
-provides a dev shell with Rust, `rust-analyzer`, and `qbe`.
+provides a dev shell with Rust and `rust-analyzer`.
 
 ```bash
 cargo build
@@ -229,7 +229,6 @@ implementation fails the tests and stops the VM at startup.
 ```
 source ──► Lexer ──► Parser ──► AST ──► Type checker ──► Compiler ──► Bytecode VM
           lexer.rs   parse.rs   ast/    check/           vm/compile.rs  vm/mod.rs
-                                  └───► compile/ (QBE backend, stub)
 ```
 
 | Path                  | Role |
@@ -248,7 +247,6 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/vm/heap.rs`      | Garbage-collected heap for closures and cells |
 | `src/vm/native.rs`    | Built-in implementations |
 | `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color) |
-| `src/compile/`        | Code-generation scaffolding targeting QBE (not yet wired up) |
 
 The VM is register-based. Each call gets a window of registers holding its
 parameters, locals, and temporaries, and instructions name registers
@@ -300,7 +298,7 @@ static type checking with inference inside function bodies; built-ins (`print`, 
 **Reserved or partially present, not yet usable:**
 - `<-`, `[` `]` are lexed but have no grammar.
 - A `List<T>` type exists in the AST only; generics aren't implemented yet.
-- The QBE compiler backend is a stub; it will be replaced by Cranelift (see
+- There is no native code backend yet; one using Cranelift is planned (see
   [DESIGN.md](DESIGN.md)).
 
 **Errors:** errors are reported in a rustc-like format and exit with a

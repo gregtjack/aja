@@ -32,7 +32,6 @@
           devShells.default = mkShell {
             nativeBuildInputs = [
               rustTools
-              qbe
               rust-analyzer
               pkg-config
               just
