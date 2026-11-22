@@ -193,27 +193,29 @@ impl Interpreter {
                 } => {
                     assert_eq!(args.len(), params.len(), "Number of arguments passed to function does not equal the number of parameters.");
 
-                    let prev_env = self.env.clone();
-                    self.env = env;
+                    // Each call gets a fresh scope whose parent is the
+                    // function's captured environment, so parameters never
+                    // clobber other calls' bindings (e.g. during recursion).
+                    let mut call_env = RuntimeEnv::from_enclosing(env);
+                    for (var, value) in params.iter().zip(args.into_iter()) {
+                        Self::type_check(&value, var.t.clone())?;
+                        call_env.define(var.name.clone(), value)?;
+                    }
 
-                    params.iter().zip(args.iter()).for_each(|(var, value)| {
-                        Self::type_check(value, var.t.clone()).expect("Typecheck failed");
-                        let _ = self
-                            .env
-                            .lock()
-                            .unwrap()
-                            .define(var.name.clone(), value.clone());
-                    });
-
-                    let ret = match self.interp_stmt(body) {
-                        Ok(v) => Ok(v),
-                        Err(err) => match err {
-                            RuntimeError::Return(v) => Ok(v),
-                            _ => Err(err),
-                        },
-                    }?;
-                    Self::type_check(&ret, ret_type)?;
+                    let prev_env = std::mem::replace(
+                        &mut self.env,
+                        Arc::new(Mutex::new(call_env)),
+                    );
+                    let result = self.interp_stmt(body);
+                    // Restore the caller's environment even if the body failed.
                     self.env = prev_env;
+
+                    let ret = match result {
+                        Ok(v) => v,
+                        Err(RuntimeError::Return(v)) => v,
+                        Err(err) => return Err(err),
+                    };
+                    Self::type_check(&ret, ret_type)?;
                     Ok(ret)
                 }
             },
@@ -407,5 +409,54 @@ impl Interpreter {
                 msg: format!("cannot cast {other} to {t}"),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{lexer::Lexer, parse::Parser};
+
+    fn run(src: &str) -> Answer {
+        let ast = Parser::new(Lexer::new(src.chars())).parse().unwrap();
+        Interpreter::new(ast).run()
+    }
+
+    #[test]
+    fn recursion_uses_per_call_scope() {
+        let v = run(
+            "fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+             fn main() -> int { fib(10) }",
+        );
+        assert!(matches!(v, Ok(Value::Int(55))), "got {:?}", v);
+    }
+
+    #[test]
+    fn params_do_not_leak_into_caller_scope() {
+        let v = run("fn g(x: int) -> int { x } fn main() -> int { g(4); x }");
+        assert!(
+            matches!(v, Err(RuntimeError::UndefinedVariable { .. })),
+            "got {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn caller_env_restored_after_error_in_callee() {
+        // After a failed call, the caller's locals must still be visible.
+        let v = run(
+            "fn bad(x: int) -> int { assert(false); x }
+             fn main() -> int { let a = 7; bad(1); a }",
+        );
+        assert!(matches!(v, Err(RuntimeError::Adhoc(_))), "got {:?}", v);
+    }
+
+    #[test]
+    fn closures_still_capture_and_mutate() {
+        let v = run(
+            "fn mk() { let c = 0; |x| { c = c + x; c } }
+             fn main() { let k = mk(); k(1); k(1); k(5) }",
+        );
+        assert!(matches!(v, Ok(Value::Int(7))), "got {:?}", v);
     }
 }
