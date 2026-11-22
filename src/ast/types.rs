@@ -14,10 +14,10 @@ pub enum Type {
         param_types: Vec<Type>,
         ret_type: Box<Type>,
     },
-    List(Box<Type>),
     Void,
-    /// A struct or enum, by name, with where the name is written.
-    Named(Id, Span),
+    /// A struct or enum, or a type parameter, by name, with its type
+    /// arguments (`Option<int>`) and where it is written.
+    Named(Id, Vec<Type>, Span),
 }
 
 impl Display for Type {
@@ -34,9 +34,12 @@ impl Display for Type {
                 let params: Vec<String> = param_types.iter().map(|t| t.to_string()).collect();
                 write!(f, "({}) -> {}", params.join(", "), ret_type)
             }
-            Type::List(t) => write!(f, "List<{}>", t),
             Type::Void => write!(f, "void"),
-            Type::Named(name, _) => write!(f, "{name}"),
+            Type::Named(name, args, _) if args.is_empty() => write!(f, "{name}"),
+            Type::Named(name, args, _) => {
+                let args: Vec<String> = args.iter().map(|t| t.to_string()).collect();
+                write!(f, "{name}<{}>", args.join(", "))
+            }
         }
     }
 }

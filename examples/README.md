@@ -13,6 +13,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [garbage.aja](garbage.aja) | The garbage collector freeing a million self-referencing closures |
 | [strings.aja](strings.aja) | Joining strings with `+`, and the collector freeing big strings |
 | [data.aja](data.aja) | Structs, enums with data, recursive types, and `match` with nested patterns and guards |
+| [generics.aja](generics.aja) | Generic functions, structs, and enums: `Option`, `Result`, `Pair`, and a list with `map` and `fold` |
 
 ## Errors
 
@@ -27,10 +28,11 @@ there.
 | [missing_annotation.aja](errors/missing_annotation.aja) | A missing parameter type, with the annotation to add |
 | [immutable.aja](errors/immutable.aja) | Assigning to a `let` and to a parameter, with how to make them mutable |
 | [typo.aja](errors/typo.aja) | A misspelled name with a suggestion, and several errors reported at once |
-| [call_trace.aja](errors/call_trace.aja) | Division by zero, with the call trace (recursion collapsed, tail calls marked) |
+| [call_trace.aja](errors/call_trace.aja) | Division by zero, with the call trace (recursion collapsed) |
 | [overflow.aja](errors/overflow.aja) | Integer overflow, which is an error rather than a wraparound |
 | [assert.aja](errors/assert.aja) | A failed `assert` |
 | [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
+| [generic_body.aja](errors/generic_body.aja) | Generic code assuming things about a type parameter, and mismatched type arguments |
 
 `cargo test` runs every example: the ones here must succeed, and each one in
 `errors/` must fail with exactly the errors listed in its `// expect:` lines.

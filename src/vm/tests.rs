@@ -947,3 +947,36 @@ fn repl_literals_are_kept_and_renumbered_after_a_failed_input() {
     assert_eq!(eval("greet(\"there\")"), "Str(\"hi there\")");
     assert_eq!(eval("\"hi \" + \"again\""), "Str(\"hi again\")");
 }
+
+#[test]
+fn generic_code_runs() {
+    let types = "enum Option<T> { Some(T), None }
+                 enum List<T> { Nil, Cons(T, List<T>) }
+                 struct Pair<A, B> { first: A, second: B }
+                 fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
+                     match xs { List::Nil => List::Nil, List::Cons(x, rest) => List::Cons(f(x), map(rest, f)) }
+                 }
+                 fn fold<T, A>(xs: List<T>, acc: A, f: (A, T) -> A) -> A {
+                     match xs { List::Nil => acc, List::Cons(x, rest) => fold(rest, f(acc, x), f) }
+                 }
+                 fn get<T>(o: Option<T>, d: T) -> T { match o { Option::Some(x) => x, Option::None => d } }";
+    let main = |ret: &str, body: &str| value(&format!("{types} fn main() -> {ret} {{ {body} }}"));
+
+    let xs = "List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))";
+    assert_eq!(main("int", &format!("fold(map({xs}, fn(x) {{ x * 10 }}), 0, fn(a, x) {{ a + x }})")), "Int(60)");
+    assert_eq!(
+        main("str", &format!("fold(map({xs}, fn(x: int) -> str {{ \"ab\" }}), \"\", fn(a, s) {{ a + s }})")),
+        "Str(\"ababab\")"
+    );
+    assert_eq!(main("int", "get(Option::Some(5), 0) + get(Option::None, 7)"), "Int(12)");
+    assert_eq!(main("str", "let p = Pair { first: 1, second: \"one\" }; Pair { first: p.second, second: p.first }.first"), "Str(\"one\")");
+    assert_eq!(main("bool", "Option::Some(Pair { first: 1, second: \"x\" }) == Option::Some(Pair { first: 1, second: \"x\" })"), "Bool(true)");
+    assert_eq!(main("bool", "Option::Some(1) == Option::None"), "Bool(false)");
+    // Generic recursion in tail position runs in constant space.
+    let src = format!(
+        "{types} fn count<T>(xs: List<T>, n: int) -> int {{ match xs {{ List::Nil => n, List::Cons(_, t) => count(t, n + 1) }} }}
+         fn build(n: int, acc: List<bool>) -> List<bool> {{ if n == 0 {{ acc }} else {{ build(n - 1, List::Cons(true, acc)) }} }}
+         fn main() -> int {{ count(build(100000, List::Nil), 0) }}"
+    );
+    assert_eq!(format!("{:?}", run_limited(&src, 4096).unwrap()), "Int(100000)");
+}

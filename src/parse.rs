@@ -1,7 +1,7 @@
 use crate::{
     ast::{
         types::Type, Arm, Definition, Expr, Expression, FieldInit, Location, Pattern, PatternKind,
-        Program, Span, Statement, Variable, VariantDef,
+        Program, Span, Statement, TypeParam, Variable, VariantDef,
     },
     diagnostic::Diagnostic,
     lexer::SrcSpan,
@@ -332,6 +332,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_generics() {
+        let src = "enum Option<T> { Some(T), None }
+                   struct Pair<A, B> { first: A, second: B }
+                   fn swap<A, B>(p: Pair<A, B>) -> Pair<B, Option<Option<A>>> { p }";
+        let program = create_parser(src).parse().unwrap();
+        let names = |ps: &[TypeParam]| ps.iter().map(|p| p.name.to_string()).collect::<Vec<_>>();
+        match &program.definitions[0] {
+            Definition::Enum { type_params, .. } => assert_eq!(names(type_params), ["T"]),
+            d => panic!("expected an enum, got {d:?}"),
+        }
+        match &program.definitions[2] {
+            Definition::Function { type_params, params, rtype, .. } => {
+                assert_eq!(names(type_params), ["A", "B"]);
+                assert_eq!(params[0].t.as_ref().unwrap().to_string(), "Pair<A, B>");
+                // `>>` closes two type argument lists.
+                assert_eq!(rtype.as_ref().unwrap().to_string(), "Pair<B, Option<Option<A>>>");
+            }
+            d => panic!("expected a function, got {d:?}"),
+        }
+
+        let err = |src: &str| create_parser(src).parse().unwrap_err();
+        assert_eq!(err("fn f<>() {}").help.as_deref(), Some("leave out the '<>' if there are no type parameters"));
+        assert_eq!(err("fn f<int>(x: List<) {}").message, "expected a type, found ')'");
+        let e = err("fn f(x: int<str>) {}");
+        assert_eq!(e.message, "type 'int' takes no type arguments");
+        assert_eq!(e.help.as_deref(), Some("write `int`"));
+    }
+
+    #[test]
     fn test_struct_literals_need_parens_in_conditions() {
         // `p == P` is the condition, and `{ x: 1 }` is a (malformed) body.
         let err = create_parser("fn main() { if p == P { x: 1 } { } }").parse().unwrap_err();
@@ -550,6 +579,7 @@ where
             _ => unreachable!(),
         };
 
+        let type_params = self.parse_type_params()?;
         let params = self.parse_fn_params()?;
         let rtype = self.parse_fn_return_type_annotation()?;
         let body = self.parse_block()?;
@@ -557,6 +587,7 @@ where
         Ok(Definition::Function {
             name: ident,
             name_span,
+            type_params,
             params,
             body,
             rtype,
@@ -574,9 +605,40 @@ where
         }
     }
 
+    /// The type parameters after a definition's name, `<A, B>`, if any.
+    fn parse_type_params(&mut self) -> ParseResult<Vec<TypeParam>> {
+        let mut params = Vec::new();
+        if !tok_matches!(self, Token::LessThan) {
+            return Ok(params);
+        }
+        self.next();
+        loop {
+            match self.peek().cloned() {
+                Some((start, Token::Ident(name), end)) => {
+                    self.next();
+                    params.push(TypeParam { name, span: Span::new(start, end) });
+                }
+                Some((_, Token::GreaterThan, _)) if params.is_empty() => {
+                    return Err(self
+                        .expected("a type parameter name")
+                        .help("leave out the '<>' if there are no type parameters"));
+                }
+                _ => return Err(self.expected("a type parameter name").help("type parameters are names, e.g. `<T>` or `<K, V>`")),
+            }
+            if tok_matches!(self, Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+        self.consume(Token::GreaterThan)?;
+        Ok(params)
+    }
+
     /// `struct Name { field: type, ... }`
     fn parse_struct_defn(&mut self) -> ParseResult<Definition> {
         let (name, name_span) = self.parse_type_def_name("struct")?;
+        let type_params = self.parse_type_params()?;
         if tok_matches!(self, Token::LeftParen) {
             return Err(self
                 .expected("'{'")
@@ -607,12 +669,13 @@ where
             return Err(self.expected("',' or '}'"));
         }
         self.consume(Token::RightBrace)?;
-        Ok(Definition::Struct { name, name_span, fields })
+        Ok(Definition::Struct { name, name_span, type_params, fields })
     }
 
     /// `enum Name { A, B(int, str), ... }`
     fn parse_enum_defn(&mut self) -> ParseResult<Definition> {
         let (name, name_span) = self.parse_type_def_name("enum")?;
+        let type_params = self.parse_type_params()?;
         self.consume(Token::LeftBrace)?;
         let mut variants = Vec::new();
         while !tok_matches!(self, Token::RightBrace) {
@@ -652,7 +715,7 @@ where
             return Err(self.expected("',' or '}'"));
         }
         self.consume(Token::RightBrace)?;
-        Ok(Definition::Enum { name, name_span, variants })
+        Ok(Definition::Enum { name, name_span, type_params, variants })
     }
 
     /// Parse with struct literals allowed (`true`) or not, restoring the
@@ -1376,7 +1439,7 @@ where
                 })
             }
             Some((_, Token::LeftParen, _)) => self.parse_fn_type(true),
-            Some((start, Token::Ident(ref v), end)) => {
+            Some((start, Token::Ident(ref v), _)) => {
                 let v = v.clone();
                 self.next();
                 if v == "any" {
@@ -1385,9 +1448,31 @@ where
                          Remove the annotation to have it inferred",
                     ));
                 }
-                // Anything else that isn't built in names a struct or enum,
-                // which the type checker looks up.
-                Ok(Type::try_from(v.to_string()).unwrap_or(Type::Named(v, Span::new(start, end))))
+                let builtin = Type::try_from(v.to_string()).ok();
+                let mut args = Vec::new();
+                if tok_matches!(self, Token::LessThan) {
+                    self.next();
+                    loop {
+                        args.push(self.parse_type_name()?);
+                        if tok_matches!(self, Token::Comma) {
+                            self.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.consume(Token::GreaterThan)?;
+                }
+                let span = Span::new(start, self.last_end());
+                match builtin {
+                    Some(_) if !args.is_empty() => {
+                        Err(self.error(tok, format!("type '{v}' takes no type arguments"))
+                            .help(format!("write `{v}`")))
+                    }
+                    Some(t) => Ok(t),
+                    // Anything else that isn't built in names a struct, an
+                    // enum, or a type parameter, which the checker looks up.
+                    None => Ok(Type::Named(v, args, span)),
+                }
             }
             _ => Err(self.expected("a type")),
         }

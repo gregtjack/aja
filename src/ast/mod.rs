@@ -85,6 +85,14 @@ impl Variable {
     }
 }
 
+/// A type parameter of a generic function, struct, or enum: the `T` in
+/// `fn id<T>(x: T) -> T`.
+#[derive(Debug, Clone)]
+pub struct TypeParam {
+    pub name: Id,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub definitions: Vec<Definition>,
@@ -96,21 +104,26 @@ pub enum Definition {
         name: Id,
         /// Where the function's name appears.
         name_span: Span,
+        type_params: Vec<TypeParam>,
         params: Vec<Variable>,
         body: Statement,
         /// The declared return type; `None` means `void`.
         rtype: Option<Type>,
     },
-    /// `struct Point { x: int, y: int }`. Every field's `t` is `Some`.
+    /// `struct Point { x: int, y: int }`, or `struct Pair<A, B> { ... }`.
+    /// Every field's `t` is `Some`.
     Struct {
         name: Id,
         name_span: Span,
+        type_params: Vec<TypeParam>,
         fields: Vec<Variable>,
     },
-    /// `enum Shape { Circle(float), Rect(float, float), Empty }`.
+    /// `enum Shape { Circle(float), Rect(float, float), Empty }`, or
+    /// `enum Option<T> { Some(T), None }`.
     Enum {
         name: Id,
         name_span: Span,
+        type_params: Vec<TypeParam>,
         variants: Vec<VariantDef>,
     },
 }

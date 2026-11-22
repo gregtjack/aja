@@ -125,6 +125,9 @@ impl Compiler {
                     params,
                     body,
                     rtype,
+                    // Values have one representation whatever their type, so
+                    // a generic function compiles once, like any other.
+                    type_params: _,
                 } => {
                     let slot = self.define_global(name.clone());
                     fns.push((slot, name, name_span, params, body, rtype));

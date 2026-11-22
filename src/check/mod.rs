@@ -10,8 +10,13 @@
 //!
 //! What we leave out of Hindley–Milner is *generalization* (let-polymorphism):
 //! a closure such as `let id = fn(x) { x };` gets one type, decided by its
-//! uses, rather than a polymorphic type usable at many. Generic functions,
-//! when Aja gets them, will be declared explicitly in signatures.
+//! uses, rather than a polymorphic type usable at many. Generic functions are
+//! declared explicitly instead: `fn id<T>(x: T) -> T`. Inside its body, `T`
+//! is a [`Ty::Param`], a type that is equal only to itself, so the body must
+//! work for every `T`. Each use of the function elsewhere gets its own fresh
+//! type variable for `T`, which the arguments (or the expected result) solve.
+//! Generic structs and enums work the same way: `Option::Some(1)` makes an
+//! `Option<?a>` and solves `?a` to `int`.
 //!
 //! Some operators work on more than one type (`+` on `int`, `float`, or
 //! `str`, `==` on any of `int`, `float`, `bool`, `str`). A type variable can carry such a
@@ -47,8 +52,11 @@ pub enum Ty {
     Str,
     Void,
     Fn(Vec<Ty>, Box<Ty>),
-    /// A struct or enum, by name.
-    Named(Id),
+    /// A struct or enum, by name, with its type arguments.
+    Named(Id, Vec<Ty>),
+    /// A type parameter, inside the generic definition that declares it.
+    /// It stands for any type, so it is equal only to itself.
+    Param(Id),
     /// An inference variable, indexing [`Checker::vars`].
     Var(usize),
     /// The type of something that never produces a value, such as a block
@@ -206,6 +214,9 @@ enum BindingKind {
 struct Binding {
     ty: Ty,
     kind: BindingKind,
+    /// The type parameters of a generic function, which appear in `ty` as
+    /// [`Ty::Param`]s and are replaced by fresh variables at each use.
+    generics: Vec<Id>,
 }
 
 /// The function whose body is being checked.
@@ -255,6 +266,8 @@ pub struct Checker {
     fields: HashMap<SpanKey, u16>,
     structs: HashMap<Id, StructInfo>,
     enums: HashMap<Id, EnumInfo>,
+    /// The type parameters in scope: those of the definition being checked.
+    type_params: Vec<Id>,
 }
 
 impl Checker {
@@ -272,12 +285,14 @@ impl Checker {
             fields: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
+            type_params: Vec::new(),
         };
         for builtin in BUILTINS {
             let binding = match &builtin.params {
                 Params::Variadic => Binding {
                     ty: Ty::Error,
                     kind: BindingKind::Variadic,
+                    generics: Vec::new(),
                 },
                 Params::Fixed(params) => {
                     let names = params.iter().map(|(n, _)| Id::from(*n)).collect();
@@ -287,6 +302,7 @@ impl Checker {
                     Binding {
                         ty,
                         kind: BindingKind::Function,
+                        generics: Vec::new(),
                     }
                 }
             };
@@ -308,7 +324,7 @@ impl Checker {
                         Ty::Float => OperandType::Float,
                         Ty::Bool => OperandType::Bool,
                         Ty::Str => OperandType::Str,
-                        Ty::Named(_) => OperandType::Data,
+                        Ty::Named(..) => OperandType::Data,
                         // `never` operands are in code that can't run, and
                         // anything still unknown has been reported.
                         _ => OperandType::Int,
@@ -339,6 +355,7 @@ impl Checker {
             let Definition::Function {
                 name,
                 name_span,
+                type_params,
                 params,
                 rtype,
                 ..
@@ -346,6 +363,8 @@ impl Checker {
             else {
                 continue;
             };
+            let generics = self.declare_type_params(type_params);
+            self.type_params = generics.clone();
             let param_tys: Vec<Ty> = params
                 .iter()
                 .map(|p| match &p.t {
@@ -354,7 +373,10 @@ impl Checker {
                 })
                 .collect();
             let ret = rtype.as_ref().map_or(Ty::Void, |t| self.from_ast(t));
-            sigs.push((param_tys.clone(), ret.clone()));
+            self.type_params.clear();
+            let sig = Ty::Fn(param_tys.clone(), Box::new(ret.clone()));
+            self.require_used(type_params, &[&sig], &format!("function '{name}'"));
+            sigs.push((param_tys.clone(), ret.clone(), generics.clone()));
 
             match self.scopes[0].get(name) {
                 Some(_) if self.user_fns.contains(name) => {
@@ -376,8 +398,9 @@ impl Checker {
                     self.scopes[0].insert(
                         name.clone(),
                         Binding {
-                            ty: Ty::Fn(param_tys, Box::new(ret)),
+                            ty: sig,
                             kind: BindingKind::Function,
+                            generics,
                         },
                     );
                     self.param_names.insert(
@@ -396,10 +419,11 @@ impl Checker {
                 params,
                 body,
                 rtype,
+                ..
             } => Some((name, name_span, params, body, rtype)),
             _ => None,
         });
-        for ((name, name_span, params, body, rtype), (param_tys, ret)) in fns.clone().zip(&sigs) {
+        for ((name, name_span, params, body, rtype), (param_tys, ret, generics)) in fns.clone().zip(&sigs) {
             let ret = ret.clone();
             let ctx = FnContext {
                 name: Some(name.clone()),
@@ -407,13 +431,16 @@ impl Checker {
                 ret_declared: rtype.is_some(),
                 span: *name_span,
             };
+            // Annotations inside the body can name the type parameters.
+            self.type_params = generics.clone();
             self.function(ctx, params, param_tys, body);
+            self.type_params.clear();
             self.report_unresolved();
         }
 
         // Signatures must be written out. Report missing parameter types last,
         // so the suggested annotation can use what the bodies revealed.
-        for ((name, _, params, _, _), (param_tys, _)) in fns.zip(&sigs) {
+        for ((name, _, params, _, _), (param_tys, _, _)) in fns.zip(&sigs) {
             for (p, t) in params.iter().zip(param_tys) {
                 if p.t.is_some() {
                     continue;
@@ -501,6 +528,7 @@ impl Checker {
             ),
         };
         let err = Self::with_conversion_note(err, &e, &f);
+        let err = self.with_param_note(err, &expected, found);
         self.error(err);
         self.poison(&[&expected, found]);
     }
@@ -529,7 +557,7 @@ impl Checker {
                     p.name, p.name
                 )
             } else {
-                format!("add a type, for example `{}: int`", p.name)
+                format!("add a type, for example `{}: {}`", p.name, self.show_example(&t))
             });
             if !matches!(t, Ty::Var(_)) {
                 err = err.note(format!("its type is only partly known: {}", self.show(&t)));
@@ -709,7 +737,11 @@ impl Checker {
                     );
                     Ty::Error
                 }
-                Some(b) => b.ty.clone(),
+                Some(b) if b.generics.is_empty() => b.ty.clone(),
+                Some(b) => {
+                    let b = b.clone();
+                    self.instantiate(&b.generics, &b.ty)
+                }
                 None => {
                     self.undefined(name, span);
                     Ty::Error
@@ -721,6 +753,7 @@ impl Checker {
                     Some(Binding {
                         ty,
                         kind: BindingKind::Var,
+                        ..
                     }) => {
                         self.expect(&ty, &found, value.span, |e, f| {
                             format!("mismatched types: cannot assign {f} to '{name}', which has type {e}")
@@ -730,6 +763,7 @@ impl Checker {
                     Some(Binding {
                         ty,
                         kind: kind @ (BindingKind::Let | BindingKind::Param | BindingKind::Pattern),
+                        ..
                     }) => {
                         let (why, help) = match kind {
                             BindingKind::Let => (
@@ -835,7 +869,16 @@ impl Checker {
         if !ok {
             let mut err = TypeError::new(format!("cannot apply '{op}' to {s1} and {s2}"), span);
             err = Self::with_conversion_note(err, &s1, &s2);
-            if s1 == s2 && class == Class::Eq {
+            let param = [&t1, &t2].into_iter().find_map(|t| match self.zonk(t) {
+                Ty::Param(p) => Some(p),
+                _ => None,
+            });
+            if let Some(p) = param {
+                err = err.note(format!(
+                    "'{p}' is a type parameter, which could be any type, so its values \
+                     can't be compared or used with operators"
+                ));
+            } else if s1 == s2 && class == Class::Eq {
                 err = err.note(
                     "only int, float, bool, and str values, and structs and enums made of them, \
                      can be compared with '==' and '!='",
@@ -976,7 +1019,7 @@ impl Checker {
         self.scopes
             .last_mut()
             .unwrap()
-            .insert(name, Binding { ty, kind });
+            .insert(name, Binding { ty, kind, generics: Vec::new() });
     }
 
     fn lookup(&self, name: &Id) -> Option<&Binding> {
@@ -1009,6 +1052,7 @@ impl Checker {
                 params.iter().map(|p| self.zonk(p)).collect(),
                 Box::new(self.zonk(&ret)),
             ),
+            Ty::Named(name, args) => Ty::Named(name, args.iter().map(|a| self.zonk(a)).collect()),
             t => t,
         }
     }
@@ -1021,7 +1065,56 @@ impl Checker {
                 .chain(std::iter::once(&**ret))
                 .flat_map(Self::free_vars)
                 .collect(),
+            Ty::Named(_, args) => args.iter().flat_map(Self::free_vars).collect(),
             _ => vec![],
+        }
+    }
+
+    /// `t` with each type parameter in `map` replaced by its type.
+    fn subst(t: &Ty, map: &HashMap<Id, Ty>) -> Ty {
+        match t {
+            Ty::Param(p) => map.get(p).cloned().unwrap_or_else(|| t.clone()),
+            Ty::Fn(params, ret) => Ty::Fn(
+                params.iter().map(|p| Self::subst(p, map)).collect(),
+                Box::new(Self::subst(ret, map)),
+            ),
+            Ty::Named(name, args) => Ty::Named(name.clone(), args.iter().map(|a| Self::subst(a, map)).collect()),
+            t => t.clone(),
+        }
+    }
+
+    /// A fresh type variable for each of the type parameters `params`.
+    fn fresh_args(&mut self, params: &[Id]) -> (Vec<Ty>, HashMap<Id, Ty>) {
+        let args: Vec<Ty> = params.iter().map(|_| self.fresh(Class::Any)).collect();
+        let map = params.iter().cloned().zip(args.iter().cloned()).collect();
+        (args, map)
+    }
+
+    /// The type `t` of a generic function, with its type parameters
+    /// `generics` replaced by fresh variables for one use of it.
+    fn instantiate(&mut self, generics: &[Id], t: &Ty) -> Ty {
+        let (_, map) = self.fresh_args(generics);
+        Self::subst(t, &map)
+    }
+
+    /// The type parameters a type mentions.
+    fn params_in(t: &Ty, out: &mut HashSet<Id>) {
+        match t {
+            Ty::Param(p) => {
+                out.insert(p.clone());
+            }
+            Ty::Fn(params, ret) => {
+                for p in params {
+                    Self::params_in(p, out);
+                }
+                Self::params_in(ret, out);
+            }
+            Ty::Named(_, args) => {
+                for a in args {
+                    Self::params_in(a, out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1039,6 +1132,9 @@ impl Checker {
                 p1.len() == p2.len()
                     && p1.iter().zip(p2).all(|(x, y)| self.unify(x, y))
                     && self.unify(r1, r2)
+            }
+            (Ty::Named(n1, a1), Ty::Named(n2, a2)) => {
+                n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| self.unify(x, y))
             }
             _ => a == b,
         }
@@ -1071,10 +1167,15 @@ impl Checker {
         }
     }
 
-    /// Whether the concrete type `t` belongs to `class`.
-    fn admits(&self, class: Class, t: &Ty) -> bool {
+    /// Whether the concrete type `t` belongs to `class`. A struct or enum
+    /// supports `==` if its definition allows it and its type arguments do,
+    /// so this may restrict variables among the arguments.
+    fn admits(&mut self, class: Class, t: &Ty) -> bool {
         match (class, t) {
-            (Class::Eq, Ty::Named(n)) => self.comparable(n, &mut HashSet::new()),
+            (Class::Eq, Ty::Named(n, args)) => {
+                self.comparable(n, &mut HashSet::new())
+                    && args.clone().iter().all(|a| self.constrain(a, Class::Eq))
+            }
             _ => class.admits(t),
         }
     }
@@ -1094,6 +1195,7 @@ impl Checker {
             return true;
         }
         let mut err = Self::with_conversion_note(TypeError::new(message(&e, &f), span), &e, &f);
+        err = self.with_param_note(err, expected, found);
         if self.infinite {
             err = err.note("this would need an infinite type, such as a function that takes itself as an argument");
         }
@@ -1109,6 +1211,23 @@ impl Checker {
             for v in Self::free_vars(&self.zonk(t)) {
                 self.vars[v].0 = Some(Ty::Error);
             }
+        }
+    }
+
+    /// Explain a mismatch involving a type parameter, which only matches itself.
+    fn with_param_note(&self, err: TypeError, a: &Ty, b: &Ty) -> TypeError {
+        match (self.zonk(a), self.zonk(b)) {
+            (Ty::Param(p), Ty::Param(q)) if p != q => err.note(format!(
+                "'{p}' and '{q}' are different type parameters, so they may be different types"
+            )),
+            (Ty::Param(p), other) | (other, Ty::Param(p)) if !matches!(other, Ty::Param(_) | Ty::Var(_)) => {
+                err.note(format!(
+                    "'{p}' is a type parameter: it stands for whatever type the caller chooses, \
+                     which might not be {}",
+                    self.show(&other)
+                ))
+            }
+            _ => err,
         }
     }
 
@@ -1136,9 +1255,7 @@ impl Checker {
                 param_types.iter().map(|t| self.from_ast(t)).collect(),
                 Box::new(self.from_ast(ret_type)),
             ),
-            Type::Named(name, span) => self.named_type(name, *span),
-            // Not reachable from the parser yet.
-            Type::List(_) => Ty::Error,
+            Type::Named(name, args, span) => self.named_type(name, args, *span),
         }
     }
 
@@ -1154,7 +1271,12 @@ impl Checker {
             Ty::Void => "void".into(),
             Ty::Never => "never".into(),
             Ty::Error => "{unknown}".into(),
-            Ty::Named(name) => name.to_string(),
+            Ty::Named(name, args) if args.is_empty() => name.to_string(),
+            Ty::Named(name, args) => {
+                let args: Vec<String> = args.iter().map(|a| self.show(a)).collect();
+                format!("{name}<{}>", args.join(", "))
+            }
+            Ty::Param(name) => name.to_string(),
             Ty::Var(v) => match self.vars[v].1 {
                 Class::Num => "{number}".into(),
                 Class::Add => "{number or str}".into(),
@@ -1165,6 +1287,25 @@ impl Checker {
                 format!("({}) -> {}", params.join(", "), self.show(&ret))
             }
         }
+    }
+
+    /// A complete type to suggest as an annotation for `t`, with `int` for
+    /// its unknown parts: `Option<int>` for `Option<_>`.
+    fn show_example(&self, t: &Ty) -> String {
+        let mut t = self.zonk(t);
+        fn fill(t: &mut Ty) {
+            match t {
+                Ty::Var(_) | Ty::Error => *t = Ty::Int,
+                Ty::Fn(params, ret) => {
+                    params.iter_mut().for_each(fill);
+                    fill(ret);
+                }
+                Ty::Named(_, args) => args.iter_mut().for_each(fill),
+                _ => {}
+            }
+        }
+        fill(&mut t);
+        self.show(&t)
     }
 
     /// The span of a block's final expression, if it has one.

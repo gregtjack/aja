@@ -131,7 +131,50 @@ fn area(s: Shape) -> int {
 
 The checker for these lives in `src/check/data.rs`. In the VM, struct and
 enum values are immutable heap objects: a tag, and the values they hold.
-`Option` and `Result` need generics, which come next.
+
+### Generics
+
+Functions, structs, and enums can take type parameters, written in angle
+brackets after the name:
+
+```rust
+enum Option<T> { Some(T), None }
+struct Pair<A, B> { first: A, second: B }
+
+fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> {
+    Pair { first: p.second, second: p.first }
+}
+
+fn unwrap_or<T>(o: Option<T>, default: T) -> T {
+    match o {
+        Option::Some(x) => x,
+        Option::None => default,
+    }
+}
+```
+
+- **Type arguments are inferred where code is used.** `Option::Some(1)` is an
+  `Option<int>`, `swap(Pair { first: 1, second: "a" })` is a
+  `Pair<str, int>`, and each use of a generic function gets its own types,
+  even when it's passed around as a value. When nothing decides one, as in
+  `let x = Option::None;` with `x` never used, the checker asks for an
+  annotation (`x: Option<int>`). There is no syntax for writing type
+  arguments at a call; an annotation does the same job.
+- **Types written out always give their arguments:** `Option<int>`, never
+  plain `Option`.
+- **A generic body works for every type.** Inside `fn f<T>`, `T` is equal
+  only to itself, so the body can pass values of type `T` around but can't
+  add them, compare them, or read their fields. (Traits will let a signature
+  ask for those abilities.) A type parameter must be used in its function's
+  signature, or in its type's fields, since that's the only way to know what
+  it is.
+- **`==` on a generic type** works when its contents can be compared:
+  `Option<int>` can, `Option<(int) -> int>` can't.
+- Generic code compiles once: every value has the same representation in the
+  VM whatever its type, so nothing is copied per type.
+
+`Option` and `Result` aren't built in yet; for now, define them as above.
+They'll come with the prelude (see [DESIGN.md](DESIGN.md)).
 
 ### Type checking
 
@@ -157,8 +200,9 @@ is no `any` type: every value has one static type.
   ```
 
 - **One type per binding.** A closure has a single type, fixed by its uses,
-  so `let id = fn(x) { x }; id(1); id(true);` is an error. (Generic
-  functions, when they arrive, will be declared in signatures.)
+  so `let id = fn(x) { x }; id(1); id(true);` is an error. A function
+  that works at many types is declared generic in its signature instead:
+  `fn id<T>(x: T) -> T { x }` (see [Generics](#generics)).
 - If a type can't be worked out (e.g. a closure parameter that's never
   used), the checker asks for an annotation rather than guessing.
 
@@ -291,13 +335,12 @@ the VM forgets to keep reachable is caught.
 **Working:** ints, floats, bools, strings; immutable `let` and mutable
 `var` with lexical scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
-structs, enums with data, and exhaustive `match`;
+structs, enums with data, and exhaustive `match`; generic functions, structs, and enums;
 static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 
 **Reserved or partially present, not yet usable:**
 - `<-`, `[` `]` are lexed but have no grammar.
-- A `List<T>` type exists in the AST only; generics aren't implemented yet.
 - There is no native code backend yet; one using Cranelift is planned (see
   [DESIGN.md](DESIGN.md)).
 

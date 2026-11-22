@@ -560,3 +560,206 @@ fn plus_concatenates_strings() {
     assert_eq!(error("fn main() { \"a\" - \"b\"; }").0, "cannot apply '-' to str and str");
     assert_eq!(error("fn main() { \"a\" < \"b\"; }").0, "cannot apply '<' to str and str");
 }
+
+// ---- Generics ------------------------------------------------------------------
+
+const GENERIC_TYPES: &str = "
+enum Option<T> { Some(T), None }
+struct Pair<A, B> { first: A, second: B }
+enum List<T> { Nil, Cons(T, List<T>) }
+";
+
+fn generic(src: &str) -> String {
+    format!("{GENERIC_TYPES}{src}")
+}
+
+#[track_caller]
+fn generic_ok(src: &str) {
+    ok(&generic(src));
+}
+
+/// The single error, as for [`error`]; the types are on lines 2 to 4, so
+/// `src` starts on line 5.
+#[track_caller]
+fn generic_error(src: &str) -> (String, String) {
+    error(&generic(src))
+}
+
+#[track_caller]
+fn generic_note(src: &str) -> String {
+    let errors = check(&generic(src)).unwrap_err();
+    assert_eq!(errors.len(), 1, "expected one error, got {errors:#?}");
+    errors[0].notes.join("\n")
+}
+
+#[test]
+fn generic_functions_work_at_every_type() {
+    ok("fn id<T>(x: T) -> T { x }
+        fn main() { let a: int = id(1); let b: str = id(\"s\"); let c: bool = id(true); }");
+    // Each use of a generic function gets its own type, even as a value.
+    ok("fn id<T>(x: T) -> T { x }
+        fn main() { let f = id; let g = id; f(1); g(\"s\"); }");
+    // Type parameters can be used in annotations inside the body.
+    ok("fn keep<T>(x: T) -> T { let y: T = x; y }
+        fn main() { }");
+    // Generic functions can call themselves and each other.
+    ok("fn pass<T>(x: T, n: int) -> T { if n == 0 { x } else { pass(x, n - 1) } }
+        fn both<A, B>(a: A, b: B) -> A { pass(b, 1); pass(a, 2) }
+        fn main() -> int { both(1, \"b\") }");
+    // Higher-order generic functions infer closure parameter types.
+    ok("fn apply<T, U>(x: T, f: (T) -> U) -> U { f(x) }
+        fn main() -> str { apply(2, fn(n) { if n > 1 { \"big\" } else { \"small\" } }) }");
+}
+
+#[test]
+fn generic_types_check() {
+    generic_ok("fn main() {
+                    let a: Option<int> = Option::Some(1);
+                    let b: Option<str> = Option::None;
+                    let p = Pair { first: 1, second: \"one\" };
+                    let n: int = p.first;
+                    let s: str = p.second;
+                    let xs: List<int> = List::Cons(1, List::Cons(2, List::Nil));
+                }");
+    generic_ok("fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> { Pair { first: p.second, second: p.first } }
+                fn main() -> str { swap(Pair { first: 1, second: \"x\" }).first }");
+    generic_ok("fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
+                    match xs {
+                        List::Nil => List::Nil,
+                        List::Cons(x, rest) => List::Cons(f(x), map(rest, f)),
+                    }
+                }
+                fn main() -> List<bool> { map(List::Cons(1, List::Nil), fn(n) { n > 0 }) }");
+    // The expected type decides a type argument nothing else does.
+    generic_ok("fn none<T>() -> Option<T> { Option::None }
+                fn main() { let o: Option<str> = none(); }");
+}
+
+#[test]
+fn type_arguments_must_match() {
+    let (msg, at) = generic_error("fn main() { let a: Option<int> = Option::Some(\"s\"); }");
+    assert_eq!(msg, "mismatched types: 'a' is declared as Option<int> but was given Option<str>");
+    assert_eq!(at, "Option::Some(\"s\")");
+    assert_eq!(
+        generic_error("fn f(o: Option<int>) { } fn main() { f(Option::Some(true)); }").0,
+        "mismatched types: parameter 'o' of function 'f' expects Option<int>, found Option<bool>"
+    );
+    assert_eq!(
+        generic_error("fn main() { let xs = List::Cons(1, List::Cons(\"two\", List::Nil)); }").0,
+        // The outer `Cons` holds an int, so its list must be a `List<int>`.
+        "mismatched types: value 2 of 'List::Cons' is List<int>, found List<str>"
+    );
+    assert_eq!(
+        generic_error("fn main() -> str { let p = Pair { first: 1, second: 2 }; p.first }").0,
+        "mismatched types: function 'main' is declared to return str, but this is int"
+    );
+}
+
+#[test]
+fn type_argument_counts() {
+    let errors = check(&generic("fn f(o: Option) { } fn main() { }")).unwrap_err();
+    assert_eq!(errors[0].message, "type 'Option' takes 1 type argument but 0 were given");
+    assert_eq!(errors[0].help.as_deref(), Some("write `Option<int>`"));
+    assert_eq!(errors[0].notes, vec!["'Option' is declared as `Option<T>`"]);
+    let errors = check(&generic("fn f(p: Pair<str>) { } fn main() { }")).unwrap_err();
+    assert_eq!(errors[0].message, "type 'Pair' takes 2 type arguments but 1 was given");
+    assert_eq!(errors[0].help.as_deref(), Some("write `Pair<str, int>`"));
+    assert_eq!(
+        error("struct P { x: int } fn f(p: P<int>) { } fn main() { }").0,
+        "type 'P' takes no type arguments"
+    );
+    assert_eq!(error("fn f<T>(x: T<int>) { } fn main() { }").0, "type parameter 'T' takes no type arguments");
+}
+
+#[test]
+fn generic_bodies_work_for_every_type() {
+    let (msg, at) = error("fn id<T>(x: T) -> T { 1 } fn main() { }");
+    assert_eq!(msg, "mismatched types: function 'id' is declared to return T, but this is int");
+    assert_eq!(at, "1");
+    assert_eq!(
+        check("fn id<T>(x: T) -> T { 1 } fn main() { }").unwrap_err()[0].notes,
+        vec!["'T' is a type parameter: it stands for whatever type the caller chooses, which might not be int"]
+    );
+    assert_eq!(
+        check("fn pick<A, B>(a: A, b: B) -> A { b } fn main() { }").unwrap_err()[0].notes,
+        vec!["'A' and 'B' are different type parameters, so they may be different types"]
+    );
+    // Nothing is known about a type parameter, so operators don't apply.
+    let errors = check("fn add<T>(a: T, b: T) -> T { a + b } fn main() { }").unwrap_err();
+    assert_eq!(errors[0].message, "cannot apply '+' to T and T");
+    assert!(errors[0].notes[0].contains("'T' is a type parameter"));
+    assert_eq!(
+        error("fn same<T>(a: T, b: T) -> bool { a == b } fn main() { }").0,
+        "cannot apply '==' to T and T"
+    );
+    assert_eq!(error("fn get<T>(x: T) -> int { x.size } fn main() { }").0, "T has no field 'size'");
+}
+
+#[test]
+fn bad_type_parameters() {
+    assert_eq!(
+        error("fn f<T>(x: int) { } fn main() { }").0,
+        "type parameter 'T' of function 'f' is never used"
+    );
+    assert_eq!(
+        error("struct Tag<T> { name: str } fn main() { }").0,
+        "type parameter 'T' of struct 'Tag' is never used"
+    );
+    assert_eq!(
+        error("enum E<T> { A } fn main() { }").0,
+        "type parameter 'T' of enum 'E' is never used"
+    );
+    assert_eq!(error("fn f<T, T>(x: T) { } fn main() { }").0, "type parameter 'T' is declared more than once");
+    // A clash with a type's name is one error, not a cascade.
+    assert_eq!(
+        error("struct P { x: int } fn f<P>(x: P) { } fn main() { }").0,
+        "type parameter 'P' has the same name as a type"
+    );
+    assert_eq!(error("fn f<int>(x: int) { } fn main() { }").0, "'int' is a built-in type, so it can't be a type parameter");
+    // A type parameter belongs to its own definition.
+    assert_eq!(error("fn f<T>(x: T) { } fn g(y: T) { } fn main() { }").0, "cannot find type 'T'");
+}
+
+#[test]
+fn partly_known_types_need_annotations() {
+    let src = generic("fn main() { let x = Option::None; }");
+    let errors = check(&src).unwrap_err();
+    assert_eq!(errors[0].message, "type annotations needed: cannot infer the type of variable 'x'");
+    assert_eq!(errors[0].help.as_deref(), Some("add a type, for example `x: Option<int>`"));
+    assert_eq!(errors[0].notes, vec!["its type is only partly known: Option<_>"]);
+    // Using it is enough.
+    generic_ok("fn main() { let x = Option::None; let y: Option<int> = x; }");
+}
+
+#[test]
+fn generic_equality_depends_on_type_arguments() {
+    generic_ok("fn main() -> bool { Option::Some(1) == Option::None }");
+    generic_ok("fn main() -> bool { Pair { first: \"a\", second: List::Cons(1, List::Nil) } == Pair { first: \"a\", second: List::Nil } }");
+    // Equality on an unknown argument decides what it can be.
+    generic_ok("fn main() -> bool { let n = Option::None; n == Option::Some(1.5) }");
+    let (msg, _) = generic_error("fn main() -> bool { let a = Option::Some(fn() { }); a == a }");
+    assert_eq!(msg, "cannot apply '==' to Option<() -> void> and Option<() -> void>");
+    // A definition that holds a function can't be compared, whatever its arguments.
+    let (msg, _) = error("struct F<T> { f: (T) -> int } fn main() -> bool { let a = F { f: fn(x: int) { x } }; a == a }");
+    assert_eq!(msg, "cannot apply '==' to F<int> and F<int>");
+}
+
+#[test]
+fn generic_matches_are_exhaustive() {
+    generic_ok("fn get<T>(o: Option<T>, d: T) -> T { match o { Option::Some(x) => x, Option::None => d } } fn main() { }");
+    let (msg, at) = generic_error(
+        "fn depth(o: Option<Option<int>>) -> int { match o { Option::Some(Option::Some(_)) => 2, Option::None => 0 } } fn main() { }",
+    );
+    assert_eq!(msg, "non-exhaustive match: `Option::Some(Option::None)` not covered");
+    assert_eq!(at, "o");
+    assert_eq!(
+        generic_note("fn f(o: Option<bool>) -> int { match o { Option::Some(true) => 1, Option::None => 0 } } fn main() { }"),
+        "the value matched on has type Option<bool>"
+    );
+    // Patterns take their types from the value's type arguments.
+    assert_eq!(
+        generic_error("fn f(o: Option<int>) -> int { match o { Option::Some(\"s\") => 1, _ => 0 } } fn main() { }").0,
+        "mismatched types: this pattern matches str, but the value is int"
+    );
+    generic_ok("fn f(p: Pair<int, bool>) -> int { match p { Pair { first, second: true } => first, Pair { .. } => 0 } } fn main() { }");
+}

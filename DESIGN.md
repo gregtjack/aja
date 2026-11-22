@@ -204,7 +204,7 @@ The library grows in layers:
 
 Before most of this can be written, the language needs:
 
-1. **Generics**, for `Option<T>`, `Result<T, E>`, `List<T>`, and `Map<K, V>`.
+1. **Generics** ✅, for `Option<T>`, `Result<T, E>`, `List<T>`, and `Map<K, V>`.
 2. **Methods** (`impl` blocks), so that `s.trim().split(",")` reads left to
    right and editors and agents can discover an API by typing `.`.
 3. **A few traits**: `Eq`, `Hash`, `Ord`, and `Show`, which map keys, sorting,
@@ -224,8 +224,12 @@ by a number with a fractional part.
 2. **Data types.** Structs ✅, enums with data ✅, and exhaustive `match` ✅
    (checked with Maranget's usefulness algorithm, which also rejects
    unreachable arms). Struct and enum values are immutable and compare
-   structurally with `==`. Next: generics, which `Option<T>`, `Result<T, E>`,
-   and `?` need.
+   structurally with `==`. Generics ✅: functions, structs, and enums take
+   type parameters, and type arguments are inferred at each use. A generic
+   body is checked once, with each type parameter as a type equal only to
+   itself, and compiled once, since VM values have one representation
+   whatever their type. Next: `Option<T>` and `Result<T, E>` in the
+   prelude, and `?`.
 3. **Bytecode VM.** ✅ The type-checked AST compiles to typed, register-based
    bytecode, and the tree-walking interpreter is gone. The checker hands the
    compiler operand types rather than a full typed IR; a typed IR can come
@@ -235,7 +239,7 @@ by a number with a fractional part.
    mark-and-sweep collector, which runs when the heap's size in bytes has
    doubled. String literals are allocated once and kept as roots; strings
    built at runtime (with `+`) are collected. Nothing is reference-counted.
-5. **Language features for libraries.** Generics, methods, the core traits,
+5. **Language features for libraries.** Generics ✅, methods, the core traits,
    and `for` loops (see [The standard library](#the-standard-library)).
 6. **Modules and packages.** `import`, `pub`, the prelude, `aja.toml`, and the
    `aja` tool (see [Modules and packages](#modules-and-packages)).
@@ -261,5 +265,10 @@ by a number with a fractional part.
   start?
 - **Traits and generics.** How far do generics go (no higher-kinded types is a
   likely non-goal), and are traits implemented nominally or structurally?
+  Today a type parameter has no bounds, so generic code can't use `==` or
+  operators on it; bounds (`fn max<T: Ord>`) come with traits.
+- **Explicit type arguments.** Type arguments are always inferred, and an
+  annotation fixes one inference can't. Is a call-site syntax
+  (`none::<int>()`) ever needed, and does it fit "one way to do it"?
 - **Strings.** UTF-8 everywhere, and is indexing by byte, by code point, or not
   allowed at all?

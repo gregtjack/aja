@@ -1,9 +1,11 @@
 //! Checking structs, enums, and `match`.
 //!
-//! Structs and enums are nominal: a type is its name, and two types are the
-//! same only if they have the same name. Their definitions are collected
-//! before any function is checked, so types can refer to each other (and to
-//! themselves) in any order.
+//! Structs and enums are nominal: a type is its name and its type arguments,
+//! and two types are the same only if both match (`Option<int>` is not
+//! `Option<str>`). Their definitions are collected before any function is
+//! checked, so types can refer to each other (and to themselves) in any order.
+//! A generic definition's fields are stored in terms of its type parameters
+//! ([`Ty::Param`]), which each use substitutes with that use's arguments.
 //!
 //! A `match` must be exhaustive, and every arm must be reachable. Both are
 //! decided with the "usefulness" algorithm from Maranget's *Warnings for
@@ -20,20 +22,26 @@ use ecow::EcoString;
 
 use super::{key, plural, BindingKind, Checker, Class, Ty, TypeError};
 use crate::{
-    ast::{types::Type, Arm, Definition, Expr, FieldInit, Id, Pattern, PatternKind, Program, Span, Statement},
+    ast::{
+        types::Type, Arm, Definition, Expr, FieldInit, Id, Pattern, PatternKind, Program, Span, Statement,
+        TypeParam,
+    },
     diagnostic::closest_match,
 };
 
-/// A struct definition, with its fields in declaration order.
+/// A struct definition: its type parameters, and its fields in declaration
+/// order, whose types may mention the parameters.
 #[derive(Debug, Clone)]
 pub(super) struct StructInfo {
+    pub params: Vec<Id>,
     pub fields: Vec<(Id, Ty)>,
 }
 
-/// An enum definition, with its variants in declaration order and the types
-/// of the values each holds.
+/// An enum definition: its type parameters, and its variants in declaration
+/// order with the types of the values each holds.
 #[derive(Debug, Clone)]
 pub(super) struct EnumInfo {
+    pub params: Vec<Id>,
     pub variants: Vec<(Id, Vec<Ty>)>,
 }
 
@@ -72,9 +80,9 @@ impl Checker {
     pub(super) fn declare_types(&mut self, program: &Program) {
         let mut accepted = Vec::new();
         for def in &program.definitions {
-            let (name, span, is_struct) = match def {
-                Definition::Struct { name, name_span, .. } => (name, *name_span, true),
-                Definition::Enum { name, name_span, .. } => (name, *name_span, false),
+            let (name, span, type_params, is_struct) = match def {
+                Definition::Struct { name, name_span, type_params, .. } => (name, *name_span, type_params, true),
+                Definition::Enum { name, name_span, type_params, .. } => (name, *name_span, type_params, false),
                 Definition::Function { .. } => continue,
             };
             if Type::try_from(name.to_string()).is_ok() {
@@ -91,15 +99,22 @@ impl Checker {
                 );
                 continue;
             }
+            // The parameters are checked below, once every type name is
+            // known; their number is needed now, to check uses of the type.
+            let params: Vec<Id> = type_params.iter().map(|p| p.name.clone()).collect();
             if is_struct {
-                self.structs.insert(name.clone(), StructInfo { fields: Vec::new() });
+                self.structs.insert(name.clone(), StructInfo { params, fields: Vec::new() });
             } else {
-                self.enums.insert(name.clone(), EnumInfo { variants: Vec::new() });
+                self.enums.insert(name.clone(), EnumInfo { params, variants: Vec::new() });
             }
             accepted.push(def);
         }
 
         for def in accepted {
+            let (Definition::Struct { type_params, .. } | Definition::Enum { type_params, .. }) = def else {
+                unreachable!()
+            };
+            self.type_params = self.declare_type_params(type_params);
             match def {
                 Definition::Struct { name, fields, .. } => {
                     let mut seen = HashSet::new();
@@ -115,6 +130,8 @@ impl Checker {
                         }
                         tys.push((f.name.clone(), t));
                     }
+                    let used: Vec<&Ty> = tys.iter().map(|(_, t)| t).collect();
+                    self.require_used(type_params, &used, &format!("struct '{name}'"));
                     self.structs.get_mut(name).unwrap().fields = tys;
                 }
                 Definition::Enum { name, variants, .. } => {
@@ -131,23 +148,127 @@ impl Checker {
                         }
                         vs.push((v.name.clone(), tys));
                     }
+                    let used: Vec<&Ty> = vs.iter().flat_map(|(_, ts)| ts).collect();
+                    self.require_used(type_params, &used, &format!("enum '{name}'"));
                     self.enums.get_mut(name).unwrap().variants = vs;
                 }
                 Definition::Function { .. } => unreachable!(),
             }
+            self.type_params.clear();
         }
     }
 
-    /// The type a struct or enum name refers to, reporting it if unknown.
-    pub(super) fn named_type(&mut self, name: &Id, span: Span) -> Ty {
-        if self.structs.contains_key(name) || self.enums.contains_key(name) {
-            return Ty::Named(name.clone());
+    /// Check a definition's type parameters, returning their names. A
+    /// parameter can't share its name with another parameter or a type.
+    pub(super) fn declare_type_params(&mut self, params: &[TypeParam]) -> Vec<Id> {
+        let mut names: Vec<Id> = Vec::new();
+        for p in params {
+            let err = if names.contains(&p.name) {
+                Some(TypeError::new(format!("type parameter '{}' is declared more than once", p.name), p.span))
+            } else if Type::try_from(p.name.to_string()).is_ok() {
+                Some(
+                    TypeError::new(format!("'{}' is a built-in type, so it can't be a type parameter", p.name), p.span)
+                        .help("type parameters are usually single capital letters, e.g. `T`"),
+                )
+            } else if self.structs.contains_key(&p.name) || self.enums.contains_key(&p.name) {
+                Some(
+                    TypeError::new(
+                        format!("type parameter '{}' has the same name as a type", p.name),
+                        p.span,
+                    )
+                    .help("choose a different name, e.g. `T`"),
+                )
+            } else {
+                None
+            };
+            let clashes_with_type = self.structs.contains_key(&p.name) || self.enums.contains_key(&p.name);
+            match err {
+                // Keep a parameter that only clashes with a type's name, so
+                // its uses refer to it and don't cause more errors.
+                Some(err) if clashes_with_type && !names.contains(&p.name) => {
+                    self.error(err);
+                    names.push(p.name.clone());
+                }
+                Some(err) => self.error(err),
+                None => names.push(p.name.clone()),
+            }
+        }
+        names
+    }
+
+    /// Every type parameter must appear in `tys` (a function's signature, or
+    /// a type's fields), since that is the only way to know what it is.
+    pub(super) fn require_used(&mut self, params: &[TypeParam], tys: &[&Ty], owner: &str) {
+        let mut used = HashSet::new();
+        for t in tys {
+            Self::params_in(t, &mut used);
+        }
+        for p in params {
+            // A built-in type's name isn't a parameter, and has been reported.
+            if !used.contains(&p.name) && Type::try_from(p.name.to_string()).is_err() {
+                let where_ = if owner.starts_with("function") { "its signature" } else { "its definition" };
+                self.error(
+                    TypeError::new(format!("type parameter '{}' of {owner} is never used", p.name), p.span)
+                        .help(format!("remove it, or use it in {where_}")),
+                );
+            }
+        }
+    }
+
+    /// The type a name, with type arguments, refers to: a type parameter in
+    /// scope, or a struct or enum. Reports it if unknown or if the number of
+    /// arguments is wrong.
+    pub(super) fn named_type(&mut self, name: &Id, args: &[Type], span: Span) -> Ty {
+        if self.type_params.contains(name) {
+            if !args.is_empty() {
+                self.error(
+                    TypeError::new(format!("type parameter '{name}' takes no type arguments"), span)
+                        .help(format!("write `{name}`")),
+                );
+            }
+            return Ty::Param(name.clone());
+        }
+        let params = match (self.structs.get(name), self.enums.get(name)) {
+            (Some(s), _) => Some(s.params.clone()),
+            (_, Some(e)) => Some(e.params.clone()),
+            _ => None,
+        };
+        if let Some(params) = params {
+            let args: Vec<Ty> = args.iter().map(|a| self.from_ast(a)).collect();
+            if args.len() == params.len() {
+                return Ty::Named(name.clone(), args);
+            }
+            let example = if params.is_empty() {
+                name.to_string()
+            } else {
+                let shown: Vec<String> = (0..params.len())
+                    .map(|i| args.get(i).map_or("int".to_string(), |a| self.show(a)))
+                    .collect();
+                format!("{name}<{}>", shown.join(", "))
+            };
+            let message = if params.is_empty() {
+                format!("type '{name}' takes no type arguments")
+            } else {
+                format!(
+                    "type '{name}' takes {} but {} {} given",
+                    plural(params.len(), "type argument"),
+                    args.len(),
+                    if args.len() == 1 { "was" } else { "were" },
+                )
+            };
+            let mut err = TypeError::new(message, span).help(format!("write `{example}`"));
+            if !params.is_empty() {
+                err = err.note(format!("'{name}' is declared as `{name}<{}>`", params.join(", ")));
+            }
+            self.error(err);
+            return Ty::Error;
         }
         let builtin = ["int", "float", "bool", "str", "void"];
         let names: Vec<&str> = self
             .structs
             .keys()
             .chain(self.enums.keys())
+            .chain(self.type_params.iter())
             .map(|n| n.as_str())
             .chain(builtin)
             .collect();
@@ -159,8 +280,8 @@ impl Checker {
         Ty::Error
     }
 
-    /// Whether values of the struct or enum `name` can be compared with `==`:
-    /// everything they hold can be.
+    /// Whether values of the struct or enum `name` can be compared with `==`,
+    /// provided its type arguments can be: everything else it holds can be.
     pub(super) fn comparable(&self, name: &Id, visiting: &mut HashSet<Id>) -> bool {
         if !visiting.insert(name.clone()) {
             return true; // A recursive type is comparable if the rest of it is.
@@ -170,10 +291,19 @@ impl Checker {
             (_, Some(e)) => e.variants.iter().flat_map(|(_, ts)| ts).collect(),
             _ => return true,
         };
-        tys.into_iter().all(|t| match t {
-            Ty::Named(n) => self.comparable(n, visiting),
+        tys.into_iter().all(|t| self.comparable_field(t, visiting))
+    }
+
+    /// Whether a field of type `t` (in a definition) can be compared.
+    fn comparable_field(&self, t: &Ty, visiting: &mut HashSet<Id>) -> bool {
+        match t {
+            Ty::Named(n, args) => {
+                self.comparable(n, visiting) && args.iter().all(|a| self.comparable_field(a, visiting))
+            }
+            // Checked against the type argument wherever the type is used.
+            Ty::Param(_) => true,
             t => Class::Eq.admits(t),
-        })
+        }
     }
 
     /// A help message for using the type name `name` as a variable, if it is one.
@@ -194,11 +324,12 @@ impl Checker {
     pub(super) fn field(&mut self, obj: &Expr, name: &Id, name_span: Span, span: Span) -> Ty {
         let t = self.expr(obj);
         match self.resolve(&t) {
-            Ty::Named(n) if self.structs.contains_key(&n) => {
-                let fields = &self.structs[&n].fields;
-                match fields.iter().position(|(f, _)| f == name) {
+            Ty::Named(n, args) if self.structs.contains_key(&n) => {
+                let info = &self.structs[&n];
+                match info.fields.iter().position(|(f, _)| f == name) {
                     Some(i) => {
-                        let t = fields[i].1.clone();
+                        let map = info.params.iter().cloned().zip(args).collect();
+                        let t = Self::subst(&info.fields[i].1, &map);
                         self.fields.insert(key(span), i as u16);
                         t
                     }
@@ -209,7 +340,7 @@ impl Checker {
                     }
                 }
             }
-            Ty::Named(n) => {
+            Ty::Named(n, _) => {
                 self.error(
                     TypeError::new(format!("'{n}' is an enum, so it has no fields"), name_span)
                         .help("use `match` to get at the values its variants hold"),
@@ -266,6 +397,7 @@ impl Checker {
             return Ty::Error;
         };
 
+        let (args, map) = self.fresh_args(&info.params);
         let mut seen = HashSet::new();
         for f in fields {
             let found = self.expr(&f.value);
@@ -278,14 +410,15 @@ impl Checker {
                     self.error(TypeError::new(format!("field '{}' is given more than once", f.name), f.span));
                 }
                 Some(i) => {
-                    self.expect(&info.fields[i].1, &found, f.value.span, |e, fd| {
+                    let expected = Self::subst(&info.fields[i].1, &map);
+                    self.expect(&expected, &found, f.value.span, |e, fd| {
                         format!("mismatched types: field '{}' of '{name}' is {e}, but was given {fd}", f.name)
                     });
                 }
             }
         }
 
-        let this = Ty::Named(name.clone());
+        let this = Ty::Named(name.clone(), args);
         match base {
             Some(b) => {
                 let t = self.expr(b);
@@ -331,9 +464,10 @@ impl Checker {
         self.error(err);
     }
 
-    /// The index and value types of variant `Enum::Variant`, reporting it if
-    /// there is no such variant.
-    fn lookup_variant(&mut self, enum_name: &Id, variant: &Id, span: Span) -> Option<(usize, Vec<Ty>)> {
+    /// The index of variant `Enum::Variant` and the types of the values it
+    /// holds, for a new use of the enum with fresh type arguments, which make
+    /// up the returned type. Reports it if there is no such variant.
+    fn lookup_variant(&mut self, enum_name: &Id, variant: &Id, span: Span) -> Option<(usize, Vec<Ty>, Ty)> {
         let Some(info) = self.enums.get(enum_name) else {
             let err = if self.structs.contains_key(enum_name) {
                 TypeError::new(format!("'{enum_name}' is a struct, not an enum"), span)
@@ -349,7 +483,12 @@ impl Checker {
             return None;
         };
         match info.variants.iter().position(|(v, _)| v == variant) {
-            Some(i) => Some((i, info.variants[i].1.clone())),
+            Some(i) => {
+                let (params, tys) = (info.params.clone(), info.variants[i].1.clone());
+                let (args, map) = self.fresh_args(&params);
+                let tys = tys.iter().map(|t| Self::subst(t, &map)).collect();
+                Some((i, tys, Ty::Named(enum_name.clone(), args)))
+            }
             None => {
                 let names: Vec<&str> = info.variants.iter().map(|(v, _)| v.as_str()).collect();
                 let help = match closest_match(variant, names.iter().copied()) {
@@ -367,7 +506,7 @@ impl Checker {
 
     /// `Enum::Variant`, not called.
     pub(super) fn variant_value(&mut self, enum_name: &Id, variant: &Id, span: Span) -> Ty {
-        let Some((_, tys)) = self.lookup_variant(enum_name, variant, span) else {
+        let Some((_, tys, this)) = self.lookup_variant(enum_name, variant, span) else {
             return Ty::Error;
         };
         if !tys.is_empty() {
@@ -380,18 +519,17 @@ impl Checker {
                 .help(format!("construct it with `{enum_name}::{variant}({blanks})`")),
             );
         }
-        Ty::Named(enum_name.clone())
+        this
     }
 
     /// `Enum::Variant(args)`
     pub(super) fn construct_variant(&mut self, enum_name: &Id, variant: &Id, args: &[Expr], callee: Span, span: Span) -> Ty {
-        let Some((_, tys)) = self.lookup_variant(enum_name, variant, callee) else {
+        let Some((_, tys, this)) = self.lookup_variant(enum_name, variant, callee) else {
             for a in args {
                 self.expr(a);
             }
             return Ty::Error;
         };
-        let this = Ty::Named(enum_name.clone());
         if tys.len() != args.len() || tys.is_empty() {
             let err = if tys.is_empty() {
                 TypeError::new(format!("variant '{enum_name}::{variant}' holds no values, so it can't be called"), span)
@@ -469,7 +607,7 @@ impl Checker {
         match &p.kind {
             PatternKind::Wildcard => Pat::Wild,
             PatternKind::Binding(var) => {
-                if let Ty::Named(n) = self.resolve(expected) {
+                if let Ty::Named(n, _) = self.resolve(expected) {
                     let is_variant = self.enums.get(&n).is_some_and(|e| e.variants.iter().any(|(v, _)| *v == var.name));
                     if is_variant {
                         self.error(
@@ -503,11 +641,11 @@ impl Checker {
                 Pat::Ctor(Ctor::Bool(*b), vec![])
             }
             PatternKind::Variant { enum_name, variant, fields, parens } => {
-                let Some((index, tys)) = self.lookup_variant(enum_name, variant, p.span) else {
+                let Some((index, tys, this)) = self.lookup_variant(enum_name, variant, p.span) else {
                     self.bind_unchecked(fields.iter(), names);
                     return Pat::Wild;
                 };
-                self.pattern_type(&Ty::Named(enum_name.clone()), expected, p.span);
+                self.pattern_type(&this, expected, p.span);
                 if fields.len() != tys.len() {
                     let name = format!("{enum_name}::{variant}");
                     let err = if !parens {
@@ -540,7 +678,8 @@ impl Checker {
                     self.bind_unchecked(fields.iter().map(|(_, _, f)| f), names);
                     return Pat::Wild;
                 };
-                self.pattern_type(&Ty::Named(name.clone()), expected, p.span);
+                let (args, map) = self.fresh_args(&info.params);
+                self.pattern_type(&Ty::Named(name.clone(), args), expected, p.span);
                 let mut subs = vec![Pat::Wild; info.fields.len()];
                 let mut seen = HashSet::new();
                 for (field, span, sub) in fields {
@@ -557,7 +696,8 @@ impl Checker {
                                     *span,
                                 ));
                             }
-                            subs[i] = self.pattern(sub, &info.fields[i].1, names);
+                            let t = Self::subst(&info.fields[i].1, &map);
+                            subs[i] = self.pattern(sub, &t, names);
                         }
                     }
                 }
@@ -722,7 +862,7 @@ impl Checker {
     /// (ints, strings).
     fn ctors(&self, ty: &Ty) -> Option<Vec<Ctor>> {
         match ty {
-            Ty::Named(n) => match self.enums.get(n) {
+            Ty::Named(n, _) => match self.enums.get(n) {
                 Some(e) => Some((0..e.variants.len()).map(Ctor::Variant).collect()),
                 None => Some(vec![Ctor::Struct]),
             },
@@ -733,11 +873,14 @@ impl Checker {
 
     /// The types of the values a constructor of `ty` holds.
     fn ctor_fields(&self, ty: &Ty, c: &Ctor) -> Vec<Ty> {
-        match (ty, c) {
-            (Ty::Named(n), Ctor::Variant(i)) => self.enums[n].variants[*i].1.clone(),
-            (Ty::Named(n), Ctor::Struct) => self.structs[n].fields.iter().map(|(_, t)| t.clone()).collect(),
-            _ => Vec::new(),
-        }
+        let (params, tys): (&[Id], Vec<&Ty>) = match (ty, c) {
+            (Ty::Named(n, _), Ctor::Variant(i)) => (&self.enums[n].params, self.enums[n].variants[*i].1.iter().collect()),
+            (Ty::Named(n, _), Ctor::Struct) => (&self.structs[n].params, self.structs[n].fields.iter().map(|(_, t)| t).collect()),
+            _ => return Vec::new(),
+        };
+        let Ty::Named(_, args) = ty else { unreachable!() };
+        let map = params.iter().cloned().zip(args.iter().map(|a| self.zonk(a))).collect();
+        tys.into_iter().map(|t| Self::subst(t, &map)).collect()
     }
 
     /// A pattern of type `ty`, as it would be written in Aja.
@@ -748,7 +891,7 @@ impl Checker {
         let fields = self.ctor_fields(ty, c);
         let args: Vec<String> = args.iter().zip(&fields).map(|(a, t)| self.show_pat(a, t)).collect();
         match (ty, c) {
-            (Ty::Named(n), Ctor::Variant(i)) => {
+            (Ty::Named(n, _), Ctor::Variant(i)) => {
                 let v = &self.enums[n].variants[*i].0;
                 if args.is_empty() {
                     format!("{n}::{v}")
@@ -756,7 +899,7 @@ impl Checker {
                     format!("{n}::{v}({})", args.join(", "))
                 }
             }
-            (Ty::Named(n), Ctor::Struct) => {
+            (Ty::Named(n, _), Ctor::Struct) => {
                 let names = self.structs[n].fields.iter().map(|(f, _)| f);
                 let shown: Vec<String> = names
                     .zip(&args)

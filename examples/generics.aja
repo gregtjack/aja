@@ -1,0 +1,89 @@
+// Generics: functions, structs, and enums can take type parameters, written
+// in angle brackets. Type arguments are inferred where the code is used, so
+// `Option::Some(1)` is an `Option<int>` without saying so.
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+struct Pair<A, B> { first: A, second: B }
+
+enum List<T> {
+    Nil,
+    Cons(T, List<T>),
+}
+
+// A generic function works for every type its caller chooses. Its body
+// can't assume anything about `T`, so it can only pass values of it around.
+fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> {
+    Pair { first: p.second, second: p.first }
+}
+
+fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
+    match xs {
+        List::Nil => List::Nil,
+        List::Cons(x, rest) => List::Cons(f(x), map(rest, f)),
+    }
+}
+
+fn fold<T, A>(xs: List<T>, acc: A, f: (A, T) -> A) -> A {
+    match xs {
+        List::Nil => acc,
+        List::Cons(x, rest) => fold(rest, f(acc, x), f),
+    }
+}
+
+fn find<T>(xs: List<T>, wanted: (T) -> bool) -> Option<T> {
+    match xs {
+        List::Nil => Option::None,
+        List::Cons(x, _) if wanted(x) => Option::Some(x),
+        List::Cons(_, rest) => find(rest, wanted),
+    }
+}
+
+fn unwrap_or<T>(o: Option<T>, default: T) -> T {
+    match o {
+        Option::Some(x) => x,
+        Option::None => default,
+    }
+}
+
+// Errors are values: a function that can fail says so in its return type.
+fn divide(a: int, b: int) -> Result<int, str> {
+    if b == 0 {
+        return Result::Err("division by zero");
+    }
+    Result::Ok(a / b)
+}
+
+fn describe(r: Result<int, str>) -> str {
+    match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => "failed: " + e,
+    }
+}
+
+fn main() {
+    let p = swap(Pair { first: 1, second: "one" });
+    println(p.first, p.second);
+
+    let xs = List::Cons(1, List::Cons(2, List::Cons(3, List::Cons(4, List::Nil))));
+    let squares = map(xs, fn(x) { x * x });
+    println("sum of squares:", fold(squares, 0, fn(acc, x) { acc + x }));
+    let words = map(xs, fn(x: int) -> str { if x % 2 == 0 { "even" } else { "odd" } });
+    println(fold(words, "", fn(acc, w) { acc + w + " " }));
+
+    println("first square over 5:", unwrap_or(find(squares, fn(x) { x > 5 }), -1));
+    println("first square over 50:", unwrap_or(find(squares, fn(x) { x > 50 }), -1));
+
+    println(describe(divide(7, 2)), describe(divide(7, 0)));
+
+    // Values of generic types compare structurally when their contents can.
+    println(Option::Some(Pair { first: 1, second: "a" }) == Option::Some(Pair { first: 1, second: "a" }));
+}
