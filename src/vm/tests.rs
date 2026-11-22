@@ -232,6 +232,28 @@ fn each_counter_has_its_own_variable() {
 }
 
 #[test]
+fn closures_can_call_themselves() {
+    let src = "fn main() -> int {
+                   let fact = fn(n: int) { if n == 0 { 1 } else { n * fact(n - 1) } };
+                   let base = 100;
+                   let outer = fn() -> int {
+                       let down = fn(k: int) -> int { if k == 0 { base } else { down(k - 1) + 1 } };
+                       down(3)
+                   };
+                   fact(5) + outer()
+               }";
+    assert_eq!(value(src), "Int(223)");
+    // Through its own variable, in tail position, in constant space.
+    let src = "fn main() -> int {
+                   let count = fn(n: int, acc: int) -> int { if n == 0 { acc } else { count(n - 1, acc + 1) } };
+                   count(100000, 0)
+               }";
+    assert_eq!(format!("{:?}", run_limited(src, 4096).unwrap()), "Int(100000)");
+    // A value that isn't a closure still sees the earlier variable.
+    assert_eq!(value("fn main() -> int { let a = 1; let a = a + 1; a }"), "Int(2)");
+}
+
+#[test]
 fn closures_capture_through_several_levels() {
     let src = "fn main() -> int {
                    var x = 1;
@@ -392,6 +414,9 @@ fn repl_inputs_share_globals() {
     assert_eq!(eval("let x = \"s\""), "Void");
     assert_eq!(eval("add(1)"), "Int(6)");
     assert_eq!(eval("x"), "Str(\"s\")");
+    // A top-level closure can call itself.
+    assert_eq!(eval("let f = fn(n: int) -> int { if n == 0 { 0 } else { 2 + f(n - 1) } }"), "Void");
+    assert_eq!(eval("f(4)"), "Int(8)");
 }
 
 /// How many heap objects are left once `src` has run and the collector has
@@ -407,8 +432,7 @@ fn live_after(src: &str) -> usize {
 fn cycles_through_closures_are_freed() {
     // `f` captures the cell it is stored in: a cycle.
     let recursive = "fn make() -> int {
-                         var f = fn(n: int) -> int { n };
-                         f = fn(n: int) -> int { if n == 0 { 0 } else { f(n - 1) } };
+                         let f = fn(n: int) -> int { if n == 0 { 0 } else { f(n - 1) } };
                          f(3)
                      }
                      fn main() { var i = 0; while i < 200 { make(); i = i + 1; } }";

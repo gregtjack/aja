@@ -1,15 +1,14 @@
 // Garbage collection: memory is managed for you, including cycles.
 //
-// Each call to `countdown` builds a closure that calls itself through a
-// variable it captures, which is a reference cycle. The collector frees
+// Each call to `countdown` builds a closure that calls itself through the
+// variable it is bound to, which it captures: a reference cycle. The collector frees
 // these, so memory stays flat however many are made. On macOS, compare the
 // peak memory of a run with:
 //
 //     /usr/bin/time -l cargo run --release -- examples/garbage.aja
 
 fn countdown(from: int) -> int {
-    var step = fn(n: int) -> int { n };
-    step = fn(n: int) -> int { if n == 0 { 0 } else { 1 + step(n - 1) } };
+    let step = fn(n: int) -> int { if n == 0 { 0 } else { 1 + step(n - 1) } };
     step(from)
 }
 

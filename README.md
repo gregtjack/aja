@@ -187,7 +187,11 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
   minus the name: `fn(a, b) { a + b }`, `fn(x: int) -> int { x * 2 }`,
   `fn() { ... }`. The body is always a block, and annotations are optional.
   Closures capture their
-  enclosing environment and can mutate it (e.g. counters).
+  enclosing environment and can mutate its `var`s (e.g. counters). A closure
+  bound with `let` or `var` can call itself by that name:
+  `let fact = fn(n: int) { if n == 0 { 1 } else { n * fact(n - 1) } };`.
+  Other values don't see the name they are bound to, so `let a = a + 1;`
+  uses an earlier `a`.
 - **Blocks are expressions:** the final expression without a trailing `;` is
   the block's value. `return expr;` exits a function early.
 - **`if`:** `if cond { ... } else { ... }` is an expression; `if` without

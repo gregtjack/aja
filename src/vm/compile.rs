@@ -503,13 +503,19 @@ impl<'a> FnCompiler<'a> {
 
     fn let_(&mut self, var: &Variable, value: &Expr) {
         let reg = self.alloc();
-        // The value is compiled before the name is declared, so it sees any
-        // earlier variable of the same name (`let a = a + 1;`).
-        self.expr(value, reg);
 
         // A REPL input's top-level `let` outlives the input, so it is a global.
         if self.repl && self.fns.len() == 1 && self.cur().scopes.len() == 1 {
-            let slot = self.compiler.define_global(var.name.clone());
+            // A closure can call itself through the new global, so it is
+            // defined first; any other value sees the old one, if any.
+            let slot = if value.is_closure() {
+                let slot = self.compiler.define_global(var.name.clone());
+                self.expr(value, reg);
+                slot
+            } else {
+                self.expr(value, reg);
+                self.compiler.define_global(var.name.clone())
+            };
             self.emit(
                 Op::SetGlobal {
                     index: slot,
@@ -522,6 +528,22 @@ impl<'a> FnCompiler<'a> {
         }
 
         let cell = self.captured.contains(&decl_key(var));
+        if cell && value.is_closure() {
+            // The closure captures its own variable: make the cell first so
+            // the closure can capture it, then fill it with the closure.
+            self.emit(Op::LoadVoid { dst: reg }, var.span);
+            self.emit(Op::NewCell { dst: reg, src: reg }, var.span);
+            self.declare(var.name.clone(), reg, true);
+            let closure = self.alloc();
+            self.expr(value, closure);
+            self.emit(Op::SetCell { cell: reg, src: closure }, var.span);
+            self.release(closure);
+            return;
+        }
+
+        // Any other value is compiled before the name is declared, so it
+        // sees an earlier variable of the same name (`let a = a + 1;`).
+        self.expr(value, reg);
         if cell {
             self.emit(Op::NewCell { dst: reg, src: reg }, var.span);
         }
@@ -1109,9 +1131,15 @@ impl CaptureFinder {
             }),
             Statement::Expr(e) => self.expr(e),
             Statement::Let { var, value, .. } => {
-                self.expr(value);
                 let repl_global = self.repl && self.depth == 0 && self.scopes.len() == 1;
-                if !repl_global {
+                // A closure is in the scope of its own name (see `let_`).
+                let declare_first = value.is_closure() && !repl_global;
+                if declare_first {
+                    let key = decl_key(var);
+                    self.scopes.last_mut().unwrap().1.push((var.name.clone(), key));
+                }
+                self.expr(value);
+                if !repl_global && !declare_first {
                     let key = decl_key(var);
                     self.scopes
                         .last_mut()

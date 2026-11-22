@@ -186,6 +186,22 @@ fn let_and_assignment() {
 }
 
 #[test]
+fn closures_can_call_themselves() {
+    // The return type is inferred through the recursive call.
+    ok("fn main() -> int { let fact = fn(n: int) { if n == 0 { 1 } else { n * fact(n - 1) } }; fact(5) }");
+    ok("fn main() -> int { let fib = fn(n) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }; fib(10) }");
+    ok("fn main() { let f: fn(int) -> int = fn(n) { f(n) }; }");
+    let (msg, _) = error("fn main() { let f = fn(x) { f(true); x + 1 }; }");
+    assert_eq!(
+        msg,
+        "mismatched types: 'f' is used as fn(bool) -> _ inside its own definition, but it is fn(int) -> int"
+    );
+    // Only a closure sees its own name; other values see the earlier one.
+    let (msg, _) = error("fn main() { let x = x + 1; }");
+    assert_eq!(msg, "cannot find variable 'x' in this scope");
+}
+
+#[test]
 fn only_var_can_be_assigned() {
     ok("fn main() -> int { var x = 1; x = x + 1; x }");
     ok("fn main() -> int { var x: int = 1; let f = fn() { x = 2; }; f(); x }");

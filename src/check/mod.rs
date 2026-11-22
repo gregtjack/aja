@@ -186,7 +186,7 @@ pub fn check_program(program: &Program) -> Result<Types, Vec<TypeError>> {
     checker.finish()
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum BindingKind {
     /// A `let` variable, which can't be assigned to.
     Let,
@@ -564,7 +564,33 @@ impl Checker {
                 value,
                 mutable,
             } => {
+                let kind = if *mutable {
+                    BindingKind::Var
+                } else {
+                    BindingKind::Let
+                };
+                // A closure can refer to the variable it is being bound to,
+                // so the name is defined before its body is checked, with a
+                // placeholder type that the closure's type must then match.
+                let placeholder = value.is_closure().then(|| {
+                    let t = match &var.t {
+                        Some(annotation) => self.from_ast(annotation),
+                        None => self.fresh(Class::Any),
+                    };
+                    self.define(var.name.clone(), t.clone(), kind);
+                    t
+                });
                 let found = self.expr(value);
+                if let Some(p) = &placeholder {
+                    if var.t.is_none() {
+                        self.expect(p, &found, value.span, |e, f| {
+                            format!(
+                                "mismatched types: '{}' is used as {e} inside its own definition, but it is {f}",
+                                var.name
+                            )
+                        });
+                    }
+                }
                 let ty = match &var.t {
                     Some(annotation) => {
                         let declared = self.from_ast(annotation);
@@ -585,11 +611,6 @@ impl Checker {
                         });
                         found
                     }
-                };
-                let kind = if *mutable {
-                    BindingKind::Var
-                } else {
-                    BindingKind::Let
                 };
                 self.define(var.name.clone(), ty, kind);
                 Ty::Void

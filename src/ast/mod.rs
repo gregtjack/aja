@@ -49,6 +49,13 @@ impl Expr {
     pub fn new(kind: Expression, span: Span) -> Self {
         Expr { kind, span }
     }
+
+    /// Whether this is a closure literal. A `let` or `var` whose value is
+    /// one is in scope inside the closure's body, so the closure can call
+    /// itself.
+    pub fn is_closure(&self) -> bool {
+        matches!(self.kind, Expression::Closure(..))
+    }
 }
 
 pub type Id = EcoString;
@@ -170,7 +177,8 @@ pub enum Statement {
     Block(Vec<Statement>, Option<Expr>),
     Expr(Expr),
     /// `let x = value;`, or `var x = value;` when `mutable`. Only a `var`
-    /// can be assigned to.
+    /// can be assigned to. `x` is in scope after the statement, and also
+    /// inside `value` when it is a closure (see [`Expr::is_closure`]).
     Let {
         var: Variable,
         value: Expr,
