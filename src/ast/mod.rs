@@ -153,7 +153,7 @@ pub enum PatternKind {
     Wildcard,
     /// A name, which matches anything and binds it.
     Binding(Variable),
-    Int(i32),
+    Int(i64),
     Str(EcoString),
     Bool(bool),
     /// `Shape::Circle(r)`, or `Shape::Empty` (with `fields` empty and
@@ -191,8 +191,8 @@ pub enum Statement {
 
 #[derive(Debug, Clone)]
 pub enum Expression {
-    Int(i32),
-    Float(f32),
+    Int(i64),
+    Float(f64),
     String(EcoString),
     True,
     False,

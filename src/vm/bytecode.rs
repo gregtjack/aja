@@ -21,8 +21,8 @@ pub enum Op {
     // ---- Constants and moves ----------------------------------------------
     LoadVoid { dst: Reg },
     LoadBool { dst: Reg, value: bool },
-    LoadInt { dst: Reg, value: i32 },
-    LoadFloat { dst: Reg, value: f32 },
+    LoadInt { dst: Reg, value: i64 },
+    LoadFloat { dst: Reg, value: f64 },
     /// Load the string literal numbered `index` (see [`Literals`]).
     LoadStr { dst: Reg, index: u32 },
     Move { dst: Reg, src: Reg },

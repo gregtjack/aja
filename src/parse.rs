@@ -351,7 +351,7 @@ mod tests {
     fn test_lexer_reports_errors() {
         assert!(crate::lexer::tokenize("let x = @;").is_err());
         assert!(crate::lexer::tokenize("\"unterminated").is_err());
-        assert!(crate::lexer::tokenize("99999999999").is_err());
+        assert!(crate::lexer::tokenize("99999999999999999999").is_err());
     }
 
     #[test]

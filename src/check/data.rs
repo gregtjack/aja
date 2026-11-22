@@ -53,7 +53,7 @@ enum Ctor {
     Variant(usize),
     Struct,
     Bool(bool),
-    Int(i32),
+    Int(i64),
     Str(EcoString),
 }
 

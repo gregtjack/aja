@@ -12,8 +12,8 @@ use super::{heap::Gc, native::NativeFn};
 #[derive(Clone)]
 pub enum Value {
     Void,
-    Int(i32),
-    Float(f32),
+    Int(i64),
+    Float(f64),
     Bool(bool),
     /// A string on the heap.
     Str(Gc),

@@ -336,7 +336,7 @@ where
         }
 
         if is_float {
-            match num_str.parse::<f32>() {
+            match num_str.parse::<f64>() {
                 Ok(num) => Ok((start, Token::Float(num), self.get_location())),
                 Err(_) => Err(LexicalError::new(
                     start,
@@ -345,14 +345,14 @@ where
                 )),
             }
         } else {
-            match num_str.parse::<i32>() {
+            match num_str.parse::<i64>() {
                 Ok(num) => Ok((start, Token::Int(num), self.get_location())),
                 Err(_) => Err(LexicalError::new(
                     start,
                     self.get_location(),
                     format!("integer literal '{}' is too large", num_str),
                 )
-                .help(format!("int values must be between {} and {}", i32::MIN, i32::MAX))),
+                .help(format!("int values must be between {} and {}", i64::MIN, i64::MAX))),
             }
         }
     }
@@ -432,5 +432,23 @@ where
             Ok(t) => return Some(t),
             Err(e) => panic!("{}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn int_literals_are_64_bit() {
+        let tokens = tokenize("9223372036854775807").unwrap();
+        assert_eq!(tokens[0].1, Token::Int(i64::MAX));
+
+        let err = tokenize("9223372036854775808").unwrap_err();
+        assert_eq!(err.message, "integer literal '9223372036854775808' is too large");
+        assert_eq!(
+            err.help.as_deref(),
+            Some("int values must be between -9223372036854775808 and 9223372036854775807")
+        );
     }
 }

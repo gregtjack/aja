@@ -29,7 +29,7 @@ pub fn implementation(name: &str) -> Option<NativeFn> {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis();
-            Ok(Value::Int(ms as i32))
+            Ok(Value::Int(ms as i64))
         },
         "sleep" => |_, args| {
             let [Value::Int(ms)] = args else {

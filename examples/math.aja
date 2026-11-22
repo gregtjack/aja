@@ -54,5 +54,5 @@ fn main() {
 
     // Integer arithmetic is checked: overflow is an error, never a silent
     // wraparound (see errors/overflow.aja).
-    println("largest int:", 2147483647);
+    println("largest int:", 9223372036854775807);
 }

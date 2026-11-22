@@ -77,8 +77,8 @@ A program is a sequence of top-level `fn` definitions. Execution starts at
 
 | Type    | Literal examples        | Notes                                |
 |---------|-------------------------|--------------------------------------|
-| `int`   | `42`, `-7`, `1_000`     | 32-bit signed integer                |
-| `float` | `3.14`, `-0.5`          | 32-bit float                         |
+| `int`   | `42`, `-7`, `1_000`     | 64-bit signed integer                |
+| `float` | `3.14`, `-0.5`          | 64-bit float                         |
 | `bool`  | `true`, `false`         |                                      |
 | `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`; join with `+` |
 | `void`  | —                       | Result of statements / no value      |

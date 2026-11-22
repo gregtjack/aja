@@ -3,6 +3,6 @@
 // expect: integer overflow in '+'
 
 fn main() {
-    let big = 2147483647;
+    let big = 9223372036854775807;
     println(big + 1);
 }

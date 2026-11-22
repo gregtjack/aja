@@ -366,9 +366,25 @@ fn values_display_like_print() {
 fn integer_errors() {
     assert_eq!(failure("fn main() -> int { 7 / 0 }"), "division by zero");
     assert_eq!(failure("fn main() -> int { 7 % 0 }"), "modulo by zero");
-    assert_eq!(failure("fn main() -> int { 2147483647 + 1 }"), "integer overflow in '+'");
-    assert_eq!(failure("fn main() -> int { let m = -2147483647 - 1; -m }"), "integer overflow in '-'");
-    assert_eq!(failure("fn main() -> int { let m = -2147483647 - 1; m / -1 }"), "integer overflow in '/'");
+    assert_eq!(failure("fn main() -> int { 9223372036854775807 + 1 }"), "integer overflow in '+'");
+    assert_eq!(failure("fn main() -> int { let m = -9223372036854775807 - 1; -m }"), "integer overflow in '-'");
+    assert_eq!(failure("fn main() -> int { let m = -9223372036854775807 - 1; m / -1 }"), "integer overflow in '/'");
+}
+
+#[test]
+fn ints_are_64_bit() {
+    assert_eq!(main_value("int", "2147483647 + 1"), "Int(2147483648)");
+    assert_eq!(main_value("int", "3_000_000_000 * 3"), "Int(9000000000)");
+    assert_eq!(main_value("int", "-9223372036854775807 - 1"), "Int(-9223372036854775808)");
+    // Milliseconds since 1970 fit, and are after 2020-01-01.
+    assert_eq!(main_value("bool", "clock() > 1_577_836_800_000"), "Bool(true)");
+}
+
+#[test]
+fn floats_are_64_bit() {
+    // An f32 would round these; an f64 keeps them.
+    assert_eq!(main_value("float", "16777217.0"), "Float(16777217.0)");
+    assert_eq!(main_value("float", "0.1 + 0.2"), "Float(0.30000000000000004)");
 }
 
 #[test]

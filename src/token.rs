@@ -3,8 +3,8 @@ use ecow::EcoString;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Ident(EcoString),
-    Int(i32),
-    Float(f32),
+    Int(i64),
+    Float(f64),
     String(EcoString),
     Eof,
     LeftParen,    // (

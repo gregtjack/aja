@@ -79,6 +79,10 @@ and people will ask for them. Each one conflicts with a rule above.
   Compile-time code generation, if added, must produce ordinary, inspectable
   Aja code. (Rule 5)
 - **Function overloading by argument type.** (Rule 5)
+- **Glob imports** (`import foo::*`). Every name in a file is either defined
+  there, in the prelude, or named in an `import`. (Rule 5)
+- **Cyclic imports between modules.** They make modules impossible to check
+  one at a time and usually mean two modules are really one. (Rules 5, 11)
 - **A separate closure syntax.** A closure is an anonymous `fn` with the same
   parameters, return type, and block body as a named function:
   `fn(x) { x * 2 }`. No `|x| x * 2`, no `x => x * 2`, and no brace-less
@@ -129,6 +133,86 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
   frames live on the heap. In native code, each task gets its own growable stack
   (a large virtual memory reservation with a guard page).
 
+## Modules and packages
+
+- **A file is a module, and the directory tree is the module tree.**
+  `src/geo/shapes.aja` is the module `geo::shapes`. There are no `mod`
+  declarations: where a file lives is the only thing that decides its name.
+  (Rule 10)
+- **`import` brings in modules or named items, and code stays qualified.**
+  `import std::fs;` makes `fs::read(path)` available; `import
+  std::collections::{Map, Set};` brings in those names directly. A reader can
+  always tell where a name comes from without leaving the file. `::` already
+  separates an enum from its variants (`Shape::Circle`), and module paths
+  extend the same syntax: `geo::shapes::Shape::Circle`. (Rule 5)
+- **Private by default.** Functions, types, and struct fields are visible only
+  inside their module unless marked `pub`. Private fields let a module keep
+  its invariants, so a library type such as `Map` can hide its
+  representation.
+- **No import cycles.** Modules form a directed acyclic graph, and a cycle is a
+  compile error that names every module in it. Because signatures are always
+  fully typed, a module can be checked against the signatures of the modules
+  it imports without reading their bodies, which makes checking incremental
+  and parallel. (Rule 11)
+- **Methods live next to their type or their trait.** An `impl` must be in the
+  module that defines the type or the trait (Rust's orphan rule), so there is
+  exactly one place to look for a method.
+- **A small prelude.** `Option`, `Result`, `Some`, `None`, `Ok`, `Err`, `List`,
+  `print`, `println`, `assert`, and `panic` are in scope everywhere. Everything
+  else needs an `import`.
+- **One package layout.** A package is a directory with an `aja.toml` and a
+  `src/`, built and run by one tool (`aja run`, `aja build`, `aja test`).
+  Dependency management comes later, but import paths leave room for it: a
+  dependency's package name is the first segment of its paths, as `std` is
+  for the standard library. (Rule 10)
+
+## The standard library
+
+Aja ships a large standard library so that programs are useful without
+reaching for dependencies, in the spirit of Go and Python but typed, with
+errors as values.
+
+- **Written in Aja, over a thin native layer.** Most of the library is
+  ordinary Aja code. Only a small set of intrinsics (system calls, memory, and
+  operations Aja can't express) is implemented natively, and each backend
+  implements just that set. This keeps the VM and the Cranelift backend in
+  step, and makes the library the largest test of the language.
+- **Embedded in the compiler.** The library is built into the `aja` binary and
+  versioned with it, so it works with nothing to install.
+- **Fallible functions return `Result`.** Functions that panic on bad input are
+  for bugs, and say so in their names (`unwrap`, `expect`). (Rule 3)
+- **I/O is blocking.** Concurrency comes from green threads, so `fs::read`
+  simply blocks its task. No API has a separate async form, and none needs to
+  change when the scheduler arrives. (Rule 8)
+- **One of each.** One string type, one list, one map, one formatting
+  mechanism. (Rule 10)
+- **Documented with examples that run.** Examples in doc comments run as tests,
+  so documentation can't drift from behavior.
+
+The library grows in layers:
+
+| Layer      | Modules |
+|------------|---------|
+| Prelude    | `Option`, `Result`, `List`; methods on `str`, `int`, and `float` (`len`, `split`, `trim`, `parse`, `abs`, `min`, `to_str`, …) |
+| Core       | `collections` (`Map`, `Set`, `Deque`), `string` (`Builder`, UTF-8 iteration), `math`, `fmt`, `testing` |
+| System     | `fs`, `io` (stdin, stdout, readers and writers), `path`, `env` (arguments, environment variables), `process`, `time` (`Instant`, `Duration`), `random` |
+| Data       | `json`, `encoding` (base64, hex), `csv` |
+| Later      | `task` and `channel` (with green threads), `net`, `http`, `regex`, `hash` (SHA-256 and friends), `log`, `cli` |
+
+Before most of this can be written, the language needs:
+
+1. **Generics**, for `Option<T>`, `Result<T, E>`, `List<T>`, and `Map<K, V>`.
+2. **Methods** (`impl` blocks), so that `s.trim().split(",")` reads left to
+   right and editors and agents can discover an API by typing `.`.
+3. **A few traits**: `Eq`, `Hash`, `Ord`, and `Show`, which map keys, sorting,
+   and printing need.
+4. **A `for` loop** over an `Iter` trait.
+
+`int` is 64-bit, so lengths, file sizes, and millisecond timestamps all fit
+in it, and library signatures use `int` for them. `float` is 64-bit too
+(IEEE 754 double), so it matches what JSON, C, and most other languages mean
+by a number with a fractional part.
+
 ## Roadmap
 
 1. **Static type checker.** ✅ Annotations are required on function
@@ -148,16 +232,30 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
    mark-and-sweep collector, which runs when the heap's size in bytes has
    doubled. String literals are allocated once and kept as roots; strings
    built at runtime (with `+`) are collected. Nothing is reference-counted.
-5. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
+5. **Language features for libraries.** Generics, methods, the core traits,
+   and `for` loops (see [The standard library](#the-standard-library)).
+6. **Modules and packages.** `import`, `pub`, the prelude, `aja.toml`, and the
+   `aja` tool (see [Modules and packages](#modules-and-packages)).
+7. **Standard library**, layer by layer, starting with the prelude and core.
+8. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.
-6. **Green threads and structured concurrency** in the VM.
-7. **Cranelift AoT backend** producing native binaries, with the same runtime
-   semantics as the VM.
+9. **Green threads and structured concurrency** in the VM.
+10. **Cranelift AoT backend** producing native binaries, with the same runtime
+    semantics as the VM.
 
 ## Open questions
 
-- **Integer width.** `int` is currently 32-bit. Should it be 64-bit by
-  default, with sized types (`i8` … `u64`) available explicitly?
+- **Sized integers.** `int` is 64-bit. Do sized types (`i8` … `u64`) arrive
+  as well, for binary formats and interop, and how do conversions between
+  them look without being implicit (rule 4)?
+- **Indexing.** `[` is lexed but has no grammar. Does `xs[i]` exist, and if so
+  does it panic when out of range (with `xs.get(i)` returning `Option`)?
+- **String interpolation.** `"x = {x}"` is much easier to write than
+  concatenation, but it calls `Show` implicitly. Is that hidden control flow
+  (rule 4), or acceptable because `Show` is meant to have no side effects?
+- **User-defined traits.** Do traits start as a fixed built-in set (`Eq`,
+  `Hash`, `Ord`, `Show`, `Iter`), or can programs define their own from the
+  start?
 - **Traits and generics.** How far do generics go (no higher-kinded types is a
   likely non-goal), and are traits implemented nominally or structurally?
 - **Strings.** UTF-8 everywhere, and is indexing by byte, by code point, or not
