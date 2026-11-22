@@ -96,7 +96,7 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
 - **Type checker.** A new pass between parsing and execution. It infers types
   inside function bodies, checks signatures, and reports errors with spans. The
   backends trust its output and do no type checks of their own.
-- **Bytecode VM.** Replaces the tree-walking interpreter. It is register-based
+- **Bytecode VM.** Replaced the tree-walking interpreter. It is register-based
   and uses typed instructions (for example `add.i64` rather than a generic `add`
   that inspects tags at runtime). It is where the garbage collector, the task
   scheduler, and the concurrency semantics are designed and tested first, while
@@ -117,12 +117,13 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
 
 1. **Static type checker.** ✅ Annotations are required on function
    signatures, local types are inferred by unification (without
-   let-polymorphism), and `any` is gone. Next: drop the interpreter's
-   now-redundant runtime type checks.
+   let-polymorphism), and `any` is gone.
 2. **Data types.** Structs, enums with data, exhaustive `match`, `Option`,
    `Result`, and `?`.
-3. **Bytecode VM.** Compile the typed AST to bytecode and retire the
-   tree-walking interpreter.
+3. **Bytecode VM.** ✅ The type-checked AST compiles to typed, register-based
+   bytecode, and the tree-walking interpreter is gone. The checker hands the
+   compiler operand types rather than a full typed IR; a typed IR can come
+   when data types need it.
 4. **Memory management.** Choose and implement the collector in the VM.
 5. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.

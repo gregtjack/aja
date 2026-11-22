@@ -3,7 +3,7 @@ use crate::{lexer::tokenize, parse::Parser};
 
 fn check(src: &str) -> Result<(), Vec<TypeError>> {
     let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
-    check_program(&ast)
+    check_program(&ast).map(|_| ())
 }
 
 #[track_caller]

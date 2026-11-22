@@ -2,7 +2,7 @@
 //! of any execution backend.
 //!
 //! The type checker reads these signatures. Each backend implements every
-//! built-in listed here (the interpreter's are in `interp/native.rs`), and
+//! built-in listed here (the VM's are in `vm/native.rs`), and
 //! fails at startup, and in its tests, if one is missing.
 
 use crate::ast::types::Type;

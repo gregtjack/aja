@@ -9,7 +9,7 @@ of time to native code through Cranelift. See [DESIGN.md](DESIGN.md) for the
 principles, non-goals, and roadmap.
 
 Today, Aja is **statically type-checked** with type inference, and runs on a
-**tree-walking interpreter** with a REPL.
+**register-based bytecode VM** with a REPL.
 
 ```rust
 fn fact(n: int) -> int {
@@ -67,7 +67,8 @@ cargo test
 ### Programs
 
 A program is a sequence of top-level `fn` definitions. Execution starts at
-`fn main`. Its return value is printed when the program finishes.
+`fn main`, which takes no parameters. Its return value is not printed; use
+`println` for output.
 
 ### Types and values
 
@@ -158,14 +159,14 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 
 To add a built-in, declare its name and signature in `BUILTINS`
 (`src/builtins.rs`), which the type checker reads, and implement it in each
-backend (for the interpreter, `src/interp/native.rs`). A built-in without an
-implementation fails the tests and stops the interpreter at startup.
+backend (for the VM, `src/vm/native.rs`). A built-in without an
+implementation fails the tests and stops the VM at startup.
 
 ## Architecture
 
 ```
-source ──► Lexer ──► Parser ──► AST ──► Type checker ──► Interpreter
-          lexer.rs   parse.rs   ast/    check/           interp/
+source ──► Lexer ──► Parser ──► AST ──► Type checker ──► Compiler ──► Bytecode VM
+          lexer.rs   parse.rs   ast/    check/           vm/compile.rs  vm/mod.rs
                                   └───► compile/ (QBE backend, stub)
 ```
 
@@ -178,13 +179,28 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
 | `src/check/`          | Static type checker with local type inference |
 | `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends |
-| `src/interp/`         | Tree-walking interpreter, environments, values, built-in implementations |
+| `src/vm/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
+| `src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
+| `src/vm/mod.rs`       | The VM: call frames, the dispatch loop, runtime errors |
+| `src/vm/value.rs`     | Runtime values and closures |
+| `src/vm/native.rs`    | Built-in implementations |
 | `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color) |
 | `src/compile/`        | Code-generation scaffolding targeting QBE (not yet wired up) |
 
-The interpreter uses a chain of reference-counted environments for lexical
-scoping. Early `return` is implemented by propagating a special
-`RuntimeError::Return(value)` up to the call site.
+The VM is register-based. Each call gets a window of registers holding its
+parameters, locals, and temporaries, and instructions name registers
+directly. Instructions are typed: the type checker records whether each
+operator works on ints, floats, bools, or strings, and the compiler emits,
+say, `AddI` or `AddF` accordingly, so the VM never inspects operand types to
+decide what to do and has no runtime type checks. Call frames live on the
+heap, so deep recursion can't overflow the Rust stack; more than 100,000
+calls in progress is reported as a stack overflow.
+
+A local that a closure captures is stored in a shared cell, so the function
+and its closures see each other's assignments. The compiler finds these
+variables in a pass over each function before compiling it. Closures that
+capture each other through cells are not freed yet; memory management is
+on the roadmap.
 
 ## Status
 
@@ -192,7 +208,7 @@ scoping. Early `return` is implemented by propagating a special
 scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion (each call gets its own scope); arithmetic, comparison, and logical operators;
 static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
-`assert`); a REPL; parser and interpreter unit tests.
+`assert`); a REPL; parser, type checker, and VM unit tests.
 
 **Reserved or partially present, not yet usable:**
 - `match`, `::`, `=>`, `<-`, `[` `]` are lexed but have no grammar.
@@ -230,8 +246,9 @@ error: division by zero
   = note: in function 'b', called at line 3, column 20
 ```
 
-Every AST expression carries a `Span` (`ast::Expr { kind, span }`), which is
-how runtime errors know their location. In the REPL, each input counts as a
+Every AST expression carries a `Span` (`ast::Expr { kind, span }`), and the
+compiler records the span each instruction came from, which is how runtime
+errors know their location. In the REPL, each input counts as a
 new line of the session, so errors in code from an earlier input still point
 at that input.
 
@@ -240,4 +257,3 @@ Output is colored when stderr is a terminal; set `NO_COLOR` to disable.
 
 **Known limitations:**
 - The REPL handles one line at a time and can't define top-level functions.
-- `main`'s return value is printed in debug form (e.g. `Int(0)`).

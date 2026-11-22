@@ -118,8 +118,44 @@ impl TypeError {
     }
 }
 
+/// The type an operator works on, which a backend needs in order to pick a
+/// typed instruction (e.g. integer or float addition).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandType {
+    Int,
+    Float,
+    Bool,
+    Str,
+}
+
+/// What the checker learned that the backends need: the operand type of
+/// every arithmetic, comparison, and negation expression.
+#[derive(Debug, Default)]
+pub struct Types {
+    operands: HashMap<SpanKey, OperandType>,
+}
+
+/// Identifies an expression by where it is in the source. Two operator
+/// expressions never cover exactly the same text.
+type SpanKey = (u32, u32);
+
+fn key(span: Span) -> SpanKey {
+    (span.start.pos, span.end.pos)
+}
+
+impl Types {
+    /// The operand type of the operator expression `e` (a binary operator
+    /// other than `&&` / `||`, or a negation).
+    pub fn operand(&self, e: &Expr) -> OperandType {
+        *self
+            .operands
+            .get(&key(e.span))
+            .expect("the type checker records the operand type of every operator")
+    }
+}
+
 /// Type-check a whole program.
-pub fn check_program(program: &Program) -> Result<(), Vec<TypeError>> {
+pub fn check_program(program: &Program) -> Result<Types, Vec<TypeError>> {
     let mut checker = Checker::new();
     checker.program(program);
     checker.finish()
@@ -142,6 +178,7 @@ struct Binding {
 }
 
 /// The function whose body is being checked.
+#[derive(Clone)]
 struct FnContext {
     /// `None` for a closure.
     name: Option<Id>,
@@ -154,6 +191,7 @@ struct FnContext {
 
 /// A binding whose type must be fully known by the end of the enclosing
 /// top-level function.
+#[derive(Clone)]
 struct Pending {
     name: Id,
     ty: Ty,
@@ -162,6 +200,7 @@ struct Pending {
     what: String,
 }
 
+#[derive(Clone)]
 pub struct Checker {
     /// For each type variable: what it was solved to (if anything) and
     /// which types it may still become.
@@ -178,6 +217,9 @@ pub struct Checker {
     errors: Vec<TypeError>,
     /// Set when unification fails because a type would contain itself.
     infinite: bool,
+    /// The operand type of each operator expression, solved once checking
+    /// is done.
+    operands: Vec<(SpanKey, Ty)>,
 }
 
 impl Checker {
@@ -207,14 +249,31 @@ impl Checker {
             pending: Vec::new(),
             errors: Vec::new(),
             infinite: false,
+            operands: Vec::new(),
         }
     }
 
-    /// The errors found so far, in source order.
-    fn finish(&mut self) -> Result<(), Vec<TypeError>> {
+    /// The operand types recorded so far, or the errors found so far in
+    /// source order.
+    fn finish(&mut self) -> Result<Types, Vec<TypeError>> {
+        let operands = std::mem::take(&mut self.operands);
         let mut errors = std::mem::take(&mut self.errors);
         if errors.is_empty() {
-            return Ok(());
+            let operands = operands
+                .into_iter()
+                .map(|(k, t)| {
+                    let t = match self.zonk(&t) {
+                        Ty::Float => OperandType::Float,
+                        Ty::Bool => OperandType::Bool,
+                        Ty::Str => OperandType::Str,
+                        // `never` operands are in code that can't run, and
+                        // anything still unknown has been reported.
+                        _ => OperandType::Int,
+                    };
+                    (k, t)
+                })
+                .collect();
+            return Ok(Types { operands });
         }
         errors.sort_by_key(|e| (e.span.start.line, e.span.start.col));
         Err(errors)
@@ -232,7 +291,7 @@ impl Checker {
         let mut sigs = Vec::new();
         for def in &program.definitions {
             let Definition::Function { name, name_span, params, rtype, .. } = def else {
-                continue; // Structs can't be parsed yet; the interpreter rejects them.
+                continue; // Structs can't be parsed yet; the compiler rejects them.
             };
             let param_tys: Vec<Ty> = params
                 .iter()
@@ -499,6 +558,7 @@ impl Checker {
                             self.poison(&[&t]);
                             return Ty::Error;
                         }
+                        self.operands.push((key(span), t.clone()));
                         t
                     }
                 }
@@ -626,6 +686,7 @@ impl Checker {
             self.poison(&[&t1, &t2]);
             return result.unwrap_or(Ty::Error);
         }
+        self.operands.push((key(span), t1.clone()));
         result.unwrap_or(t1)
     }
 
@@ -931,7 +992,7 @@ impl Checker {
 
     /// Check one REPL input. Top-level `let`s stay in scope for later inputs;
     /// an input with errors leaves the scope as it was.
-    pub fn check_repl_stmt(&mut self, stmt: &Statement) -> Result<(), Vec<TypeError>> {
+    pub fn check_repl_stmt(&mut self, stmt: &Statement) -> Result<Types, Vec<TypeError>> {
         let saved = self.scopes[0].clone();
         self.stmt(stmt);
         self.report_unresolved();
@@ -941,11 +1002,6 @@ impl Checker {
             self.scopes[0] = saved;
         }
         result
-    }
-
-    /// Check one REPL expression.
-    pub fn check_repl_expr(&mut self, expr: &Expr) -> Result<(), Vec<TypeError>> {
-        self.check_repl_stmt(&Statement::Expr(expr.clone()))
     }
 }
 

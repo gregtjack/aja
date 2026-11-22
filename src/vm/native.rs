@@ -1,4 +1,4 @@
-//! The interpreter's implementations of the built-in functions declared in
+//! The VM's implementations of the built-in functions declared in
 //! `crate::builtins`.
 
 use std::{
@@ -46,10 +46,9 @@ fn join(args: &[Value]) -> String {
     args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" ")
 }
 
-/// Arguments the type checker should have rejected; reached only when running
-/// unchecked code (e.g. interpreter unit tests).
+/// Arguments the type checker should have rejected.
 fn bad_args(name: &str, args: &[Value]) -> String {
-    let types: Vec<String> = args.iter().map(|a| a.type_name()).collect();
+    let types: Vec<String> = args.iter().map(|a| format!("{a:?}")).collect();
     format!("{name}() was called with unexpected arguments ({})", types.join(", "))
 }
 
