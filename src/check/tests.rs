@@ -564,7 +564,6 @@ fn plus_concatenates_strings() {
 // ---- Generics ------------------------------------------------------------------
 
 const GENERIC_TYPES: &str = "
-enum Option<T> { Some(T), None }
 struct Pair<A, B> { first: A, second: B }
 enum List<T> { Nil, Cons(T, List<T>) }
 ";
@@ -578,8 +577,8 @@ fn generic_ok(src: &str) {
     ok(&generic(src));
 }
 
-/// The single error, as for [`error`]; the types are on lines 2 to 4, so
-/// `src` starts on line 5.
+/// The single error, as for [`error`]; the types are on lines 2 and 3, so
+/// `src` starts on line 4.
 #[track_caller]
 fn generic_error(src: &str) -> (String, String) {
     error(&generic(src))
@@ -614,8 +613,8 @@ fn generic_functions_work_at_every_type() {
 #[test]
 fn generic_types_check() {
     generic_ok("fn main() {
-                    let a: Option<int> = Option::Some(1);
-                    let b: Option<str> = Option::None;
+                    let a: Option<int> = Some(1);
+                    let b: Option<str> = None;
                     let p = Pair { first: 1, second: \"one\" };
                     let n: int = p.first;
                     let s: str = p.second;
@@ -631,17 +630,17 @@ fn generic_types_check() {
                 }
                 fn main() -> List<bool> { map(List::Cons(1, List::Nil), fn(n) { n > 0 }) }");
     // The expected type decides a type argument nothing else does.
-    generic_ok("fn none<T>() -> Option<T> { Option::None }
+    generic_ok("fn none<T>() -> Option<T> { None }
                 fn main() { let o: Option<str> = none(); }");
 }
 
 #[test]
 fn type_arguments_must_match() {
-    let (msg, at) = generic_error("fn main() { let a: Option<int> = Option::Some(\"s\"); }");
+    let (msg, at) = generic_error("fn main() { let a: Option<int> = Some(\"s\"); }");
     assert_eq!(msg, "mismatched types: 'a' is declared as Option<int> but was given Option<str>");
-    assert_eq!(at, "Option::Some(\"s\")");
+    assert_eq!(at, "Some(\"s\")");
     assert_eq!(
-        generic_error("fn f(o: Option<int>) { } fn main() { f(Option::Some(true)); }").0,
+        generic_error("fn f(o: Option<int>) { } fn main() { f(Some(true)); }").0,
         "mismatched types: parameter 'o' of function 'f' expects Option<int>, found Option<bool>"
     );
     assert_eq!(
@@ -722,22 +721,22 @@ fn bad_type_parameters() {
 
 #[test]
 fn partly_known_types_need_annotations() {
-    let src = generic("fn main() { let x = Option::None; }");
+    let src = generic("fn main() { let x = None; }");
     let errors = check(&src).unwrap_err();
     assert_eq!(errors[0].message, "type annotations needed: cannot infer the type of variable 'x'");
     assert_eq!(errors[0].help.as_deref(), Some("add a type, for example `x: Option<int>`"));
     assert_eq!(errors[0].notes, vec!["its type is only partly known: Option<_>"]);
     // Using it is enough.
-    generic_ok("fn main() { let x = Option::None; let y: Option<int> = x; }");
+    generic_ok("fn main() { let x = None; let y: Option<int> = x; }");
 }
 
 #[test]
 fn generic_equality_depends_on_type_arguments() {
-    generic_ok("fn main() -> bool { Option::Some(1) == Option::None }");
+    generic_ok("fn main() -> bool { Some(1) == None }");
     generic_ok("fn main() -> bool { Pair { first: \"a\", second: List::Cons(1, List::Nil) } == Pair { first: \"a\", second: List::Nil } }");
     // Equality on an unknown argument decides what it can be.
-    generic_ok("fn main() -> bool { let n = Option::None; n == Option::Some(1.5) }");
-    let (msg, _) = generic_error("fn main() -> bool { let a = Option::Some(fn() { }); a == a }");
+    generic_ok("fn main() -> bool { let n = None; n == Some(1.5) }");
+    let (msg, _) = generic_error("fn main() -> bool { let a = Some(fn() { }); a == a }");
     assert_eq!(msg, "cannot apply '==' to Option<() -> void> and Option<() -> void>");
     // A definition that holds a function can't be compared, whatever its arguments.
     let (msg, _) = error("struct F<T> { f: (T) -> int } fn main() -> bool { let a = F { f: fn(x: int) { x } }; a == a }");
@@ -746,20 +745,87 @@ fn generic_equality_depends_on_type_arguments() {
 
 #[test]
 fn generic_matches_are_exhaustive() {
-    generic_ok("fn get<T>(o: Option<T>, d: T) -> T { match o { Option::Some(x) => x, Option::None => d } } fn main() { }");
+    generic_ok("fn get<T>(o: Option<T>, d: T) -> T { match o { Some(x) => x, None => d } } fn main() { }");
     let (msg, at) = generic_error(
-        "fn depth(o: Option<Option<int>>) -> int { match o { Option::Some(Option::Some(_)) => 2, Option::None => 0 } } fn main() { }",
+        "fn depth(o: Option<Option<int>>) -> int { match o { Some(Some(_)) => 2, None => 0 } } fn main() { }",
     );
-    assert_eq!(msg, "non-exhaustive match: `Option::Some(Option::None)` not covered");
+    assert_eq!(msg, "non-exhaustive match: `Some(None)` not covered");
     assert_eq!(at, "o");
     assert_eq!(
-        generic_note("fn f(o: Option<bool>) -> int { match o { Option::Some(true) => 1, Option::None => 0 } } fn main() { }"),
+        generic_note("fn f(o: Option<bool>) -> int { match o { Some(true) => 1, None => 0 } } fn main() { }"),
         "the value matched on has type Option<bool>"
     );
     // Patterns take their types from the value's type arguments.
     assert_eq!(
-        generic_error("fn f(o: Option<int>) -> int { match o { Option::Some(\"s\") => 1, _ => 0 } } fn main() { }").0,
+        generic_error("fn f(o: Option<int>) -> int { match o { Some(\"s\") => 1, _ => 0 } } fn main() { }").0,
         "mismatched types: this pattern matches str, but the value is int"
     );
     generic_ok("fn f(p: Pair<int, bool>) -> int { match p { Pair { first, second: true } => first, Pair { .. } => 0 } } fn main() { }");
+}
+
+// ---- The prelude and `?` ---------------------------------------------------------
+
+#[test]
+fn prelude_types_are_always_available() {
+    ok("fn f(o: Option<int>, r: Result<str, int>) -> bool { (o == Some(1)) && (r == Ok(\"a\")) } fn main() { }");
+    // Bare variants are the prelude's; writing the enum's name works too.
+    ok("fn main() -> bool { let a: Option<int> = Option::Some(1); a == Some(1) }");
+    ok("fn f(r: Result<int, str>) -> int { match r { Ok(n) => n, Err(_) => 0 } } fn main() { }");
+    let (msg, at) = error("fn f(o: Option<int>) -> int { match o { Some(n) => n } } fn main() { }");
+    assert_eq!(msg, "non-exhaustive match: `None` not covered");
+    assert_eq!(at, "o");
+    assert_eq!(help("fn f(o: Option<int>) -> int { match o { Some(n) => n } } fn main() { }"), "add an arm for it: `None => ...`");
+    assert_eq!(
+        error("fn main() { let x: Option<int> = Some(1, 2); }").0,
+        "variant 'Some' holds 1 value but 2 were given"
+    );
+    assert_eq!(error("fn main() { let x: Option<int> = None(1); }").0, "variant 'None' holds no values, so it can't be called");
+    assert_eq!(
+        error("enum Option<T> { Yes(T) } fn main() { }").0,
+        "'Option' is defined in the prelude, so it can't be redefined"
+    );
+}
+
+#[test]
+fn question_mark_passes_on_errors() {
+    ok("fn d(s: str) -> Result<int, str> { Ok(1) }
+        fn sum(a: str, b: str) -> Result<int, str> { Ok(d(a)? + d(b)?) }
+        fn main() { }");
+    ok("fn get() -> Option<int> { None }
+        fn twice() -> Option<int> { let x = get()?; Some(x * 2) }
+        fn main() { }");
+    // The value's type is the Ok type, and the function's Ok type can differ.
+    ok("fn d() -> Result<int, str> { Ok(1) }
+        fn f() -> Result<bool, str> { let n: int = d()?; Ok(n > 0) }
+        fn main() { }");
+    // A closure's return type is inferred from its `?`.
+    ok("fn d() -> Result<int, str> { Ok(1) }
+        fn main() { let f = fn() { let n = d()?; Ok(n + 1) }; let r: Result<int, str> = f(); }");
+}
+
+#[test]
+fn question_mark_errors() {
+    let src = "fn d() -> Result<int, str> { Ok(1) }";
+    let err = |body: &str| check(&format!("{src} {body} fn main() {{ }}")).unwrap_err().remove(0);
+
+    let e = err("fn f() -> int { d()? }");
+    assert_eq!(e.message, "'?' on a Result can only be used in a function that returns a Result, but function 'f' returns int");
+    assert_eq!(e.help.as_deref(), Some("change the return type to `Result<int, str>`, or use `match`"));
+
+    let e = err("fn f() -> Result<int, int> { Ok(d()?) }");
+    assert_eq!(e.message, "mismatched types: this '?' passes on an error of type str, but function 'f' returns errors of type int");
+
+    let e = err("fn f() -> Option<int> { Some(d()?) }");
+    assert_eq!(e.message, "'?' on a Result can only be used in a function that returns a Result, but function 'f' returns Option<int>");
+    assert_eq!(e.help.as_deref(), Some("use `match` to handle it here"));
+
+    let e = err("fn f() -> int { let x = 5; x? }");
+    assert_eq!(e.message, "'?' can only be used on an Option or a Result, but this is int");
+
+    let e = check(&format!("{src} fn main() {{ d()?; }}")).unwrap_err().remove(0);
+    assert_eq!(e.message, "'?' on a Result can only be used in a function that returns a Result, but function 'main' returns void");
+    assert_eq!(e.help.as_deref(), Some("handle the error with `match` instead"));
+
+    let e = err("fn f() { let g = fn(r) { r? }; }");
+    assert_eq!(e.message, "type annotations needed: the type of this value must be known to use '?' on it");
 }

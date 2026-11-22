@@ -110,8 +110,9 @@ fn area(s: Shape) -> int {
   with `p.x`. Fields can't be assigned; make a new value instead, copying
   the fields you don't give from another with `Point { y: 5, ..p }`.
 - **Enums** have variants that hold values by position, or none:
-  `Shape::Circle(p, 3)`, `Shape::Empty`. Variants are always written with
-  their enum's name. Types can be recursive (`enum List { Nil, Cons(int, List) }`)
+  `Shape::Circle(p, 3)`, `Shape::Empty`. Variants are written with their
+  enum's name, except the prelude's `Some`, `None`, `Ok`, and `Err` (see
+  [Option, Result, and `?`](#option-result-and-)). Types can be recursive (`enum List { Nil, Cons(int, List) }`)
   and can refer to each other in any order.
 - **`match`** tries its arms in order: `pattern => value,` or
   `pattern if guard => value,`, where a value can be a block. Patterns are
@@ -138,26 +139,26 @@ Functions, structs, and enums can take type parameters, written in angle
 brackets after the name:
 
 ```rust
-enum Option<T> { Some(T), None }
 struct Pair<A, B> { first: A, second: B }
+enum List<T> { Nil, Cons(T, List<T>) }
 
 fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> {
     Pair { first: p.second, second: p.first }
 }
 
-fn unwrap_or<T>(o: Option<T>, default: T) -> T {
-    match o {
-        Option::Some(x) => x,
-        Option::None => default,
+fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
+    match xs {
+        List::Nil => List::Nil,
+        List::Cons(x, rest) => List::Cons(f(x), map(rest, f)),
     }
 }
 ```
 
-- **Type arguments are inferred where code is used.** `Option::Some(1)` is an
+- **Type arguments are inferred where code is used.** `Some(1)` is an
   `Option<int>`, `swap(Pair { first: 1, second: "a" })` is a
   `Pair<str, int>`, and each use of a generic function gets its own types,
   even when it's passed around as a value. When nothing decides one, as in
-  `let x = Option::None;` with `x` never used, the checker asks for an
+  `let x = None;` with `x` never used, the checker asks for an
   annotation (`x: Option<int>`). There is no syntax for writing type
   arguments at a call; an annotation does the same job.
 - **Types written out always give their arguments:** `Option<int>`, never
@@ -173,8 +174,41 @@ fn unwrap_or<T>(o: Option<T>, default: T) -> T {
 - Generic code compiles once: every value has the same representation in the
   VM whatever its type, so nothing is copied per type.
 
-`Option` and `Result` aren't built in yet; for now, define them as above.
-They'll come with the prelude (see [DESIGN.md](DESIGN.md)).
+### Option, Result, and `?`
+
+Aja has no null and no exceptions. A value that may be missing is an
+`Option`, and something that can fail returns a `Result`. Both are defined
+in the prelude ([`src/prelude.aja`](src/prelude.aja)), which every program
+can use without importing it:
+
+```rust
+enum Option<T> { Some(T), None }
+enum Result<T, E> { Ok(T), Err(E) }
+```
+
+Their variants are written by themselves: `Some(1)`, `None`, `Ok(x)`,
+`Err("bad input")`, in expressions and patterns. Writing `Option::Some(1)`
+works too, since `Option` is an ordinary enum. Because the bare names always
+mean the variants, they can't be used for variables, parameters, or
+functions, and the prelude's types can't be redefined.
+
+`expr?` takes the value out of an `Ok` or `Some`. On an `Err` or `None`, it
+returns that from the enclosing function (or closure) right away:
+
+```rust
+fn sum(a: str, b: str) -> Result<int, str> {
+    Ok(parse(a)? + parse(b)?)
+}
+```
+
+- `?` on a `Result` needs the function to return a `Result` with the **same
+  error type**, and `?` on an `Option` needs it to return an `Option`.
+  Nothing is converted automatically: not one error type into another, and
+  not a `None` into an error. Use `match` to do that explicitly.
+- `main` returns nothing, so it can't use `?`; it handles errors with
+  `match`.
+- A closure's return type is inferred from its `?`:
+  `fn(s) { let n = parse(s)?; Ok(n * 2) }` returns a `Result<int, str>`.
 
 ### Type checking
 
@@ -246,7 +280,7 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 - **`while`:** `while cond { ... }`.
 - **Operators** (lowest to highest precedence):
   `=` → `==` `!=` → `||` → `&&` → `<` `<=` `>` `>=` → `+` `-` → `*` `/` `%`
-  → unary `!` `-` → calls `f(x)(y)`.
+  → unary `!` `-` → calls `f(x)(y)`, field access `p.x`, and `?`.
   `&&` and `||` short-circuit. Integer division or modulo by zero is a
   runtime error.
   Arithmetic and comparison require both operands to be the same numeric
@@ -284,6 +318,7 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
 | `src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness |
 | `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends |
+| `src/prelude.aja`, `src/prelude.rs` | The prelude (`Option`, `Result`), written in Aja and built into the binary |
 | `src/vm/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
 | `src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
 | `src/vm/mod.rs`       | The VM: call frames, the dispatch loop, runtime errors |
@@ -335,7 +370,7 @@ the VM forgets to keep reachable is caught.
 **Working:** ints, floats, bools, strings; immutable `let` and mutable
 `var` with lexical scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
-structs, enums with data, and exhaustive `match`; generic functions, structs, and enums;
+structs, enums with data, and exhaustive `match`; generic functions, structs, and enums; `Option` and `Result` in the prelude, and `?`;
 static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 

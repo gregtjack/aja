@@ -5,6 +5,7 @@ use crate::{
     },
     diagnostic::Diagnostic,
     lexer::SrcSpan,
+    prelude,
     token::Token,
 };
 use std::{fmt, iter::Peekable};
@@ -361,6 +362,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_prelude_variants_and_question_mark() {
+        // Bare prelude variants are the enum's variants.
+        let e = create_parser("Some(1)").parse_expr_only().unwrap();
+        match &e.kind {
+            Expression::Call(callee, _) => {
+                assert!(matches!(&callee.kind, Expression::Path(en, v) if en == "Option" && v == "Some"))
+            }
+            k => panic!("expected a call, got {k:?}"),
+        }
+        let e = create_parser("None").parse_expr_only().unwrap();
+        assert!(matches!(&e.kind, Expression::Path(en, v) if en == "Option" && v == "None"));
+        let p = create_parser("Err(e)").parse_pattern().unwrap();
+        assert!(matches!(&p.kind, PatternKind::Variant { enum_name, variant, parens: true, .. }
+            if enum_name == "Result" && variant == "Err"));
+
+        // `?` is postfix, binding like a call: `f(x)?.y` is `((f(x))?).y`.
+        let e = create_parser("f(x)?.y").parse_expr_only().unwrap();
+        let Expression::Field(inner, name, _) = &e.kind else { panic!("expected a field, got {e:?}") };
+        assert_eq!(name, "y");
+        assert!(matches!(&inner.kind, Expression::Try(call) if matches!(call.kind, Expression::Call(..))));
+        let e = create_parser("a? + b?").parse_expr_only().unwrap();
+        assert!(matches!(&e.kind, Expression::BinOp(l, _, r)
+            if matches!(l.kind, Expression::Try(_)) && matches!(r.kind, Expression::Try(_))));
+
+        // The variants' names can't be declared as other names.
+        let err = |src: &str| create_parser(src).parse().unwrap_err().message;
+        assert_eq!(err("fn main() { let None = 1; }"), "'None' is a variant of 'Option', so it can't be used as a variable name");
+        assert_eq!(err("fn f(Ok: int) { }"), "'Ok' is a variant of 'Result', so it can't be used as a parameter name");
+        assert_eq!(err("fn Some() { }"), "'Some' is a variant of 'Option', so it can't be used as a function name");
+    }
+
+    #[test]
     fn test_struct_literals_need_parens_in_conditions() {
         // `p == P` is the condition, and `{ x: 1 }` is a (malformed) body.
         let err = create_parser("fn main() { if p == P { x: 1 } { } }").parse().unwrap_err();
@@ -574,10 +607,12 @@ where
             return Err(self.expected("a function name after 'fn'"));
         }
 
+        let tok = self.peek().cloned();
         let (ident, name_span) = match self.next() {
             Some((start, Token::Ident(i), end)) => (i, Span::new(start, end)),
             _ => unreachable!(),
         };
+        self.check_new_name(tok, &ident, "a function name")?;
 
         let type_params = self.parse_type_params()?;
         let params = self.parse_fn_params()?;
@@ -763,6 +798,8 @@ where
                     Some((start, Token::Ident(id), end)) => (id.clone(), Span::new(*start, *end)),
                     _ => return Err(self.expected("a parameter name")),
                 };
+                let tok = self.peek().cloned();
+                self.check_new_name(tok, &name, "a parameter name")?;
                 self.next();
                 let vtype = self.parse_type_annotation()?;
                 xs.push(Variable::new(name, vtype, span));
@@ -852,6 +889,8 @@ where
             }
             _ => return Err(self.expected(&format!("a variable name after '{keyword}'"))),
         };
+        let tok = self.peek().cloned();
+        self.check_new_name(tok, &id, "a variable name")?;
         self.next();
 
         let ttype = self.parse_type_annotation()?;
@@ -1107,6 +1146,10 @@ where
                 self.next();
                 let span = Span::new(expr.span.start, name_span.end);
                 expr = Expr::new(Expression::Field(Box::new(expr), name, name_span), span);
+            } else if tok_matches!(self, Token::Question) {
+                self.next();
+                let span = Span::new(expr.span.start, self.last_end());
+                expr = Expr::new(Expression::Try(Box::new(expr)), span);
             } else {
                 break;
             }
@@ -1147,6 +1190,10 @@ where
                         };
                         self.next();
                         Expression::Path(var, variant)
+                    }
+                    // `Some` for `Option::Some`, and the like.
+                    v if prelude::variant_enum(v).is_some() => {
+                        Expression::Path(prelude::variant_enum(v).unwrap().into(), var)
                     }
                     _ if tok_matches!(self, Token::LeftBrace) && !self.no_struct => {
                         self.parse_struct_lit(var)?
@@ -1327,26 +1374,11 @@ where
                             _ => return Err(self.expected("a variant name after '::'")),
                         };
                         self.next();
-                        let mut fields = Vec::new();
-                        let parens = tok_matches!(self, Token::LeftParen);
-                        if parens {
-                            self.next();
-                            while !tok_matches!(self, Token::RightParen) {
-                                if tok_matches!(self, Token::DotDot) {
-                                    return Err(self.expected("a pattern").help(
-                                        "a variant's values are matched by position; write `_` for each one to ignore",
-                                    ));
-                                }
-                                fields.push(self.parse_pattern()?);
-                                if tok_matches!(self, Token::Comma) {
-                                    self.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            self.consume(Token::RightParen)?;
-                        }
-                        PatternKind::Variant { enum_name: name, variant, fields, parens }
+                        self.parse_variant_pattern(name, variant)?
+                    }
+                    // `Some(x)` for `Option::Some(x)`, and the like.
+                    v if prelude::variant_enum(v).is_some() => {
+                        self.parse_variant_pattern(prelude::variant_enum(v).unwrap().into(), name)?
                     }
                     _ if tok_matches!(self, Token::LeftBrace) => {
                         self.next();
@@ -1392,6 +1424,41 @@ where
             _ => return Err(self.expected("a pattern")),
         };
         Ok(Pattern { kind, span: Span::new(start, self.last_end()) })
+    }
+
+    /// The values of a variant pattern, after its name: `(a, b)`, or nothing.
+    fn parse_variant_pattern(&mut self, enum_name: crate::ast::Id, variant: crate::ast::Id) -> ParseResult<PatternKind> {
+        let mut fields = Vec::new();
+        let parens = tok_matches!(self, Token::LeftParen);
+        if parens {
+            self.next();
+            while !tok_matches!(self, Token::RightParen) {
+                if tok_matches!(self, Token::DotDot) {
+                    return Err(self.expected("a pattern").help(
+                        "a variant's values are matched by position; write `_` for each one to ignore",
+                    ));
+                }
+                fields.push(self.parse_pattern()?);
+                if tok_matches!(self, Token::Comma) {
+                    self.next();
+                } else {
+                    break;
+                }
+            }
+            self.consume(Token::RightParen)?;
+        }
+        Ok(PatternKind::Variant { enum_name, variant, fields, parens })
+    }
+
+    /// Reject a prelude variant's name (`None`) where a new name is
+    /// declared: written by itself, it always means the variant.
+    fn check_new_name(&mut self, tok: Option<SrcSpan>, name: &str, what: &str) -> ParseResult<()> {
+        match prelude::variant_enum(name) {
+            Some(e) => Err(self
+                .error(tok, format!("'{name}' is a variant of '{e}', so it can't be used as {what}"))
+                .help("choose a different name")),
+            None => Ok(()),
+        }
     }
 
     fn parse_type_annotation(&mut self) -> ParseResult<Option<Type>> {

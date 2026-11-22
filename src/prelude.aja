@@ -1,0 +1,19 @@
+// The prelude: definitions every Aja program can use without importing them.
+// Their variants are in scope by themselves, so `Some(1)` means
+// `Option::Some(1)`, and `Some`, `None`, `Ok`, and `Err` can't be used as
+// other names.
+
+// A value that may be absent. Aja has no null: a function that might not have
+// a value to give returns an `Option`.
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+// The result of something that can fail: a value, or an error saying why.
+// `expr?` gives the value inside an `Ok`, or returns the `Err` from the
+// function it's in.
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}

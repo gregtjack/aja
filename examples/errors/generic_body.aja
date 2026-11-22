@@ -5,22 +5,17 @@
 // expect: match arms have incompatible types: T and int
 // expect: mismatched types: 'names' is declared as Option<str> but was given Option<int>
 
-enum Option<T> {
-    Some(T),
-    None,
-}
-
 fn add<T>(a: T, b: T) -> T {
     a + b
 }
 
 fn first_or_zero<T>(o: Option<T>) -> T {
     match o {
-        Option::Some(x) => x,
-        Option::None => 0,
+        Some(x) => x,
+        None => 0,
     }
 }
 
 fn main() {
-    let names: Option<str> = Option::Some(42);
+    let names: Option<str> = Some(42);
 }

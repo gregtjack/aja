@@ -228,8 +228,9 @@ by a number with a fractional part.
    type parameters, and type arguments are inferred at each use. A generic
    body is checked once, with each type parameter as a type equal only to
    itself, and compiled once, since VM values have one representation
-   whatever their type. Next: `Option<T>` and `Result<T, E>` in the
-   prelude, and `?`.
+   whatever their type. `Option<T>` and `Result<T, E>` ✅ are defined in
+   Aja in the prelude, and `?` ✅ passes on an `Err` or `None` without
+   converting it.
 3. **Bytecode VM.** ✅ The type-checked AST compiles to typed, register-based
    bytecode, and the tree-walking interpreter is gone. The checker hands the
    compiler operand types rather than a full typed IR; a typed IR can come

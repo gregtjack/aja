@@ -38,6 +38,7 @@ pub enum Token {
     And,          // &&
     Or,           // ||
     DotDot,       // ..
+    Question,     // ?
     Else,         // else
     Enum,         // enum
     Fn,           // fn
@@ -90,6 +91,7 @@ impl std::fmt::Display for Token {
             Token::And => "&&",
             Token::Or => "||",
             Token::DotDot => "..",
+            Token::Question => "?",
             Token::Else => "else",
             Token::Enum => "enum",
             Token::Fn => "fn",

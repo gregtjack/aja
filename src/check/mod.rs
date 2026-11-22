@@ -34,6 +34,7 @@ use crate::{
     },
     builtins::{Params, BUILTINS},
     diagnostic::{closest_match, Diagnostic},
+    prelude,
 };
 
 mod data;
@@ -150,13 +151,21 @@ pub enum OperandType {
     Data,
 }
 
+/// What a `?` is applied to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryOn {
+    Option,
+    Result,
+}
+
 /// What the checker learned that the backends need: the operand type of
-/// every arithmetic, comparison, and negation expression, and which field
-/// each field access reads.
+/// every arithmetic, comparison, and negation expression, which field each
+/// field access reads, and what each `?` is applied to.
 #[derive(Debug, Default)]
 pub struct Types {
     operands: HashMap<SpanKey, OperandType>,
     fields: HashMap<SpanKey, u16>,
+    tries: HashMap<SpanKey, TryOn>,
 }
 
 /// Identifies an expression by where it is in the source. Two operator
@@ -184,6 +193,14 @@ impl Types {
             .fields
             .get(&key(e.span))
             .expect("the type checker records the field of every field access")
+    }
+
+    /// Whether the `?` expression `e` is applied to an `Option` or a `Result`.
+    pub fn try_on(&self, e: &Expr) -> TryOn {
+        *self
+            .tries
+            .get(&key(e.span))
+            .expect("the type checker records what every '?' is applied to")
     }
 }
 
@@ -229,6 +246,9 @@ struct FnContext {
     ret_declared: bool,
     /// The function's name, or the whole closure.
     span: Span,
+    /// Whether a `?` in it has been reported for not fitting its return
+    /// type, which is then not reported again for every other `?`.
+    try_reported: bool,
 }
 
 /// A binding whose type must be fully known by the end of the enclosing
@@ -264,6 +284,8 @@ pub struct Checker {
     operands: Vec<(SpanKey, Ty)>,
     /// The field index of each field access.
     fields: HashMap<SpanKey, u16>,
+    /// What each `?` is applied to.
+    tries: HashMap<SpanKey, TryOn>,
     structs: HashMap<Id, StructInfo>,
     enums: HashMap<Id, EnumInfo>,
     /// The type parameters in scope: those of the definition being checked.
@@ -283,6 +305,7 @@ impl Checker {
             infinite: false,
             operands: Vec::new(),
             fields: HashMap::new(),
+            tries: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
             type_params: Vec::new(),
@@ -308,6 +331,9 @@ impl Checker {
             };
             checker.scopes[0].insert(Id::from(builtin.name), binding);
         }
+        let prelude = Program { definitions: prelude::definitions() };
+        checker.declare_types(&prelude);
+        assert!(checker.errors.is_empty(), "the prelude has type errors: {:?}", checker.errors);
         checker
     }
 
@@ -333,7 +359,8 @@ impl Checker {
                 })
                 .collect();
             let fields = std::mem::take(&mut self.fields);
-            return Ok(Types { operands, fields });
+            let tries = std::mem::take(&mut self.tries);
+            return Ok(Types { operands, fields, tries });
         }
         errors.sort_by_key(|e| (e.span.start.line, e.span.start.col));
         Err(errors)
@@ -430,6 +457,7 @@ impl Checker {
                 ret,
                 ret_declared: rtype.is_some(),
                 span: *name_span,
+                try_reported: false,
             };
             // Annotations inside the body can name the type parameters.
             self.type_params = generics.clone();
@@ -825,6 +853,7 @@ impl Checker {
                     ret: ret.clone(),
                     ret_declared: rtype.is_some(),
                     span,
+                    try_reported: false,
                 };
                 self.function(ctx, params, &param_tys, body);
                 Ty::Fn(param_tys, Box::new(ret))
@@ -835,7 +864,112 @@ impl Checker {
                 self.struct_lit(name, fields, base.as_deref(), span)
             }
             Expression::Match(scrutinee, arms) => self.match_(scrutinee, arms),
+            Expression::Try(inner) => self.try_(inner, span),
         }
+    }
+
+    /// `inner?`: the value in an `Ok` or `Some`; an `Err` or `None` is
+    /// returned from the enclosing function, which must return the same
+    /// kind of value (with the same error type, for a `Result`).
+    fn try_(&mut self, inner: &Expr, span: Span) -> Ty {
+        let t = self.expr(inner);
+        let (on, value, error) = match self.resolve(&t) {
+            Ty::Named(n, args) if n == "Option" => (TryOn::Option, args[0].clone(), None),
+            Ty::Named(n, args) if n == "Result" => (TryOn::Result, args[0].clone(), Some(args[1].clone())),
+            Ty::Error | Ty::Never => return Ty::Error,
+            Ty::Var(_) => {
+                self.error(
+                    TypeError::new("type annotations needed: the type of this value must be known to use '?' on it", inner.span)
+                        .help("annotate the variable or parameter it comes from, e.g. `r: Result<int, str>`"),
+                );
+                self.poison(&[&t]);
+                return Ty::Error;
+            }
+            other => {
+                let shown = self.show(&other);
+                self.error(
+                    TypeError::new(format!("'?' can only be used on an Option or a Result, but this is {shown}"), span)
+                        .help("remove the '?'"),
+                );
+                return Ty::Error;
+            }
+        };
+        self.tries.insert(key(span), on);
+
+        let Some(ctx) = self.fns.last().cloned() else {
+            self.error(TypeError::new("'?' can only be used inside a function", span));
+            return value;
+        };
+        let what = match &ctx.name {
+            Some(name) => format!("function '{name}'"),
+            None => "this closure".to_string(),
+        };
+        let kind = match on {
+            TryOn::Option => "Option",
+            TryOn::Result => "Result",
+        };
+        // What the function must return for the `?` to pass on what it got.
+        let passes = match &error {
+            None => Ty::Named("Option".into(), vec![self.fresh(Class::Any)]),
+            Some(e) => Ty::Named("Result".into(), vec![self.fresh(Class::Any), e.clone()]),
+        };
+        let ret = self.resolve(&ctx.ret);
+        match (&ret, &error) {
+            // A closure whose return type is still unknown returns one.
+            (Ty::Var(_), _) => {
+                self.unify(&ret, &passes);
+            }
+            (Ty::Error | Ty::Never, _) => {}
+            (Ty::Named(n, args), Some(e)) if n == "Result" => {
+                let (found, returned) = (self.show(e), self.show(&args[1]));
+                if !self.unify(e, &args[1]) {
+                    self.error(
+                        TypeError::new(
+                            format!(
+                                "mismatched types: this '?' passes on an error of type {found}, \
+                                 but {what} returns errors of type {returned}"
+                            ),
+                            span,
+                        )
+                        .note("errors are not converted automatically; use `match` to turn one into the other"),
+                    );
+                }
+            }
+            (Ty::Named(n, _), None) if n == "Option" => {}
+            _ if ctx.try_reported => {}
+            _ => {
+                self.fns.last_mut().unwrap().try_reported = true;
+                let returns = self.show(&ret);
+                let mut err = TypeError::new(
+                    format!(
+                        "'?' on {} {kind} can only be used in a function that returns {} {kind}, but {what} returns {returns}",
+                        article(kind),
+                        article(kind),
+                    ),
+                    span,
+                );
+                let other_kind = matches!(&ret, Ty::Named(n, _) if n == "Result" || n == "Option");
+                err = match (&ctx.name, &error) {
+                    (_, _) if other_kind => err.help("use `match` to handle it here"),
+                    (Some(name), _) if name == "main" => {
+                        err.help(format!("handle the {} with `match` instead", if error.is_some() { "error" } else { "None" }))
+                    }
+                    (Some(_), _) if ctx.ret_declared || ret == Ty::Void => {
+                        let suggested = match &error {
+                            None => Ty::Named("Option".into(), vec![ret.clone()]),
+                            Some(e) => Ty::Named("Result".into(), vec![ret.clone(), e.clone()]),
+                        };
+                        err.help(format!("change the return type to `{}`, or use `match`", self.show_example(&suggested)))
+                    }
+                    _ => err.help("use `match` instead"),
+                };
+                if other_kind {
+                    err = err.note("a None is not converted to an error, or an error to a None, automatically");
+                }
+                self.error(err);
+            }
+        }
+        value
     }
 
     fn binop(&mut self, l: &Expr, op: &Op2, r: &Expr, span: Span) -> Ty {
@@ -1335,6 +1469,15 @@ impl Checker {
             self.scopes[0] = saved;
         }
         result
+    }
+}
+
+/// "an" before "Option", "a" before "Result".
+fn article(word: &str) -> &'static str {
+    if word.starts_with(['A', 'E', 'I', 'O', 'U']) {
+        "an"
+    } else {
+        "a"
     }
 }
 

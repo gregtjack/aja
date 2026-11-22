@@ -27,6 +27,7 @@ use crate::{
         TypeParam,
     },
     diagnostic::closest_match,
+    prelude::{self, variant_display},
 };
 
 /// A struct definition: its type parameters, and its fields in declaration
@@ -89,6 +90,13 @@ impl Checker {
                 self.error(
                     TypeError::new(format!("'{name}' is a built-in type, so it can't be redefined"), span)
                         .help("choose a different name"),
+                );
+                continue;
+            }
+            if prelude::is_prelude_type(name) && (self.structs.contains_key(name) || self.enums.contains_key(name)) {
+                self.error(
+                    TypeError::new(format!("'{name}' is defined in the prelude, so it can't be redefined"), span)
+                        .help(format!("use the prelude's '{name}', or choose a different name")),
                 );
                 continue;
             }
@@ -511,12 +519,13 @@ impl Checker {
         };
         if !tys.is_empty() {
             let blanks = vec!["..."; tys.len()].join(", ");
+            let name = variant_display(enum_name, variant);
             self.error(
                 TypeError::new(
-                    format!("variant '{enum_name}::{variant}' holds {}, so it must be given them", plural(tys.len(), "value")),
+                    format!("variant '{name}' holds {}, so it must be given them", plural(tys.len(), "value")),
                     span,
                 )
-                .help(format!("construct it with `{enum_name}::{variant}({blanks})`")),
+                .help(format!("construct it with `{name}({blanks})`")),
             );
         }
         this
@@ -530,14 +539,15 @@ impl Checker {
             }
             return Ty::Error;
         };
+        let name = variant_display(enum_name, variant);
         if tys.len() != args.len() || tys.is_empty() {
             let err = if tys.is_empty() {
-                TypeError::new(format!("variant '{enum_name}::{variant}' holds no values, so it can't be called"), span)
-                    .help(format!("write `{enum_name}::{variant}` without parentheses"))
+                TypeError::new(format!("variant '{name}' holds no values, so it can't be called"), span)
+                    .help(format!("write `{name}` without parentheses"))
             } else {
                 TypeError::new(
                     format!(
-                        "variant '{enum_name}::{variant}' holds {} but {} {} given",
+                        "variant '{name}' holds {} but {} {} given",
                         plural(tys.len(), "value"),
                         args.len(),
                         if args.len() == 1 { "was" } else { "were" },
@@ -554,7 +564,7 @@ impl Checker {
         for (i, (arg, t)) in args.iter().zip(&tys).enumerate() {
             let found = self.expr(arg);
             self.expect(t, &found, arg.span, |e, f| {
-                format!("mismatched types: value {} of '{enum_name}::{variant}' is {e}, found {f}", i + 1)
+                format!("mismatched types: value {} of '{name}' is {e}, found {f}", i + 1)
             });
         }
         this
@@ -647,7 +657,7 @@ impl Checker {
                 };
                 self.pattern_type(&this, expected, p.span);
                 if fields.len() != tys.len() {
-                    let name = format!("{enum_name}::{variant}");
+                    let name = variant_display(enum_name, variant);
                     let err = if !parens {
                         let blanks = vec!["_"; tys.len()].join(", ");
                         TypeError::new(format!("variant '{name}' holds {}", plural(tys.len(), "value")), p.span)
@@ -892,11 +902,11 @@ impl Checker {
         let args: Vec<String> = args.iter().zip(&fields).map(|(a, t)| self.show_pat(a, t)).collect();
         match (ty, c) {
             (Ty::Named(n, _), Ctor::Variant(i)) => {
-                let v = &self.enums[n].variants[*i].0;
+                let v = variant_display(n, &self.enums[n].variants[*i].0);
                 if args.is_empty() {
-                    format!("{n}::{v}")
+                    v
                 } else {
-                    format!("{n}::{v}({})", args.join(", "))
+                    format!("{v}({})", args.join(", "))
                 }
             }
             (Ty::Named(n, _), Ctor::Struct) => {

@@ -251,9 +251,8 @@ fn only_captured_vars_get_cells() {
     let src = "fn make(n: int) -> () -> int {
                    let m = n * 2;
                    let f = fn(k: int) -> int { if k == 0 { m } else { f(k - 1) } };
-                   match Option::Some(n) { Option::Some(p) => fn() { f(p) + n + m }, Option::None => fn() { 0 } }
+                   match Some(n) { Some(p) => fn() { f(p) + n + m }, None => fn() { 0 } }
                }
-               enum Option { Some(int), None }
                fn main() -> int { make(3)() }";
     assert_eq!(cells_made(src), 0);
     assert_eq!(value(src), "Int(15)");
@@ -950,8 +949,7 @@ fn repl_literals_are_kept_and_renumbered_after_a_failed_input() {
 
 #[test]
 fn generic_code_runs() {
-    let types = "enum Option<T> { Some(T), None }
-                 enum List<T> { Nil, Cons(T, List<T>) }
+    let types = "enum List<T> { Nil, Cons(T, List<T>) }
                  struct Pair<A, B> { first: A, second: B }
                  fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
                      match xs { List::Nil => List::Nil, List::Cons(x, rest) => List::Cons(f(x), map(rest, f)) }
@@ -959,7 +957,7 @@ fn generic_code_runs() {
                  fn fold<T, A>(xs: List<T>, acc: A, f: (A, T) -> A) -> A {
                      match xs { List::Nil => acc, List::Cons(x, rest) => fold(rest, f(acc, x), f) }
                  }
-                 fn get<T>(o: Option<T>, d: T) -> T { match o { Option::Some(x) => x, Option::None => d } }";
+                 fn get<T>(o: Option<T>, d: T) -> T { match o { Some(x) => x, None => d } }";
     let main = |ret: &str, body: &str| value(&format!("{types} fn main() -> {ret} {{ {body} }}"));
 
     let xs = "List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))";
@@ -968,10 +966,10 @@ fn generic_code_runs() {
         main("str", &format!("fold(map({xs}, fn(x: int) -> str {{ \"ab\" }}), \"\", fn(a, s) {{ a + s }})")),
         "Str(\"ababab\")"
     );
-    assert_eq!(main("int", "get(Option::Some(5), 0) + get(Option::None, 7)"), "Int(12)");
+    assert_eq!(main("int", "get(Some(5), 0) + get(None, 7)"), "Int(12)");
     assert_eq!(main("str", "let p = Pair { first: 1, second: \"one\" }; Pair { first: p.second, second: p.first }.first"), "Str(\"one\")");
-    assert_eq!(main("bool", "Option::Some(Pair { first: 1, second: \"x\" }) == Option::Some(Pair { first: 1, second: \"x\" })"), "Bool(true)");
-    assert_eq!(main("bool", "Option::Some(1) == Option::None"), "Bool(false)");
+    assert_eq!(main("bool", "Some(Pair { first: 1, second: \"x\" }) == Some(Pair { first: 1, second: \"x\" })"), "Bool(true)");
+    assert_eq!(main("bool", "Some(1) == None"), "Bool(false)");
     // Generic recursion in tail position runs in constant space.
     let src = format!(
         "{types} fn count<T>(xs: List<T>, n: int) -> int {{ match xs {{ List::Nil => n, List::Cons(_, t) => count(t, n + 1) }} }}
@@ -979,4 +977,33 @@ fn generic_code_runs() {
          fn main() -> int {{ count(build(100000, List::Nil), 0) }}"
     );
     assert_eq!(format!("{:?}", run_limited(&src, 4096).unwrap()), "Int(100000)");
+}
+
+#[test]
+fn question_mark_returns_early() {
+    let lib = "fn digit(s: str) -> Result<int, str> { match s { \"1\" => Ok(1), \"2\" => Ok(2), _ => Err(\"bad: \" + s) } }
+               fn sum(a: str, b: str) -> Result<int, str> { Ok(digit(a)? + digit(b)?) }
+               fn show(r: Result<int, str>) -> str { match r { Ok(_) => \"ok\", Err(e) => e } }
+               fn first(o: Option<int>) -> Option<int> { let n = o?; Some(n * 10) }";
+    let main = |ret: &str, body: &str| value(&format!("{lib} fn main() -> {ret} {{ {body} }}"));
+    assert_eq!(main("int", "match sum(\"1\", \"2\") { Ok(n) => n, Err(_) => -1 }"), "Int(3)");
+    // The first error is returned, and nothing after it runs.
+    assert_eq!(main("str", "show(sum(\"x\", \"y\"))"), "Str(\"bad: x\")");
+    assert_eq!(main("str", "show(sum(\"1\", \"y\"))"), "Str(\"bad: y\")");
+    assert_eq!(main("bool", "(first(Some(4)) == Some(40)) && (first(None) == None)"), "Bool(true)");
+    // In a closure, `?` returns from the closure.
+    assert_eq!(
+        main("int", "let f = fn(s) { let n = digit(s)?; Ok(n + 100) }; match f(\"2\") { Ok(n) => n, Err(_) => 0 } + match f(\"z\") { Ok(n) => n, Err(_) => 7 }"),
+        "Int(109)"
+    );
+    // A `?` that doesn't return leaves the rest of the function running.
+    let src = format!("{lib} fn count() -> Result<int, str> {{ var n = 0; while n < 5 {{ n = n + digit(\"1\")?; }} Ok(n) }}
+                       fn main() -> bool {{ count() == Ok(5) }}");
+    assert_eq!(value(&src), "Bool(true)");
+}
+
+#[test]
+fn prelude_values_print_as_written() {
+    let (vm, v) = run_vm("fn main() -> Option<Result<int, str>> { Some(Err(\"no\")) }");
+    assert_eq!(vm.heap.display(&v.unwrap()), "Some(Err(\"no\"))");
 }

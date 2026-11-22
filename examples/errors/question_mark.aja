@@ -1,0 +1,22 @@
+// `?` passes an error on to the caller, so the function it's in must return
+// a `Result` with the same error type. Errors are never converted silently.
+//
+// expect: '?' on a Result can only be used in a function that returns a Result, but function 'total' returns int
+// expect: mismatched types: this '?' passes on an error of type str, but function 'checked' returns errors of type int
+
+fn parse(s: str) -> Result<int, str> {
+    match s {
+        "1" => Ok(1),
+        _ => Err("not a number: " + s),
+    }
+}
+
+fn total(a: str, b: str) -> int {
+    parse(a)? + parse(b)?
+}
+
+fn checked(a: str) -> Result<int, int> {
+    Ok(parse(a)?)
+}
+
+fn main() {}

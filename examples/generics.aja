@@ -1,16 +1,7 @@
 // Generics: functions, structs, and enums can take type parameters, written
 // in angle brackets. Type arguments are inferred where the code is used, so
-// `Option::Some(1)` is an `Option<int>` without saying so.
-
-enum Option<T> {
-    Some(T),
-    None,
-}
-
-enum Result<T, E> {
-    Ok(T),
-    Err(E),
-}
+// `Some(1)` is an `Option<int>` without saying so. (`Option` comes from the
+// prelude; see results.aja.)
 
 struct Pair<A, B> { first: A, second: B }
 
@@ -41,31 +32,16 @@ fn fold<T, A>(xs: List<T>, acc: A, f: (A, T) -> A) -> A {
 
 fn find<T>(xs: List<T>, wanted: (T) -> bool) -> Option<T> {
     match xs {
-        List::Nil => Option::None,
-        List::Cons(x, _) if wanted(x) => Option::Some(x),
+        List::Nil => None,
+        List::Cons(x, _) if wanted(x) => Some(x),
         List::Cons(_, rest) => find(rest, wanted),
     }
 }
 
 fn unwrap_or<T>(o: Option<T>, default: T) -> T {
     match o {
-        Option::Some(x) => x,
-        Option::None => default,
-    }
-}
-
-// Errors are values: a function that can fail says so in its return type.
-fn divide(a: int, b: int) -> Result<int, str> {
-    if b == 0 {
-        return Result::Err("division by zero");
-    }
-    Result::Ok(a / b)
-}
-
-fn describe(r: Result<int, str>) -> str {
-    match r {
-        Result::Ok(_) => "ok",
-        Result::Err(e) => "failed: " + e,
+        Some(x) => x,
+        None => default,
     }
 }
 
@@ -82,8 +58,6 @@ fn main() {
     println("first square over 5:", unwrap_or(find(squares, fn(x) { x > 5 }), -1));
     println("first square over 50:", unwrap_or(find(squares, fn(x) { x > 50 }), -1));
 
-    println(describe(divide(7, 2)), describe(divide(7, 0)));
-
     // Values of generic types compare structurally when their contents can.
-    println(Option::Some(Pair { first: 1, second: "a" }) == Option::Some(Pair { first: 1, second: "a" }));
+    println(Some(Pair { first: 1, second: "a" }) == Some(Pair { first: 1, second: "a" }));
 }

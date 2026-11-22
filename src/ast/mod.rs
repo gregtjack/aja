@@ -229,6 +229,9 @@ pub enum Expression {
         base: Option<Box<Expr>>,
     },
     Match(Box<Expr>, Vec<Arm>),
+    /// `value?`: the value inside an `Ok` or `Some`, or else return the
+    /// `Err` or `None` from the enclosing function.
+    Try(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]

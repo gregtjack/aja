@@ -137,6 +137,7 @@ where
                     }
                 }
                 '%' => return Ok((start, Token::Modulo, self.get_location())),
+                '?' => return Ok((start, Token::Question, self.get_location())),
                 _ => {
                     return Err(LexicalError::new(
                         start,

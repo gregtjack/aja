@@ -17,6 +17,7 @@ mod check;
 mod diagnostic;
 mod lexer;
 mod parse;
+mod prelude;
 mod token;
 mod vm;
 

@@ -30,8 +30,9 @@ use crate::{
         PatternKind, Program, Span, Statement, Variable,
     },
     builtins::BUILTINS,
-    check::{OperandType, Types},
+    check::{OperandType, TryOn, Types},
     diagnostic::Diagnostic,
+    prelude,
 };
 
 use super::bytecode::{Capture, Layout, Literals, Op, Proto, Reg};
@@ -92,7 +93,42 @@ impl Compiler {
         for b in BUILTINS {
             compiler.define_global(b.name.into());
         }
+        for def in prelude::definitions() {
+            compiler.define_data(&def);
+        }
         compiler
+    }
+
+    /// Record the layout of a struct or enum definition.
+    fn define_data(&mut self, def: &Definition) {
+        match def {
+            Definition::Struct { name, fields, .. } => {
+                let fields: Vec<Id> = fields.iter().map(|f| f.name.clone()).collect();
+                let layout = Rc::new(Layout {
+                    name: name.to_string(),
+                    tag: 0,
+                    fields: Some(fields.clone()),
+                });
+                self.data.insert(name.clone(), DataDef::Struct { layout, fields });
+            }
+            Definition::Enum { name, variants, .. } => {
+                let variants = variants
+                    .iter()
+                    .enumerate()
+                    .map(|(tag, v)| {
+                        let layout = Rc::new(Layout {
+                            // As written in source: `Some`, `Shape::Circle`.
+                            name: prelude::variant_display(name, &v.name),
+                            tag: tag as u32,
+                            fields: None,
+                        });
+                        (v.name.clone(), layout)
+                    })
+                    .collect();
+                self.data.insert(name.clone(), DataDef::Enum { variants });
+            }
+            Definition::Function { .. } => {}
+        }
     }
 
     fn define_global(&mut self, name: Id) -> u32 {
@@ -132,31 +168,7 @@ impl Compiler {
                     let slot = self.define_global(name.clone());
                     fns.push((slot, name, name_span, params, body, rtype));
                 }
-                Definition::Struct { name, fields, .. } => {
-                    let fields: Vec<Id> = fields.iter().map(|f| f.name.clone()).collect();
-                    let layout = Rc::new(Layout {
-                        name: name.to_string(),
-                        tag: 0,
-                        fields: Some(fields.clone()),
-                    });
-                    self.data
-                        .insert(name.clone(), DataDef::Struct { layout, fields });
-                }
-                Definition::Enum { name, variants, .. } => {
-                    let variants = variants
-                        .iter()
-                        .enumerate()
-                        .map(|(tag, v)| {
-                            let layout = Rc::new(Layout {
-                                name: format!("{name}::{}", v.name),
-                                tag: tag as u32,
-                                fields: None,
-                            });
-                            (v.name.clone(), layout)
-                        })
-                        .collect();
-                    self.data.insert(name.clone(), DataDef::Enum { variants });
-                }
+                Definition::Struct { .. } | Definition::Enum { .. } => self.define_data(def),
             }
         }
 
@@ -728,6 +740,26 @@ impl<'a> FnCompiler<'a> {
                 self.emit(Op::GetField { dst, obj, index }, span);
             }
             Expression::Match(scrutinee, arms) => self.match_(scrutinee, arms, dst, span),
+            Expression::Try(inner) => {
+                // `Ok(v)` or `Some(v)` gives `v`. Anything else (`Err(e)` or
+                // `None`) is returned as it is: a value's representation
+                // doesn't depend on its type arguments, so it is also the
+                // function's `Err(e)` or `None`.
+                let mark = self.mark();
+                let value = self.expr_any(inner);
+                let (enum_name, variant) = match self.types.try_on(e) {
+                    TryOn::Option => ("Option", "Some"),
+                    TryOn::Result => ("Result", "Ok"),
+                };
+                let tag = self.variant_tag(&enum_name.into(), &variant.into());
+                let ok = self.alloc();
+                self.emit(Op::TestTag { dst: ok, obj: value, tag }, span);
+                let jump = self.emit(Op::JumpIfTrue { cond: ok, target: 0 }, span);
+                self.emit(Op::Return { src: value }, span);
+                self.patch(jump);
+                self.emit(Op::GetField { dst, obj: value, index: 0 }, span);
+                self.release(mark);
+            }
             Expression::Call(callee, args) => {
                 let base = self.alloc();
                 self.expr(callee, base);
@@ -1199,9 +1231,10 @@ impl CaptureFinder {
             | Expression::True
             | Expression::False
             | Expression::Path(..) => {}
-            Expression::Grouping(e) | Expression::Unary(_, e) | Expression::Field(e, ..) => {
-                self.expr(e)
-            }
+            Expression::Grouping(e)
+            | Expression::Unary(_, e)
+            | Expression::Field(e, ..)
+            | Expression::Try(e) => self.expr(e),
             Expression::StructLit { fields, base, .. } => {
                 for f in fields {
                     self.expr(&f.value);

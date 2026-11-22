@@ -13,7 +13,8 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [garbage.aja](garbage.aja) | The garbage collector freeing a million self-referencing closures |
 | [strings.aja](strings.aja) | Joining strings with `+`, and the collector freeing big strings |
 | [data.aja](data.aja) | Structs, enums with data, recursive types, and `match` with nested patterns and guards |
-| [generics.aja](generics.aja) | Generic functions, structs, and enums: `Option`, `Result`, `Pair`, and a list with `map` and `fold` |
+| [generics.aja](generics.aja) | Generic functions, structs, and enums: `Pair`, and a list with `map`, `fold`, and `find` |
+| [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |
 
 ## Errors
 
@@ -33,6 +34,7 @@ there.
 | [assert.aja](errors/assert.aja) | A failed `assert` |
 | [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
 | [generic_body.aja](errors/generic_body.aja) | Generic code assuming things about a type parameter, and mismatched type arguments |
+| [question_mark.aja](errors/question_mark.aja) | `?` in a function that doesn't return a `Result`, and with a different error type |
 
 `cargo test` runs every example: the ones here must succeed, and each one in
 `errors/` must fail with exactly the errors listed in its `// expect:` lines.
