@@ -1,8 +1,8 @@
-use std::{cell::RefCell, fmt, rc::Rc};
+use std::{fmt, rc::Rc};
 
 use crate::builtins::Builtin;
 
-use super::{bytecode::Proto, native::NativeFn};
+use super::{heap::Gc, native::NativeFn};
 
 /// A value in a register, global, or cell.
 ///
@@ -16,42 +16,22 @@ pub enum Value {
     Float(f32),
     Bool(bool),
     Str(Rc<str>),
-    Fn(Rc<Closure>),
+    /// A closure on the heap.
+    Fn(Gc),
     /// A built-in: its signature and the VM's implementation.
     Native(&'static Builtin, NativeFn),
-    /// A local variable captured by a closure. Cells only appear in the
-    /// registers of the function that declared the variable; programs never
-    /// see them as values.
-    Cell(Rc<RefCell<Value>>),
-}
-
-/// A function value: compiled code plus the variables it captured.
-pub struct Closure {
-    pub proto: Rc<Proto>,
-    pub upvalues: Box<[Rc<RefCell<Value>>]>,
+    /// A local variable captured by a closure, as a cell on the heap. Cells
+    /// only appear in the registers of the function that declared the
+    /// variable; programs never see them as values.
+    Cell(Gc),
 }
 
 impl Value {
-    /// How the REPL shows a value: like `print`, but with strings quoted.
-    pub fn repr(&self) -> String {
+    /// The heap object this value refers to, if any.
+    pub fn handle(&self) -> Option<Gc> {
         match self {
-            Value::Str(s) => format!("{:?}", &**s),
-            other => other.to_string(),
-        }
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Void => write!(f, "()"),
-            Value::Int(i) => write!(f, "{i}"),
-            Value::Float(n) => write!(f, "{n:?}"),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Str(s) => write!(f, "{s}"),
-            Value::Fn(c) => write!(f, "<fn {}>", c.proto.signature),
-            Value::Native(builtin, _) => write!(f, "<native fn: {}>", builtin.name),
-            Value::Cell(c) => write!(f, "{}", c.borrow()),
+            Value::Fn(gc) | Value::Cell(gc) => Some(*gc),
+            _ => None,
         }
     }
 }
@@ -64,8 +44,9 @@ impl fmt::Debug for Value {
             Value::Float(n) => write!(f, "Float({n:?})"),
             Value::Bool(b) => write!(f, "Bool({b})"),
             Value::Str(s) => write!(f, "Str({:?})", &**s),
-            Value::Fn(_) | Value::Native(..) => write!(f, "Fn({self})"),
-            Value::Cell(c) => write!(f, "Cell({:?})", c.borrow()),
+            Value::Fn(gc) => write!(f, "Fn({gc})"),
+            Value::Native(b, _) => write!(f, "Native({})", b.name),
+            Value::Cell(gc) => write!(f, "Cell({gc})"),
         }
     }
 }

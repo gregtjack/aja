@@ -105,9 +105,13 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
   QBE backend because it supports stack maps, which a precise garbage collector
   needs in order to find pointers on the stack. QBE has no such support.
   Cranelift is also written in Rust, like the rest of Aja.
-- **Memory management.** To be decided between a precise tracing GC and
-  reference counting with compile-time elision plus a cycle collector (as in
-  Swift, Nim's ORC, or Koka's Perceus). The VM is the place to prototype both.
+- **Memory management.** A precise tracing GC, chosen over reference counting
+  with compile-time elision plus a cycle collector (as in Swift, Nim's ORC, or
+  Koka's Perceus). Tracing collects cycles without extra machinery, needs no
+  atomic count updates once tasks run on several OS threads, and matches the
+  stack maps Cranelift provides for native code. The VM's collector is a
+  simple non-moving mark-and-sweep; it can become generational or
+  incremental later without changing the language.
 - **Concurrency runtime.** Stackful green threads multiplexed over a small pool
   of OS threads, with I/O through kqueue / epoll / io_uring. In the VM, a task's
   frames live on the heap. In native code, each task gets its own growable stack
@@ -124,7 +128,10 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
    bytecode, and the tree-walking interpreter is gone. The checker hands the
    compiler operand types rather than a full typed IR; a typed IR can come
    when data types need it.
-4. **Memory management.** Choose and implement the collector in the VM.
+4. **Memory management.** ✅ Closures and captured variables live on a
+   garbage-collected heap with a precise mark-and-sweep collector. Strings,
+   which can't form cycles, are still reference-counted. Next: put strings and
+   the data types from step 2 on the heap too.
 5. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.
 6. **Green threads and structured concurrency** in the VM.

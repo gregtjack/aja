@@ -217,7 +217,7 @@ impl Repl {
         let input = self.compiler.repl(stmt, &types, input_span(history));
         match self.vm.run_repl(input) {
             Ok(Value::Void) => {}
-            Ok(value) => println!("{}", value.repr()),
+            Ok(value) => println!("{}", self.vm.heap.repr(&value)),
             Err(err) => {
                 report(&err.to_diagnostic(), history, "<repl>");
                 (self.checker, self.compiler) = saved;

@@ -182,7 +182,8 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/vm/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
 | `src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
 | `src/vm/mod.rs`       | The VM: call frames, the dispatch loop, runtime errors |
-| `src/vm/value.rs`     | Runtime values and closures |
+| `src/vm/value.rs`     | Runtime values |
+| `src/vm/heap.rs`      | Garbage-collected heap for closures and cells |
 | `src/vm/native.rs`    | Built-in implementations |
 | `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color) |
 | `src/compile/`        | Code-generation scaffolding targeting QBE (not yet wired up) |
@@ -192,15 +193,23 @@ parameters, locals, and temporaries, and instructions name registers
 directly. Instructions are typed: the type checker records whether each
 operator works on ints, floats, bools, or strings, and the compiler emits,
 say, `AddI` or `AddF` accordingly, so the VM never inspects operand types to
-decide what to do and has no runtime type checks. Call frames live on the
-heap, so deep recursion can't overflow the Rust stack; more than 100,000
+decide what to do and has no runtime type checks. Call frames are kept in
+a growable array, not on the Rust stack, so deep recursion can't overflow it; more than 100,000
 calls in progress is reported as a stack overflow.
 
 A local that a closure captures is stored in a shared cell, so the function
 and its closures see each other's assignments. The compiler finds these
-variables in a pass over each function before compiling it. Closures that
-capture each other through cells are not freed yet; memory management is
-on the roadmap.
+variables in a pass over each function before compiling it.
+
+Closures and cells live on a garbage-collected heap (`src/vm/heap.rs`). The
+collector is a precise mark-and-sweep: it starts from the registers in use,
+the globals, and the call frames, marks every object reachable from them, and
+frees the rest, so cycles (such as a closure that calls itself through a
+variable it captures) are freed too. It runs when the VM allocates, once the
+number of live objects has doubled since the last collection. Strings hold no
+references, so they stay reference-counted. The VM tests run with the
+collector in stress mode, collecting before every allocation, so any value
+the VM forgets to keep reachable is caught.
 
 ## Status
 

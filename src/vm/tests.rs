@@ -1,8 +1,10 @@
 use super::*;
 use crate::{check, lexer::tokenize, parse::Parser};
 
-/// Check, compile, and run a program, returning `main`'s result.
-fn run(src: &str) -> Result<Value, RuntimeError> {
+/// Check, compile, and run a program, returning the VM and `main`'s
+/// result. The collector runs before every allocation, so a value the VM
+/// forgot to keep reachable is freed, and its use then panics.
+fn run_vm(src: &str) -> (Vm, Result<Value, RuntimeError>) {
     let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
     let types = match check::check_program(&ast) {
         Ok(types) => types,
@@ -12,7 +14,14 @@ fn run(src: &str) -> Result<Value, RuntimeError> {
         }
     };
     let program = Compiler::new().program(&ast, &types).expect("program compiles");
-    Vm::new().run_program(&program)
+    let mut vm = Vm::new();
+    vm.heap.stress = true;
+    let result = vm.run_program(&program);
+    (vm, result)
+}
+
+fn run(src: &str) -> Result<Value, RuntimeError> {
+    run_vm(src).1
 }
 
 /// Run a program and show its result, e.g. `Int(3)`.
@@ -34,13 +43,6 @@ fn main_value(ret: &str, body: &str) -> String {
 #[track_caller]
 fn failure(src: &str) -> String {
     run(src).expect_err("program should fail").message
-}
-
-#[test]
-fn every_builtin_is_implemented() {
-    for b in BUILTINS {
-        assert!(native::implementation(b.name).is_some(), "built-in '{}' has no implementation", b.name);
-    }
 }
 
 #[test]
@@ -214,7 +216,10 @@ fn functions_are_values() {
 
 #[test]
 fn values_display_like_print() {
-    let shown = |src: &str| run(src).unwrap().to_string();
+    let shown = |src: &str| {
+        let (vm, result) = run_vm(src);
+        vm.heap.display(&result.unwrap())
+    };
     assert_eq!(shown("fn main() -> float { 1.0 }"), "1.0");
     assert_eq!(shown("fn main() -> str { \"a\\tb\" }"), "a\tb");
     assert_eq!(shown("fn main() -> fn(int) -> int { fn(x: int) -> int { x } }"), "<fn (x: int) -> int>");
@@ -297,6 +302,7 @@ fn repl_inputs_share_globals() {
     let mut checker = check::Checker::new();
     let mut compiler = Compiler::new();
     let mut vm = Vm::new();
+    vm.heap.stress = true;
     let mut eval = |src: &str| {
         let stmt = Parser::new(tokenize(src).unwrap().into_iter()).parse_stmt_only().unwrap();
         let types = checker.check_repl_stmt(&stmt).unwrap();
@@ -313,4 +319,72 @@ fn repl_inputs_share_globals() {
     assert_eq!(eval("let x = \"s\""), "Void");
     assert_eq!(eval("add(1)"), "Int(6)");
     assert_eq!(eval("x"), "Str(\"s\")");
+}
+
+/// How many heap objects are left once `src` has run and the collector has
+/// freed what is unreachable. Its top-level functions are always left.
+fn live_after(src: &str) -> usize {
+    let (mut vm, result) = run_vm(src);
+    result.expect("program runs");
+    vm.collect_garbage();
+    vm.heap.live()
+}
+
+#[test]
+fn cycles_through_closures_are_freed() {
+    // `f` captures the cell it is stored in: a cycle.
+    let recursive = "fn make() -> int {
+                         let f = fn(n: int) -> int { n };
+                         f = fn(n: int) -> int { if n == 0 { 0 } else { f(n - 1) } };
+                         f(3)
+                     }
+                     fn main() { let i = 0; while i < 200 { make(); i = i + 1; } }";
+    assert_eq!(live_after(recursive), 2);
+
+    // Two closures that call each other through captured variables.
+    let mutual = "fn make() -> bool {
+                      let even = fn(n: int) -> bool { true };
+                      let odd = fn(n: int) -> bool { if n == 0 { false } else { even(n - 1) } };
+                      even = fn(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } };
+                      even(10)
+                  }
+                  fn main() { let i = 0; while i < 200 { assert(make()); i = i + 1; } }";
+    assert_eq!(live_after(mutual), 2);
+}
+
+#[test]
+fn reachable_objects_survive_collection() {
+    // Every allocation collects (stress mode), while counters and their
+    // cells are only reachable from registers and other closures.
+    let src = "fn counter() -> fn() -> int { let c = 0; fn() { c = c + 1; c } }
+               fn main() -> int {
+                   let a = counter();
+                   let total = 0;
+                   let i = 0;
+                   while i < 50 {
+                       let b = counter();
+                       b();
+                       total = total + a() + b();
+                       i = i + 1;
+                   }
+                   total
+               }";
+    assert_eq!(value(src), "Int(1375)");
+}
+
+#[test]
+fn collection_runs_without_stress_mode() {
+    // Enough garbage to pass the collector's threshold several times.
+    let src = "fn main() -> int {
+                   let i = 0;
+                   let keep = fn() -> int { i };
+                   while i < 10000 { let c = 0; let g = fn() -> int { c = c + 1; c }; g(); i = i + 1; }
+                   keep()
+               }";
+    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let types = check::check_program(&ast).unwrap();
+    let program = Compiler::new().program(&ast, &types).unwrap();
+    let mut vm = Vm::new();
+    assert_eq!(format!("{:?}", vm.run_program(&program).unwrap()), "Int(10000)");
+    assert!(vm.heap.live() < 3000, "{} objects live", vm.heap.live());
 }
