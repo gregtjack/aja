@@ -2,10 +2,14 @@
 # Aja
 
 Aja is a small, expression-oriented programming language written in Rust. The
-long-term goal is a lightweight, fast, compiled systems language (with a
-[QBE](https://c9x.me/compile/) backend). Today, Aja runs on a **tree-walking
-interpreter** with a REPL; the compiler backend is scaffolded but not yet
-implemented.
+goal is the language that is easiest for humans and agents to write correctly:
+statically typed with inference, garbage collected, with green-thread
+concurrency, running on a bytecode VM during development and compiled ahead
+of time to native code through Cranelift. See [DESIGN.md](DESIGN.md) for the
+principles, non-goals, and roadmap.
+
+Today, Aja runs on a **tree-walking interpreter** with a REPL, and type
+annotations are optional and checked at runtime.
 
 ```rust
 fn fact(n: int) -> int {
@@ -15,7 +19,7 @@ fn fact(n: int) -> int {
 
 fn main() -> int {
     let start = clock();
-    let add = |a: int, b: int| -> int a + b;
+    let add = fn(a: int, b: int) -> int { a + b };
 
     let i = 0;
     while i < 3 {
@@ -75,7 +79,7 @@ A program is a sequence of top-level `fn` definitions. Execution starts at
 | `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`      |
 | `void`  | —                       | Result of statements / no value      |
 | `any`   | —                       | Default when no annotation is given  |
-| functions | `\|x: int\| -> int x + 1` | First-class; closures capture their scope |
+| functions | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
 
 Type annotations are optional and are **checked at runtime**: on `let`
 bindings, function parameters, and function return values. An unannotated
@@ -93,8 +97,10 @@ let s: str = 5;      // TypeError: cannot cast int to str
   shadows the earlier one.
 - **Functions:** `fn name(a: int, b) -> int { ... }`. Parameter and return
   annotations are optional.
-- **Closures:** `|a, b| expr` or `|a: int| -> int { ... }`. Closures capture
-  their enclosing environment and can mutate it (e.g. counters).
+- **Closures:** an anonymous `fn` with the same syntax as a named function,
+  minus the name: `fn(a, b) { a + b }`, `fn(x: int) -> int { x * 2 }`,
+  `fn() { ... }`. The body is always a block. Closures capture their
+  enclosing environment and can mutate it (e.g. counters).
 - **Blocks are expressions:** the final expression without a trailing `;` is
   the block's value. `return expr;` exits a function early.
 - **`if`:** `if cond { ... } else { ... }` is an expression; `if` without
@@ -152,7 +158,8 @@ optional runtime type checks; built-ins (`print`, `clock`, `sleep`,
 **Reserved or partially present, not yet usable:**
 - `match`, `::`, `=>`, `<-`, `[` `]` are lexed but have no grammar.
 - `struct` definitions and a `List<T>` type exist in the AST only.
-- The QBE compiler backend is a stub.
+- The QBE compiler backend is a stub; it will be replaced by Cranelift (see
+  [DESIGN.md](DESIGN.md)).
 
 **Errors:** errors are reported in a rustc-like format and exit with a
 non-zero status. Syntax and parse errors point at the offending source:
@@ -190,7 +197,5 @@ Output is colored when stderr is a terminal; set `NO_COLOR` to disable.
 `src/diagnostic.rs` holds the shared renderer.
 
 **Known limitations:**
-- Zero-argument closures (`|| expr`) don't parse, because `||` is read as
-  logical or.
 - The REPL handles one line at a time and can't define top-level functions.
 - `main`'s return value is printed in debug form (e.g. `Int(0)`).

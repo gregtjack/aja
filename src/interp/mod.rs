@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn closures_still_capture_and_mutate() {
         let v = run(
-            "fn mk() { let c = 0; |x| { c = c + x; c } }
+            "fn mk() { let c = 0; fn(x) { c = c + x; c } }
              fn main() { let k = mk(); k(1); k(1); k(5) }",
         );
         assert!(matches!(kind(&v), Ok(Value::Int(7))), "got {:?}", v);

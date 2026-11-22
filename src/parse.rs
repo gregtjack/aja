@@ -298,6 +298,44 @@ mod tests {
         let result = parser.parse().unwrap();
         assert_eq!(result.definitions.len(), 0);
     }
+
+    fn parse_closure(src: &str) -> (Vec<crate::ast::Variable>, Type) {
+        match create_parser(src).parse_expr_only().unwrap().kind {
+            Expression::Closure(params, rt, body) => {
+                assert!(matches!(*body, Statement::Block(..)), "body: {:?}", body);
+                (params, rt)
+            }
+            other => panic!("expected a closure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_closures() {
+        let (ps, rt) = parse_closure("fn() { 1 }");
+        assert!(ps.is_empty());
+        assert_eq!(rt, Type::Any);
+
+        let (ps, _) = parse_closure("fn(x) { x * 2 }");
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].t, Type::Any);
+
+        let (ps, rt) = parse_closure("fn(a: int, b: int) -> int { a + b }");
+        assert_eq!(ps.len(), 2);
+        assert_eq!(ps[1].t, Type::Int);
+        assert_eq!(rt, Type::Int);
+    }
+
+    #[test]
+    fn test_parse_closure_errors_have_help() {
+        let help = |src: &str| create_parser(src).parse_expr_only().unwrap_err().help;
+        // Old pipe syntax, with and without parameters
+        assert!(help("|x| x + 1").unwrap().contains("fn(x)"));
+        assert!(help("|| 1").unwrap().contains("fn(x)"));
+        // Body must be a block
+        assert!(help("fn(x) x + 1").unwrap().contains("always a block"));
+        // Named function in expression position
+        assert!(help("fn foo() { 1 }").unwrap().contains("top level"));
+    }
 }
 
 macro_rules! tok_matches {
@@ -403,7 +441,7 @@ where
             _ => unreachable!(),
         };
 
-        let params = self.parse_fn_params(false)?;
+        let params = self.parse_fn_params()?;
         let rtype = self.parse_fn_return_type_annotation()?;
         let body = self.parse_block()?;
 
@@ -415,14 +453,10 @@ where
         })
     }
 
-    fn parse_fn_params(&mut self, closure: bool) -> ParseResult<Vec<Variable>> {
+    fn parse_fn_params(&mut self) -> ParseResult<Vec<Variable>> {
         let mut xs = Vec::new();
 
-        if closure {
-            self.consume(Token::Pipe)?;
-        } else {
-            self.consume(Token::LeftParen)?;
-        }
+        self.consume(Token::LeftParen)?;
 
         if !tok_matches!(self, Token::RightParen) {
             loop {
@@ -442,11 +476,7 @@ where
             }
         }
 
-        if closure {
-            self.consume(Token::Pipe)?;
-        } else {
-            self.consume(Token::RightParen)?;
-        }
+        self.consume(Token::RightParen)?;
 
         Ok(xs)
     }
@@ -790,11 +820,28 @@ where
                 self.consume(Token::RightParen)?;
                 Expression::Grouping(Box::new(expr))
             }
-            Token::Pipe => {
-                let params = self.parse_fn_params(true)?;
+            Token::Fn => {
+                self.next();
+                if let Some((_, Token::Ident(name), _)) = self.peek().cloned() {
+                    return Err(self.expected("'(' after 'fn'").help(format!(
+                        "named functions can only be defined at the top level; \
+                         to make a closure, write 'let {name} = fn(...) {{ ... }}'"
+                    )));
+                }
+                let params = self.parse_fn_params()?;
                 let rt = self.parse_fn_return_type_annotation()?;
-                let body = Box::new(self.parse_stmt()?);
+                if !tok_matches!(self, Token::LeftBrace) {
+                    return Err(self
+                        .expected("'{' to start the function body")
+                        .help("a closure's body is always a block, e.g. 'fn(x) { x + 1 }'"));
+                }
+                let body = Box::new(self.parse_block()?);
                 Expression::Closure(params, rt, body)
+            }
+            Token::Pipe | Token::Or => {
+                return Err(self
+                    .expected("an expression")
+                    .help("closures are written 'fn(x) { x + 1 }', not '|x| x + 1'"));
             }
             _ => return Err(self.expected("an expression")),
         };
