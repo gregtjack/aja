@@ -1,0 +1,26 @@
+// Type inference: signatures are written out, but types inside function
+// bodies are inferred. Nothing here is dynamically typed; every variable
+// gets exactly one type, checked before the program runs.
+
+fn main() {
+    // `count` is an int, `ratio` a float: inferred from the literals.
+    let count = 3;
+    let ratio = 0.5;
+
+    // Closure parameters are inferred from how they're used: `+` with a
+    // float argument makes this fn(float, float) -> float.
+    let add = fn(a, b) { a + b };
+    println("add:", add(1.5, 2.25));
+
+    // Here, `f` is called with an int, and its result is added to an int.
+    let twice = fn(f, x) { f(f(x)) };
+    println("twice:", twice(fn(n) { n * 3 }, count));
+
+    // Comparisons work on numbers and produce bools.
+    let is_big = fn(x) { x > 100 };
+    println("is 250 big?", is_big(250));
+
+    // int and float never mix silently: convert explicitly instead (see
+    // errors/type_mismatch.aja for what the checker says otherwise).
+    println("ratio * 4.0 =", ratio * 4.0);
+}

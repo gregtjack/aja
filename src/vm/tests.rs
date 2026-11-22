@@ -103,17 +103,74 @@ fn recursion_uses_per_call_registers() {
     assert_eq!(value(src), "Int(6765)");
 }
 
+/// Run a program with the call stack limited to `limit` bytes.
+fn run_limited(src: &str, limit: usize) -> Result<Value, RuntimeError> {
+    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let types = check::check_program(&ast).unwrap();
+    let program = Compiler::new().program(&ast, &types).unwrap();
+    let mut vm = Vm::new();
+    vm.stack_limit = limit;
+    vm.run_program(&program)
+}
+
 #[test]
 fn deep_recursion_does_not_overflow_the_rust_stack() {
-    let src = "fn sum(n: int) -> int { if n == 0 { 0 } else { n + sum(n - 1) } }
-               fn main() -> int { sum(50000) }";
-    assert_eq!(value(src), "Int(1250025000)");
+    // 200,000 calls in progress at once.
+    let src = "fn depth(n: int) -> int { if n == 0 { 0 } else { 1 + depth(n - 1) } }
+               fn main() -> int { depth(200000) }";
+    assert_eq!(value(src), "Int(200000)");
 }
 
 #[test]
 fn runaway_recursion_is_a_stack_overflow() {
-    let msg = failure("fn f(n: int) -> int { f(n + 1) } fn main() -> int { f(0) }");
-    assert!(msg.starts_with("stack overflow"), "got {msg}");
+    let src = "fn f(n: int) -> int { 1 + f(n + 1) } fn main() -> int { f(0) }";
+    let msg = run_limited(src, 1 << 20).expect_err("should overflow").message;
+    assert!(msg.starts_with("stack overflow: the call stack has grown past 1 MB ("), "got {msg}");
+}
+
+#[test]
+fn tail_calls_run_in_constant_space() {
+    // A million calls deep, with room for only a handful of frames.
+    let limit = 4096;
+    let count = "fn count(n: int, acc: int) -> int { if n == 0 { acc } else { count(n - 1, acc + 1) } }
+                 fn main() -> int { count(1000000, 0) }";
+    assert_eq!(format!("{:?}", run_limited(count, limit).unwrap()), "Int(1000000)");
+
+    // `return` and both branches of an `if` are tail positions, and mutual
+    // recursion works too.
+    let even = "fn is_even(n: int) -> bool { if n == 0 { return true; } return is_odd(n - 1); }
+                fn is_odd(n: int) -> bool { if n == 0 { false } else { is_even(n - 1) } }
+                fn main() -> bool { is_even(1000001) }";
+    assert_eq!(format!("{:?}", run_limited(even, limit).unwrap()), "Bool(false)");
+
+    // Closures, including ones that capture variables, can be tail-called.
+    let closure = "fn main() -> int {
+                       let step = 1;
+                       let f = fn(n: int) -> int { n };
+                       f = fn(n: int) -> int { if n >= 1000000 { n } else { f(n + step) } };
+                       f(0)
+                   }";
+    assert_eq!(format!("{:?}", run_limited(closure, limit).unwrap()), "Int(1000000)");
+
+    // A call that isn't last still needs its frame.
+    let not_tail = "fn depth(n: int) -> int { if n == 0 { 0 } else { 1 + depth(n - 1) } }
+                    fn main() -> int { depth(1000000) }";
+    assert!(run_limited(not_tail, limit).is_err());
+}
+
+#[test]
+fn tail_calls_pass_arguments_correctly() {
+    // Arguments that read the caller's parameters, in a different order.
+    let src = "fn swap(a: int, b: int, n: int) -> int { if n == 0 { a * 10 + b } else { swap(b, a, n - 1) } }
+               fn main() -> int { swap(1, 2, 3) }";
+    assert_eq!(value(src), "Int(21)");
+    // Tail calls to a function with more registers than the caller, and to
+    // a built-in.
+    let src = "fn big(x: int) -> int { let a = x + 1; let b = a + 1; let c = b + 1; let d = c + 1; d }
+               fn small(x: int) -> int { big(x) }
+               fn main() -> int { small(1) }";
+    assert_eq!(value(src), "Int(5)");
+    assert_eq!(value("fn main() { println(\"tail-called built-in\") }"), "Void");
 }
 
 #[test]
@@ -269,7 +326,7 @@ fn runtime_errors_point_at_the_failing_expression() {
 #[test]
 fn runtime_errors_carry_a_call_trace() {
     let (text, notes) = located(
-        "fn c(x: int) -> int { x / 0 }\nfn b(x: int) -> int { c(x) }\nfn main() { b(1); }",
+        "fn c(x: int) -> int { x / 0 }\nfn b(x: int) -> int { c(x) + 1 }\nfn main() { b(1); }",
     );
     assert_eq!(text, "x / 0");
     assert_eq!(
@@ -282,15 +339,21 @@ fn runtime_errors_carry_a_call_trace() {
 
     // Recursive frames collapse into a single note.
     let (_, notes) = located(
-        "fn down(n: int) -> int { if n == 0 { 1 / n } else { down(n - 1) } }\nfn main() { down(5); }",
+        "fn down(n: int) -> int { if n == 0 { 1 / n } else { 0 + down(n - 1) } }\nfn main() { down(5); }",
     );
     assert_eq!(
         notes,
         vec![
-            "in function 'down', called at line 1, column 53 (5 times)",
+            "in function 'down', called at line 1, column 57 (5 times)",
             "in function 'down', called at line 2, column 13",
         ]
     );
+
+    // A tail call replaces its caller's frame, so the caller isn't listed.
+    let (_, notes) = located(
+        "fn c(x: int) -> int { x / 0 }\nfn b(x: int) -> int { c(x) }\nfn main() { b(1); }",
+    );
+    assert_eq!(notes, vec!["in function 'c', tail-called at line 2, column 23"]);
 
     // Closures are described by the name they were called through.
     let (_, notes) = located("fn main() { let f = fn() { assert(false); }; f(); }");
@@ -387,4 +450,75 @@ fn collection_runs_without_stress_mode() {
     let mut vm = Vm::new();
     assert_eq!(format!("{:?}", vm.run_program(&program).unwrap()), "Int(10000)");
     assert!(vm.heap.live() < 3000, "{} objects live", vm.heap.live());
+}
+
+#[test]
+fn statements_ending_in_a_block_need_no_semicolon() {
+    // An `if` / `else` followed by more statements.
+    assert_eq!(
+        main_value("int", "let x = 0; if x == 0 { x = 1; } else { x = 2; } x = x * 10; x"),
+        "Int(10)"
+    );
+    // A nested block keeps its statements, and its scope.
+    assert_eq!(main_value("int", "let a = 1; { let a = 2; a = a + 1; } a"), "Int(1)");
+    assert_eq!(main_value("int", "{ let b = 2; b = b * 3; } 4"), "Int(4)");
+    assert_eq!(main_value("int", "{ 5 }"), "Int(5)");
+}
+
+#[test]
+fn if_expressions_can_be_assigned() {
+    assert_eq!(main_value("int", "let n = 3; n = if n > 2 { n * 2 } else { 0 }; n"), "Int(6)");
+}
+
+/// Run an Aja source file through every stage, returning the messages of
+/// the errors that stopped it.
+fn run_source(src: &str) -> Result<(), Vec<String>> {
+    let tokens = tokenize(src).map_err(|e| vec![e.to_diagnostic().message])?;
+    let ast = Parser::new(tokens.into_iter())
+        .parse()
+        .map_err(|e| vec![e.to_diagnostic().message])?;
+    let types = check::check_program(&ast)
+        .map_err(|errors| errors.into_iter().map(|e| e.message).collect::<Vec<_>>())?;
+    let program = Compiler::new().program(&ast, &types).map_err(|d| vec![d.message])?;
+    Vm::new().run_program(&program).map_err(|e| vec![e.message])?;
+    Ok(())
+}
+
+fn aja_files(dir: &str) -> Vec<std::path::PathBuf> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "aja"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no examples in {}", dir.display());
+    files
+}
+
+#[test]
+fn examples_run() {
+    for path in aja_files("examples") {
+        let src = std::fs::read_to_string(&path).unwrap();
+        if let Err(errors) = run_source(&src) {
+            panic!("{} failed: {errors:#?}", path.display());
+        }
+    }
+}
+
+#[test]
+fn error_examples_fail_as_described() {
+    // Each file lists the errors it should produce in `// expect:` lines.
+    for path in aja_files("examples/errors") {
+        let src = std::fs::read_to_string(&path).unwrap();
+        let expected: Vec<&str> = src
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("// expect: "))
+            .collect();
+        assert!(!expected.is_empty(), "{} has no `// expect:` lines", path.display());
+        match run_source(&src) {
+            Ok(()) => panic!("{} should fail", path.display()),
+            Err(errors) => assert_eq!(errors, expected, "{}", path.display()),
+        }
+    }
 }

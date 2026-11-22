@@ -80,6 +80,11 @@ pub enum Op {
     /// register window starts at the first argument, so arguments become its
     /// parameters without being copied.
     Call { dst: Reg, callee: Reg, argc: u8 },
+    /// Call the function in `callee` and return its result. The call reuses
+    /// the current frame, so tail calls run in constant space however deep
+    /// they recurse. The compiler emits it for every call whose result is
+    /// returned directly.
+    TailCall { callee: Reg, argc: u8 },
     Return { src: Reg },
 }
 

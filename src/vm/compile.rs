@@ -225,7 +225,8 @@ impl<'a> FnCompiler<'a> {
         self.stmt(body, Some(ret));
         self.emit(Op::Return { src: ret }, span);
 
-        let f = self.fns.pop().unwrap();
+        let mut f = self.fns.pop().unwrap();
+        mark_tail_calls(&mut f.code);
         Proto {
             name,
             signature: signature(params, rtype),
@@ -614,6 +615,29 @@ impl<'a> FnCompiler<'a> {
         self.emit(op, e.span);
         if negate {
             self.emit(Op::Not { dst, src: dst }, e.span);
+        }
+    }
+}
+
+/// Turn every call whose result is returned right away (directly, or after
+/// jumps, as at the end of an `if` branch) into a tail call.
+fn mark_tail_calls(code: &mut [Op]) {
+    for i in 0..code.len() {
+        let Op::Call { dst, callee, argc } = code[i] else {
+            continue;
+        };
+        let mut next = i + 1;
+        // Bounded, in case of a jump cycle (an infinite loop has none
+        // without a condition, but there's no need to rely on that).
+        for _ in 0..code.len() {
+            match code[next] {
+                Op::Jump { target } => next = target as usize,
+                Op::Return { src } if src == dst => {
+                    code[i] = Op::TailCall { callee, argc };
+                    break;
+                }
+                _ => break,
+            }
         }
     }
 }

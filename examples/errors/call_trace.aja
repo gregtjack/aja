@@ -1,0 +1,24 @@
+// Runtime errors point at the expression that failed and list the calls
+// that led there. Repeated recursive calls are collapsed into one line, and
+// a tail call, which replaces its caller's frame, is marked "tail-called".
+//
+// expect: division by zero
+
+fn average(total: int, count: int) -> int {
+    total / count
+}
+
+// Adds up `remaining` scores of 10, averages them over `count`, and adds a
+// bonus point per score. The bonus is added after the recursive call
+// returns, so that call isn't a tail call: each one stays on the stack.
+fn score(remaining: int, total: int, count: int) -> int {
+    if remaining == 0 {
+        average(total, count)
+    } else {
+        1 + score(remaining - 1, total + 10, count)
+    }
+}
+
+fn main() {
+    println(score(5, 0, 0));
+}

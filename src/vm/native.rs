@@ -25,11 +25,16 @@ pub fn implementation(name: &str) -> Option<NativeFn> {
             Ok(Value::Void)
         },
         "clock" => |_, _| {
-            let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
             Ok(Value::Int(ms as i32))
         },
         "sleep" => |_, args| {
-            let [Value::Int(ms)] = args else { return Err(bad_args("sleep", args)) };
+            let [Value::Int(ms)] = args else {
+                return Err(bad_args("sleep", args));
+            };
             thread::sleep(Duration::from_millis((*ms).max(0) as u64));
             Ok(Value::Void)
         },
@@ -44,13 +49,19 @@ pub fn implementation(name: &str) -> Option<NativeFn> {
 }
 
 fn join(heap: &Heap, args: &[Value]) -> String {
-    args.iter().map(|a| heap.display(a)).collect::<Vec<_>>().join(" ")
+    args.iter()
+        .map(|a| heap.display(a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Arguments the type checker should have rejected.
 fn bad_args(name: &str, args: &[Value]) -> String {
     let types: Vec<String> = args.iter().map(|a| format!("{a:?}")).collect();
-    format!("{name}() was called with unexpected arguments ({})", types.join(", "))
+    format!(
+        "{name}() was called with unexpected arguments ({})",
+        types.join(", ")
+    )
 }
 
 #[cfg(test)]
@@ -61,7 +72,11 @@ mod tests {
     #[test]
     fn every_builtin_is_implemented() {
         for b in BUILTINS {
-            assert!(implementation(b.name).is_some(), "built-in '{}' has no implementation", b.name);
+            assert!(
+                implementation(b.name).is_some(),
+                "built-in '{}' has no implementation",
+                b.name
+            );
         }
     }
 }

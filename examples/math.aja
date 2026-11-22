@@ -1,0 +1,57 @@
+// Number crunching with ints and floats.
+
+// Newton's method for square roots.
+fn sqrt(x: float) -> float {
+    let guess = x / 2.0;
+    let i = 0;
+    while i < 20 {
+        guess = (guess + x / guess) / 2.0;
+        i = i + 1;
+    }
+    guess
+}
+
+fn is_prime(n: int) -> bool {
+    if n < 2 {
+        return false;
+    }
+    let d = 2;
+    while d * d <= n {
+        if n % d == 0 {
+            return false;
+        }
+        d = d + 1;
+    }
+    true
+}
+
+// How many steps the Collatz sequence takes to reach 1.
+fn collatz_steps(n: int) -> int {
+    let steps = 0;
+    while n != 1 {
+        n = if n % 2 == 0 { n / 2 } else { 3 * n + 1 };
+        steps = steps + 1;
+    }
+    steps
+}
+
+fn main() {
+    println("sqrt(2) =", sqrt(2.0));
+    println("sqrt(144) =", sqrt(144.0));
+
+    print("primes below 60:");
+    let n = 2;
+    while n < 60 {
+        if is_prime(n) {
+            print("", n);
+        }
+        n = n + 1;
+    }
+    println();
+
+    println("27 reaches 1 after", collatz_steps(27), "Collatz steps");
+
+    // Integer arithmetic is checked: overflow is an error, never a silent
+    // wraparound (see errors/overflow.aja).
+    println("largest int:", 2147483647);
+}

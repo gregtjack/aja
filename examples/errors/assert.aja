@@ -1,0 +1,10 @@
+// `assert` stops the program when its condition is false.
+//
+// expect: assertion failed
+
+fn main() {
+    let balance = 100;
+    balance = balance - 150;
+    assert(balance >= 0);
+    println("never printed");
+}

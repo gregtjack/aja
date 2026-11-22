@@ -1,0 +1,12 @@
+// Function signatures are always written out. The checker suggests the
+// annotation from how the parameter is used (`add a type: `n: int``).
+//
+// expect: parameter 'n' of function 'double' needs a type annotation
+
+fn double(n) -> int {
+    n * 2
+}
+
+fn main() {
+    println(double(21));
+}

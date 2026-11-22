@@ -1,0 +1,8 @@
+// Integer overflow stops the program instead of wrapping around.
+//
+// expect: integer overflow in '+'
+
+fn main() {
+    let big = 2147483647;
+    println(big + 1);
+}

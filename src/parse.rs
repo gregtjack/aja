@@ -593,23 +593,23 @@ where
                 self.consume(Token::Semicolon)?;
                 stmts.push(stmt);
             } else {
+                let at_end = tok_matches!(self, Token::RightBrace);
                 match stmt {
-                    Statement::Expr(e) => {
-                        tail = Some(e);
-                        break;
+                    // A block whose only content is a final expression is
+                    // that expression.
+                    Statement::Block(inner, Some(t)) if at_end && inner.is_empty() => {
+                        tail = Some(t);
                     }
-                    Statement::If(_, _) => {
-                        stmts.push(stmt);
-                        continue;
-                    }
-                    Statement::While(_, _) => {
-                        stmts.push(stmt);
-                        continue;
-                    }
-                    Statement::Block(_, t) => {
-                        tail = t;
-                        break;
-                    }
+                    Statement::Expr(e) if at_end => tail = Some(e),
+                    // Statements that end in a block need no `;` before the
+                    // next statement.
+                    Statement::Expr(Expr {
+                        kind: Expression::If(..),
+                        ..
+                    })
+                    | Statement::If(..)
+                    | Statement::While(..)
+                    | Statement::Block(..) => stmts.push(stmt),
                     _ => return Err(self.missing_semicolon()),
                 };
             }
@@ -674,7 +674,7 @@ where
         if tok_matches!(self, Token::Equal) {
             self.consume(Token::Equal)?;
             let equals = self.prev_token.clone();
-            let value = self.parse_assignment()?;
+            let value = self.parse_expr()?;
 
             match expr.kind {
                 Expression::Var(v) => {

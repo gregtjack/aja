@@ -1,0 +1,61 @@
+// Closures: functions are values. They can be passed around, returned, and
+// can capture the variables around them.
+
+// Returns a function that remembers and updates its own `count`.
+fn counter() -> fn() -> int {
+    let count = 0;
+    fn() {
+        count = count + 1;
+        count
+    }
+}
+
+// Returns a function that adds `n`. The closure's parameter type is inferred
+// from the declared return type.
+fn adder(n: int) -> fn(int) -> int {
+    fn(x) { x + n }
+}
+
+fn compose(f: fn(int) -> int, g: fn(int) -> int) -> fn(int) -> int {
+    fn(x) { f(g(x)) }
+}
+
+// Apply `f` to `x`, `times` times.
+fn repeat(f: fn(int) -> int, times: int, x: int) -> int {
+    let i = 0;
+    while i < times {
+        x = f(x);
+        i = i + 1;
+    }
+    x
+}
+
+fn main() {
+    // Each counter has its own `count`.
+    let a = counter();
+    let b = counter();
+    a();
+    a();
+    println("a:", a(), " b:", b());
+
+    let add10 = adder(10);
+    let double = fn(x: int) -> int { x * 2 };
+    let add10_then_double = compose(double, add10);
+    println("(5 + 10) * 2 =", add10_then_double(5));
+    println("1 doubled 10 times =", repeat(double, 10, 1));
+
+    // A closure and the function that made it share captured variables:
+    // each sees the other's assignments.
+    let total = 0;
+    let deposit = fn(amount: int) { total = total + amount; };
+    deposit(50);
+    deposit(25);
+    total = total - 5;
+    deposit(30);
+    println("balance:", total);
+
+    // Built-in functions are values too (all but print and println, which
+    // take any number of arguments).
+    let now = clock;
+    println("clock is a value:", now);
+}

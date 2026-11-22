@@ -1,0 +1,11 @@
+// Misspelled names get a suggestion ("a variable with a similar name
+// exists: 'counter'"). All errors are reported at once, not just the first.
+//
+// expect: cannot find variable 'countr' in this scope
+// expect: cannot apply '+' to int and bool
+
+fn main() {
+    let counter = 0;
+    counter = countr + 1;
+    println(counter + true);
+}

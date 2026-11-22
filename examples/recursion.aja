@@ -1,0 +1,65 @@
+// Recursion: functions can call themselves and each other, in any order.
+// Tail calls run in constant space, and other calls can nest more than a
+// million deep.
+
+fn factorial(n: int) -> int {
+    if n == 0 { 1 } else { n * factorial(n - 1) }
+}
+
+fn fib(n: int) -> int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn gcd(a: int, b: int) -> int {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+// Mutual recursion: `is_even` calls `is_odd`, which is defined below it.
+// Both calls are tail calls, so this works for any `n`.
+fn is_even(n: int) -> bool {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+
+fn is_odd(n: int) -> bool {
+    if n == 0 { false } else { is_even(n - 1) }
+}
+
+// How many moves it takes to solve the Towers of Hanoi with `disks` disks.
+fn hanoi(disks: int) -> int {
+    if disks == 0 { 0 } else { 2 * hanoi(disks - 1) + 1 }
+}
+
+fn ackermann(m: int, n: int) -> int {
+    if m == 0 {
+        return n + 1;
+    }
+    if n == 0 {
+        return ackermann(m - 1, 1);
+    }
+    ackermann(m - 1, ackermann(m, n - 1))
+}
+
+// A tail call: the recursive call is the last thing `count` does, so it
+// reuses the current call's frame. This runs in constant space, like a loop.
+fn count(n: int, acc: int) -> int {
+    if n == 0 { acc } else { count(n - 1, acc + 1) }
+}
+
+// Not a tail call: `1 +` runs after the recursive call returns, so every
+// call keeps its frame. The VM's call stack grows as needed (up to 256 MB,
+// about 1.5 million calls like this one), and running out is an ordinary
+// error, never a crash.
+fn depth(n: int) -> int {
+    if n == 0 { 0 } else { 1 + depth(n - 1) }
+}
+
+fn main() {
+    println("10! =", factorial(10));
+    println("fib(25) =", fib(25));
+    println("gcd(1071, 462) =", gcd(1071, 462));
+    println("is 7 even?", is_even(7), " is 1000000 even?", is_even(1_000_000));
+    println("hanoi(20) takes", hanoi(20), "moves");
+    println("ackermann(2, 3) =", ackermann(2, 3));
+    println("counted to", count(1_000_000, 0), "with tail calls");
+    println("recursed", depth(100_000), "calls deep");
+}

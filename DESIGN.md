@@ -101,6 +101,14 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
   that inspects tags at runtime). It is where the garbage collector, the task
   scheduler, and the concurrency semantics are designed and tested first, while
   they are still cheap to change. It also powers the REPL.
+- **Tail calls are guaranteed.** A call in tail position (a function's final
+  expression, or the value of a `return`) replaces the caller's frame, so tail
+  recursion runs in constant space. This is part of the language, not an
+  optimization a backend may skip: code that relies on it must work
+  everywhere, so the Cranelift backend has to keep it (Cranelift's `tail`
+  calling convention supports this). Other calls use a call stack that grows
+  as needed, up to a memory limit (256 MB in the VM), and overflowing it is a
+  runtime error, never a crash.
 - **Ahead-of-time compilation with Cranelift.** Cranelift replaces the planned
   QBE backend because it supports stack maps, which a precise garbage collector
   needs in order to find pointers on the stack. QBE has no such support.

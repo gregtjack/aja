@@ -1,0 +1,22 @@
+// The basics: a program is a set of functions, and it starts at `main`.
+//
+//     cargo run -- examples/hello.aja
+
+fn main() {
+    println("Hello from Aja!");
+
+    // Every value has a type: int, float, bool, str, or a function type.
+    let answer = 42;
+    let pi = 3.14159;
+    let ready = true;
+    let name = "Aja";
+    println("int:", answer, "float:", pi, "bool:", ready, "str:", name);
+
+    // Underscores make big numbers readable; strings support escapes.
+    let big = 1_000_000;
+    println("big:", big, "\ttabbed\tout");
+
+    // `if` is an expression, so it produces a value.
+    let size = if big > 1000 { "large" } else { "small" };
+    println("that number is", size);
+}

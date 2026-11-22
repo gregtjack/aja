@@ -1,0 +1,9 @@
+// Type errors are caught before the program runs, pointing at the problem,
+// with a note on what to do.
+//
+// expect: mismatched types: 'total' is declared as int but was given float
+
+fn main() {
+    let total: int = 2.5;
+    println(total);
+}

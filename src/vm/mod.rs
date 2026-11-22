@@ -2,10 +2,12 @@
 //!
 //! [`compile`] turns the type-checked AST into [`bytecode`]; [`Vm`] runs it.
 //! Call frames are kept in [`Vm::frames`], not on the Rust stack, so deep
-//! recursion in Aja can't overflow the VM's own stack. Closures and captured
-//! variables live on a garbage-collected [`heap`].
+//! recursion in Aja can't overflow the VM's own stack: the call stack can grow
+//! until it uses [`DEFAULT_STACK_LIMIT`] bytes. Tail calls reuse their frame,
+//! so tail recursion runs in constant space. Closures and captured variables
+//! live on a garbage-collected [`heap`].
 
-use std::rc::Rc;
+use std::{mem::size_of, rc::Rc};
 
 use crate::{
     ast::Span,
@@ -27,9 +29,9 @@ pub use compile::{Compiled, Compiler};
 use heap::{Closure, Gc, Heap};
 use value::Value;
 
-/// How many calls can be in progress at once before the VM reports a stack
-/// overflow.
-const MAX_FRAMES: usize = 100_000;
+/// How much memory the call stack (frames and their registers) may use
+/// before the VM reports a stack overflow: 256 MiB.
+pub const DEFAULT_STACK_LIMIT: usize = 256 << 20;
 
 /// An error that stops the program.
 #[derive(Debug, Clone)]
@@ -37,39 +39,47 @@ pub struct RuntimeError {
     pub message: String,
     /// The expression that failed.
     pub span: Option<Span>,
-    /// Calls the error unwound through, innermost first: (a description of
-    /// the function, where it was called).
-    pub trace: Vec<(String, Span)>,
+    /// The calls in progress, innermost first, with runs of identical calls
+    /// (deep recursion) collapsed into one entry.
+    pub trace: Vec<TraceEntry>,
+}
+
+/// One or more identical calls in an error's trace.
+#[derive(Debug, Clone)]
+pub struct TraceEntry {
+    /// e.g. "function 'f'" or "an anonymous function".
+    pub function: String,
+    /// The call expression.
+    pub site: Span,
+    /// The call was a tail call, which replaced its caller's frame, so the
+    /// caller isn't in the trace.
+    pub tail: bool,
+    /// How many times in a row this call is on the stack.
+    pub count: usize,
 }
 
 impl RuntimeError {
     pub fn to_diagnostic(&self) -> Diagnostic {
-        // Collapse runs of identical frames (e.g. deep recursion) into one note.
-        let mut frames: Vec<(&str, Span, usize)> = Vec::new();
-        for (function, site) in &self.trace {
-            match frames.last_mut() {
-                Some((f, s, count)) if *f == function.as_str() && *s == *site => *count += 1,
-                _ => frames.push((function, *site, 1)),
-            }
-        }
         const MAX_NOTES: usize = 8;
-        let mut notes: Vec<String> = frames
+        let mut notes: Vec<String> = self
+            .trace
             .iter()
             .take(MAX_NOTES)
-            .map(|(function, site, count)| {
-                let repeat = if *count > 1 {
-                    format!(" ({count} times)")
+            .map(|e| {
+                let repeat = if e.count > 1 {
+                    format!(" ({} times)", e.count)
                 } else {
                     String::new()
                 };
+                let called = if e.tail { "tail-called" } else { "called" };
                 format!(
-                    "in {function}, called at line {}, column {}{repeat}",
-                    site.start.line, site.start.col
+                    "in {}, {called} at line {}, column {}{repeat}",
+                    e.function, e.site.start.line, e.site.start.col
                 )
             })
             .collect();
-        if frames.len() > MAX_NOTES {
-            notes.push(format!("... and {} more calls", frames.len() - MAX_NOTES));
+        if self.trace.len() > MAX_NOTES {
+            notes.push(format!("... and {} more calls", self.trace.len() - MAX_NOTES));
         }
 
         let d = Diagnostic::new(self.message.clone()).with_notes(notes);
@@ -92,6 +102,10 @@ struct Frame {
     base: usize,
     /// Where to put the result, in [`Vm::regs`].
     ret: usize,
+    /// If a tail call replaced this frame's original function, the tail call
+    /// instruction (the calling function's code and the instruction's
+    /// index), for error traces.
+    tail_call: Option<(Rc<Proto>, usize)>,
 }
 
 pub struct Vm {
@@ -100,6 +114,8 @@ pub struct Vm {
     /// Every call's registers, one window after another.
     regs: Vec<Value>,
     frames: Vec<Frame>,
+    /// The most memory, in bytes, the call stack may use.
+    pub stack_limit: usize,
 }
 
 impl Vm {
@@ -118,6 +134,7 @@ impl Vm {
             globals,
             regs: Vec::new(),
             frames: Vec::new(),
+            stack_limit: DEFAULT_STACK_LIMIT,
         }
     }
 
@@ -199,6 +216,7 @@ impl Vm {
             ip: 0,
             base: 0,
             ret: 0,
+            tail_call: None,
         });
         let result = self.execute();
         self.frames.clear();
@@ -245,6 +263,38 @@ impl Vm {
             ($dst:expr, $a:expr, $b:expr, $op:tt) => {{
                 let v = get!(Float, $a) $op get!(Float, $b);
                 reg!($dst) = Value::Float(v);
+            }};
+        }
+        // Grow the registers to `needed` for a call that will have `frames`
+        // frames in progress, or report a stack overflow.
+        macro_rules! reserve {
+            ($needed:expr, $frames:expr) => {{
+                let (needed, frames) = ($needed, $frames);
+                if needed * size_of::<Value>() + frames * size_of::<Frame>() > self.stack_limit {
+                    throw!(format!(
+                        "stack overflow: the call stack has grown past {} MB ({} calls in progress)",
+                        self.stack_limit >> 20,
+                        self.frames.len(),
+                    ));
+                }
+                if self.regs.len() < needed {
+                    self.regs.resize(needed, Value::Void);
+                }
+            }};
+        }
+        // Return `v` from the innermost frame.
+        macro_rules! ret {
+            ($v:expr) => {{
+                let v = $v;
+                let done = self.frames.pop().unwrap();
+                let Some(caller) = self.frames.last() else {
+                    return Ok(v);
+                };
+                closure = caller.closure;
+                proto = caller.proto.clone();
+                base = caller.base;
+                ip = caller.ip;
+                self.regs[done.ret] = v;
             }};
         }
         macro_rules! compare {
@@ -359,22 +409,17 @@ impl Vm {
                 Op::Call { dst, callee, argc } => match reg!(callee).clone() {
                     Value::Fn(f) => {
                         let callee_proto = self.heap.closure(f).proto.clone();
-                        if self.frames.len() >= MAX_FRAMES {
-                            throw!(format!("stack overflow: more than {MAX_FRAMES} calls in progress"));
-                        }
                         debug_assert_eq!(callee_proto.arity, argc, "the type checker checks arity");
-                        self.frames.last_mut().unwrap().ip = ip;
                         let new_base = base + callee as usize + 1;
-                        let needed = new_base + callee_proto.num_regs as usize;
-                        if self.regs.len() < needed {
-                            self.regs.resize(needed, Value::Void);
-                        }
+                        reserve!(new_base + callee_proto.num_regs as usize, self.frames.len() + 1);
+                        self.frames.last_mut().unwrap().ip = ip;
                         self.frames.push(Frame {
                             closure: f,
                             proto: callee_proto.clone(),
                             ip: 0,
                             base: new_base,
                             ret: base + dst as usize,
+                            tail_call: None,
                         });
                         closure = f;
                         proto = callee_proto;
@@ -390,18 +435,35 @@ impl Vm {
                     }
                     v => internal_error("Fn", &v),
                 },
-                Op::Return { src } => {
-                    let v = reg!(src).clone();
-                    let done = self.frames.pop().unwrap();
-                    let Some(caller) = self.frames.last() else {
-                        return Ok(v);
-                    };
-                    closure = caller.closure;
-                    proto = caller.proto.clone();
-                    base = caller.base;
-                    ip = caller.ip;
-                    self.regs[done.ret] = v;
-                }
+                Op::TailCall { callee, argc } => match reg!(callee).clone() {
+                    Value::Fn(f) => {
+                        let callee_proto = self.heap.closure(f).proto.clone();
+                        debug_assert_eq!(callee_proto.arity, argc, "the type checker checks arity");
+                        reserve!(base + callee_proto.num_regs as usize, self.frames.len());
+                        // Move the arguments down to the start of this frame's
+                        // window, where the callee expects its parameters.
+                        let args = base + callee as usize + 1;
+                        for i in 0..argc as usize {
+                            self.regs.swap(base + i, args + i);
+                        }
+                        let frame = self.frames.last_mut().unwrap();
+                        frame.closure = f;
+                        frame.proto = callee_proto.clone();
+                        frame.tail_call = Some((proto.clone(), ip - 1));
+                        closure = f;
+                        proto = callee_proto;
+                        ip = 0;
+                    }
+                    Value::Native(_, f) => {
+                        let start = base + callee as usize + 1;
+                        match f(&self.heap, &self.regs[start..start + argc as usize]) {
+                            Ok(v) => ret!(v),
+                            Err(msg) => throw!(msg),
+                        }
+                    }
+                    v => internal_error("Fn", &v),
+                },
+                Op::Return { src } => ret!(reg!(src).clone()),
             }
         }
     }
@@ -409,23 +471,44 @@ impl Vm {
     /// An error at the instruction the innermost frame just ran, with a
     /// trace of the calls in progress. Every frame's `ip` must be up to date.
     fn error(&self, message: String) -> RuntimeError {
-        fn at(frame: &Frame) -> (&Proto, usize) {
-            (&frame.proto, frame.ip - 1)
-        }
-        let (proto, ip) = at(self.frames.last().unwrap());
-        let span = proto.spans[ip];
+        let top = self.frames.last().unwrap();
+        let span = top.proto.spans[top.ip - 1];
 
-        let trace = (1..self.frames.len())
-            .rev()
-            .map(|i| {
-                let (caller, call) = at(&self.frames[i - 1]);
-                let function = match caller.call_names.get(&call) {
-                    Some(name) => format!("function '{name}'"),
-                    None => "an anonymous function".to_string(),
-                };
-                (function, caller.spans[call])
-            })
-            .collect();
+        // For each frame, innermost first, the call that started it: the
+        // instruction (as the calling function's code and an index), and
+        // whether it was a tail call. The outermost frame has none, unless
+        // its function made a tail call.
+        let calls = self.frames.iter().enumerate().rev().filter_map(|(i, frame)| {
+            match &frame.tail_call {
+                Some((proto, at)) => Some((proto, *at, true)),
+                None if i > 0 => {
+                    let caller = &self.frames[i - 1];
+                    Some((&caller.proto, caller.ip - 1, false))
+                }
+                None => None,
+            }
+        });
+
+        let mut trace: Vec<TraceEntry> = Vec::new();
+        let mut last: Option<(*const Proto, usize, bool)> = None;
+        for (proto, at, tail) in calls {
+            let key = (Rc::as_ptr(proto), at, tail);
+            if last == Some(key) {
+                trace.last_mut().unwrap().count += 1;
+                continue;
+            }
+            last = Some(key);
+            let function = match proto.call_names.get(&at) {
+                Some(name) => format!("function '{name}'"),
+                None => "an anonymous function".to_string(),
+            };
+            trace.push(TraceEntry {
+                function,
+                site: proto.spans[at],
+                tail,
+                count: 1,
+            });
+        }
 
         RuntimeError {
             message,

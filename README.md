@@ -41,11 +41,14 @@ provides a dev shell with Rust, `rust-analyzer`, and `qbe`.
 cargo build
 ```
 
-Run a source file (executes `main` and prints its return value):
+Run a source file (executes `main`):
 
 ```bash
-cargo run -- 42.aja
+cargo run -- examples/hello.aja
 ```
+
+[`examples/`](examples) has programs that show off the language, plus
+some that fail on purpose to show the error messages.
 
 Start the REPL (no arguments):
 
@@ -193,9 +196,17 @@ parameters, locals, and temporaries, and instructions name registers
 directly. Instructions are typed: the type checker records whether each
 operator works on ints, floats, bools, or strings, and the compiler emits,
 say, `AddI` or `AddF` accordingly, so the VM never inspects operand types to
-decide what to do and has no runtime type checks. Call frames are kept in
-a growable array, not on the Rust stack, so deep recursion can't overflow it; more than 100,000
-calls in progress is reported as a stack overflow.
+decide what to do and has no runtime type checks.
+
+Calls are guaranteed to be tail calls when they're in tail position: the
+final expression of a function (including both branches of a final
+`if`/`else`) or the value of a `return`. A tail call reuses the current
+frame, so tail recursion runs in constant space, like a loop. Other calls
+keep their frame until they return. Frames are kept in a growable array, not
+on the Rust stack, so deep recursion can't crash the VM. The call stack may
+use up to 256 MB (about 1.5 million simple non-tail calls); beyond that the
+program stops with a stack overflow error. In error traces, a tail call is
+marked "tail-called", because the caller it replaced is no longer listed.
 
 A local that a closure captures is stored in a shared cell, so the function
 and its closures see each other's assignments. The compiler finds these
@@ -215,7 +226,7 @@ the VM forgets to keep reachable is caught.
 
 **Working:** ints, floats, bools, strings; `let`/assignment with lexical
 scoping; functions and first-class closures; `if`/`else` expressions;
-`while` loops; `return`; recursion (each call gets its own scope); arithmetic, comparison, and logical operators;
+`while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
 static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 
@@ -266,3 +277,7 @@ Output is colored when stderr is a terminal; set `NO_COLOR` to disable.
 
 **Known limitations:**
 - The REPL handles one line at a time and can't define top-level functions.
+- There is no `else if`; nest an `if` inside the `else` block instead.
+- Only `//` line comments are supported.
+- `==` and `!=` bind more loosely than `&&` and `||`, so write
+  `(a == b) && (c == d)`.
