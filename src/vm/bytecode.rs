@@ -32,15 +32,22 @@ pub enum Op {
     SetGlobal { index: u32, src: Reg },
 
     // ---- Captured variables ----------------------------------------------------
-    // A local that a closure captures lives in a cell, so the function that
-    // declares it and every closure that captures it share one variable.
+    // A closure copies the variables it captures when it is made. A `var`
+    // that a closure captures lives in a cell, and the closure copies the
+    // cell, so the function that declares the `var` and every closure that
+    // captures it share one variable. Immutable variables need no cell.
     /// Put the value in `src` into a new cell, stored in `dst`.
     NewCell { dst: Reg, src: Reg },
     GetCell { dst: Reg, cell: Reg },
     SetCell { cell: Reg, src: Reg },
+    /// Load the current closure's captured value number `index`.
     GetUpvalue { dst: Reg, index: u16 },
-    SetUpvalue { index: u16, src: Reg },
-    /// Make a closure from `protos[proto]`, capturing the cells its
+    /// Load the value in the cell the current closure captured as number
+    /// `index`.
+    GetUpvalueCell { dst: Reg, index: u16 },
+    /// Store into the cell the current closure captured as number `index`.
+    SetUpvalueCell { index: u16, src: Reg },
+    /// Make a closure from `protos[proto]`, capturing the values its
     /// [`Proto::captures`] lists.
     Closure { dst: Reg, proto: u32 },
 
@@ -125,13 +132,16 @@ pub struct Layout {
     pub fields: Option<Vec<Id>>,
 }
 
-/// Where a closure gets one of its captured cells when it is created.
+/// Where a closure gets one of its captured values when it is created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capture {
-    /// A register of the function creating the closure; it holds a cell.
+    /// A register of the function creating the closure: a variable's value,
+    /// or its cell if it is a captured `var`.
     Local(Reg),
-    /// One of the creating function's own captured cells.
+    /// One of the creating function's own captured values.
     Upvalue(u16),
+    /// The closure itself, which `let f = fn() { ... f() ... };` captures.
+    Itself,
 }
 
 /// A compiled function: a top-level function, a closure, or a REPL input.
@@ -151,7 +161,7 @@ pub struct Proto {
     pub protos: Vec<Rc<Proto>>,
     /// The struct and variant layouts `NewData` instructions refer to.
     pub layouts: Vec<Rc<Layout>>,
-    /// The cells a closure made from this proto captures, in upvalue order.
+    /// The values a closure made from this proto captures, in upvalue order.
     pub captures: Vec<Capture>,
     /// For `Call` instructions whose callee is a name, that name (by
     /// instruction index), to describe the call in error traces.

@@ -264,9 +264,12 @@ use up to 256 MB (about 1.5 million simple non-tail calls); beyond that the
 program stops with a stack overflow error. In error traces, a tail call is
 marked "tail-called", because the caller it replaced is no longer listed.
 
-A local that a closure captures is stored in a shared cell, so the function
-and its closures see each other's assignments. The compiler finds these
-variables in a pass over each function before compiling it.
+A closure copies the variables it captures when it is made, which is all an
+immutable variable needs. A `var` that a closure captures is stored in a
+shared cell instead, and closures copy the cell, so the function and its
+closures see each other's assignments. The compiler finds these variables in
+a pass over each function before compiling it. A closure that calls itself
+through its `let` captures itself, filled in as soon as it is made.
 
 Closures, cells, struct and enum values, and strings live on a garbage-collected heap (`src/vm/heap.rs`). The
 collector is a precise mark-and-sweep: it starts from the registers in use,

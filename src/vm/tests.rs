@@ -231,6 +231,38 @@ fn each_counter_has_its_own_variable() {
     assert_eq!(value(src), "Int(32)");
 }
 
+/// How many `NewCell` instructions a program compiles to, in all its
+/// functions and the closures in them.
+fn cells_made(src: &str) -> usize {
+    fn count(p: &Proto) -> usize {
+        let here = p.code.iter().filter(|op| matches!(op, Op::NewCell { .. })).count();
+        here + p.protos.iter().map(|p| count(p)).sum::<usize>()
+    }
+    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let types = check::check_program(&ast).unwrap();
+    let program = Compiler::new().program(&ast, &types).unwrap();
+    program.functions.iter().map(|(_, p)| count(p)).sum()
+}
+
+#[test]
+fn only_captured_vars_get_cells() {
+    // Captured `let`s, parameters, and pattern bindings are copied into the
+    // closure, and a closure that calls itself captures itself.
+    let src = "fn make(n: int) -> fn() -> int {
+                   let m = n * 2;
+                   let f = fn(k: int) -> int { if k == 0 { m } else { f(k - 1) } };
+                   match Option::Some(n) { Option::Some(p) => fn() { f(p) + n + m }, Option::None => fn() { 0 } }
+               }
+               enum Option { Some(int), None }
+               fn main() -> int { make(3)() }";
+    assert_eq!(cells_made(src), 0);
+    assert_eq!(value(src), "Int(15)");
+    // A captured `var` is shared, so it needs one; an uncaptured one doesn't.
+    let src = "fn main() -> int { var a = 1; var b = 2; let f = fn() { a = a + 1; }; f(); b = a; b }";
+    assert_eq!(cells_made(src), 1);
+    assert_eq!(value(src), "Int(2)");
+}
+
 #[test]
 fn closures_can_call_themselves() {
     let src = "fn main() -> int {
@@ -249,6 +281,21 @@ fn closures_can_call_themselves() {
                    count(100000, 0)
                }";
     assert_eq!(format!("{:?}", run_limited(src, 4096).unwrap()), "Int(100000)");
+    // Through a closure nested inside it, and with an outer `f` shadowed.
+    let src = "fn main() -> int {
+                   let f = 7;
+                   let f = fn(n: int) -> int { let again = fn() -> int { f(n - 1) }; if n == 0 { 0 } else { 1 + again() } };
+                   f(4)
+               }";
+    assert_eq!(value(src), "Int(4)");
+    // A `var` closure calls whatever is in the variable when it runs.
+    let src = "fn main() -> int {
+                   var f = fn(n: int) -> int { if n == 0 { 0 } else { 10 + f(n - 1) } };
+                   let first = f;
+                   f = fn(n: int) -> int { 1 };
+                   first(3)
+               }";
+    assert_eq!(value(src), "Int(11)");
     // A value that isn't a closure still sees the earlier variable.
     assert_eq!(value("fn main() -> int { let a = 1; let a = a + 1; a }"), "Int(2)");
 }
@@ -430,7 +477,7 @@ fn live_after(src: &str) -> usize {
 
 #[test]
 fn cycles_through_closures_are_freed() {
-    // `f` captures the cell it is stored in: a cycle.
+    // `f` captures itself: a cycle.
     let recursive = "fn make() -> int {
                          let f = fn(n: int) -> int { if n == 0 { 0 } else { f(n - 1) } };
                          f(3)

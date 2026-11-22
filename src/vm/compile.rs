@@ -9,9 +9,11 @@
 //! needed them is done. A call puts the callee and its arguments in the
 //! topmost registers, so the callee's register window can start right there.
 //!
-//! A local that some closure captures lives in a cell instead of directly in
-//! its register (see [`captured_locals`]), so that the declaring function and
-//! every closure that captured it share one variable.
+//! A closure copies the variables it captures when it is made. That is
+//! enough for every variable but a `var`, which can change: a `var` that
+//! some closure captures lives in a cell instead of directly in its register
+//! (see [`captured_locals`]), and closures copy the cell, so that the
+//! declaring function and every closure that captured it share one variable.
 //!
 //! A `match` compiles to a test of each arm in turn: the arm's pattern
 //! compiles to checks that jump to the next arm on failure, and to moves
@@ -206,14 +208,15 @@ fn decl_key(v: &Variable) -> DeclKey {
 /// Where a name refers to.
 enum Place {
     Local { reg: Reg, cell: bool },
-    Upvalue(u16),
+    Upvalue { index: u16, cell: bool },
     Global(u32),
 }
 
 struct Local {
     name: Id,
     reg: Reg,
-    /// The register holds a cell, because a closure captures the variable.
+    /// The register holds a cell, because the variable is a `var` that a
+    /// closure captures.
     cell: bool,
 }
 
@@ -225,6 +228,9 @@ struct FnState {
     layouts: Vec<Rc<Layout>>,
     captures: Vec<Capture>,
     call_names: HashMap<usize, Id>,
+    /// For a closure bound by `let`, the name it is bound to, which refers
+    /// to the closure itself inside it.
+    itself: Option<Id>,
     /// Lexical scopes, innermost last.
     scopes: Vec<Vec<Local>>,
     /// The next free register.
@@ -244,6 +250,8 @@ struct FnCompiler<'a> {
     fns: Vec<FnState>,
     /// Whether this is a REPL input.
     repl: bool,
+    /// The name the next closure compiled is bound to by `let`, if any.
+    let_name: Option<Id>,
 }
 
 impl<'a> FnCompiler<'a> {
@@ -259,6 +267,7 @@ impl<'a> FnCompiler<'a> {
             captured,
             fns: Vec::new(),
             repl,
+            let_name: None,
         }
     }
 
@@ -279,20 +288,18 @@ impl<'a> FnCompiler<'a> {
             layouts: Vec::new(),
             captures: Vec::new(),
             call_names: HashMap::new(),
+            itself: self.let_name.take(),
             scopes: vec![Vec::new()],
             next: 0,
             max: 0,
             span,
         });
 
-        // Arguments arrive in the first registers.
+        // Arguments arrive in the first registers. Parameters can't be
+        // assigned to, so they never need a cell.
         for p in params {
             let reg = self.alloc();
-            let cell = self.captured.contains(&decl_key(p));
-            if cell {
-                self.emit(Op::NewCell { dst: reg, src: reg }, p.span);
-            }
-            self.declare(p.name.clone(), reg, cell);
+            self.declare(p.name.clone(), reg, false);
         }
 
         let ret = self.alloc();
@@ -397,8 +404,8 @@ impl<'a> FnCompiler<'a> {
                 cell: l.cell,
             };
         }
-        if let Some(i) = self.upvalue(f, name) {
-            return Place::Upvalue(i);
+        if let Some((index, cell)) = self.upvalue(f, name) {
+            return Place::Upvalue { index, cell };
         }
         match self.compiler.globals.get(name) {
             Some(&slot) => Place::Global(slot),
@@ -406,18 +413,25 @@ impl<'a> FnCompiler<'a> {
         }
     }
 
-    /// The index of `name` among function `f`'s captured cells, capturing it
-    /// if needed. `None` if no enclosing function declares it.
-    fn upvalue(&mut self, f: usize, name: &Id) -> Option<u16> {
+    /// The index of `name` among function `f`'s captured values, capturing
+    /// it if needed, and whether it is a cell. `None` if no enclosing
+    /// function declares it.
+    fn upvalue(&mut self, f: usize, name: &Id) -> Option<(u16, bool)> {
         if f == 0 {
             return None;
         }
-        let capture = match self.find_local(f - 1, name) {
-            Some(l) => {
-                debug_assert!(l.cell, "'{name}' is captured but not in a cell");
-                Capture::Local(l.reg)
+        // Inside `let g = fn() { ... }`, `g` is the closure itself, which
+        // shadows any variable of that name outside it.
+        let (capture, cell) = if self.fns[f].itself.as_ref() == Some(name) {
+            (Capture::Itself, false)
+        } else {
+            match self.find_local(f - 1, name) {
+                Some(l) => (Capture::Local(l.reg), l.cell),
+                None => {
+                    let (index, cell) = self.upvalue(f - 1, name)?;
+                    (Capture::Upvalue(index), cell)
+                }
             }
-            None => Capture::Upvalue(self.upvalue(f - 1, name)?),
         };
         let captures = &mut self.fns[f].captures;
         let index = match captures.iter().position(|c| *c == capture) {
@@ -427,7 +441,7 @@ impl<'a> FnCompiler<'a> {
                 captures.len() - 1
             }
         };
-        Some(index as u16)
+        Some((index as u16, cell))
     }
 
     // ---- Statements ------------------------------------------------------------
@@ -454,8 +468,12 @@ impl<'a> FnCompiler<'a> {
                 Some(dst) => self.expr(e, dst),
                 None => self.discard(e),
             },
-            Statement::Let { var, value, .. } => {
-                self.let_(var, value);
+            Statement::Let {
+                var,
+                value,
+                mutable,
+            } => {
+                self.let_(var, value, *mutable);
                 if let Some(dst) = dst {
                     self.void(dst);
                 }
@@ -501,7 +519,7 @@ impl<'a> FnCompiler<'a> {
         }
     }
 
-    fn let_(&mut self, var: &Variable, value: &Expr) {
+    fn let_(&mut self, var: &Variable, value: &Expr, mutable: bool) {
         let reg = self.alloc();
 
         // A REPL input's top-level `let` outlives the input, so it is a global.
@@ -527,10 +545,19 @@ impl<'a> FnCompiler<'a> {
             return;
         }
 
-        let cell = self.captured.contains(&decl_key(var));
+        // Only a `var` can change, so only a captured `var` needs a cell.
+        let cell = mutable && self.captured.contains(&decl_key(var));
+        if !mutable && value.is_closure() {
+            // Inside the closure, its name refers to the closure itself
+            // (see `upvalue`).
+            self.let_name = Some(var.name.clone());
+            self.expr(value, reg);
+            self.declare(var.name.clone(), reg, false);
+            return;
+        }
         if cell && value.is_closure() {
-            // The closure captures its own variable: make the cell first so
-            // the closure can capture it, then fill it with the closure.
+            // The closure captures its own `var`: make the cell first so the
+            // closure can capture it, then fill it with the closure.
             self.emit(Op::LoadVoid { dst: reg }, var.span);
             self.emit(Op::NewCell { dst: reg, src: reg }, var.span);
             self.declare(var.name.clone(), reg, true);
@@ -649,7 +676,8 @@ impl<'a> FnCompiler<'a> {
                 let op = match self.resolve(name) {
                     Place::Local { reg, cell: false } => Op::Move { dst, src: reg },
                     Place::Local { reg, cell: true } => Op::GetCell { dst, cell: reg },
-                    Place::Upvalue(index) => Op::GetUpvalue { dst, index },
+                    Place::Upvalue { index, cell: false } => Op::GetUpvalue { dst, index },
+                    Place::Upvalue { index, cell: true } => Op::GetUpvalueCell { dst, index },
                     Place::Global(index) => Op::GetGlobal { dst, index },
                 };
                 if op != (Op::Move { dst, src: dst }) {
@@ -661,7 +689,10 @@ impl<'a> FnCompiler<'a> {
                 let op = match self.resolve(name) {
                     Place::Local { reg, cell: false } => Op::Move { dst: reg, src },
                     Place::Local { reg, cell: true } => Op::SetCell { cell: reg, src },
-                    Place::Upvalue(index) => Op::SetUpvalue { index, src },
+                    Place::Upvalue { index, cell: true } => Op::SetUpvalueCell { index, src },
+                    Place::Upvalue { cell: false, .. } => {
+                        unreachable!("'{name}' is assigned but immutable; the type checker should have caught this")
+                    }
                     Place::Global(index) => Op::SetGlobal { index, src },
                 };
                 self.emit(op, span);
@@ -1003,13 +1034,10 @@ impl FnCompiler<'_> {
         }
     }
 
-    /// Declare the variable a pattern binds, whose value is in `reg`.
+    /// Declare the variable a pattern binds, whose value is in `reg`. It
+    /// can't be assigned to, so it never needs a cell.
     fn bind(&mut self, var: &Variable, reg: Reg) {
-        let cell = self.captured.contains(&decl_key(var));
-        if cell {
-            self.emit(Op::NewCell { dst: reg, src: reg }, var.span);
-        }
-        self.declare(var.name.clone(), reg, cell);
+        self.declare(var.name.clone(), reg, false);
     }
 }
 

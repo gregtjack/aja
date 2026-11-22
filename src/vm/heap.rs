@@ -34,10 +34,11 @@ impl std::fmt::Display for Gc {
     }
 }
 
-/// A function value: compiled code plus the cells it captured.
+/// A function value: compiled code plus the values it captured (a cell, for
+/// a captured `var`).
 pub struct Closure {
     pub proto: Rc<Proto>,
-    pub upvalues: Box<[Gc]>,
+    pub upvalues: Box<[Value]>,
 }
 
 enum Obj {
@@ -55,7 +56,7 @@ impl Obj {
     fn size(&self) -> usize {
         size_of::<Option<Obj>>()
             + match self {
-                Obj::Closure(c) => c.upvalues.len() * size_of::<Gc>(),
+                Obj::Closure(c) => c.upvalues.len() * size_of::<Value>(),
                 Obj::Cell(_) => 0,
                 Obj::Data(_, fields) => fields.len() * size_of::<Value>(),
                 Obj::Str(s) => s.len(),
@@ -225,6 +226,17 @@ impl Heap {
         }
     }
 
+    /// Fill in a captured value of a closure that was just made, for a
+    /// closure that captures itself ([`Capture::Itself`]).
+    ///
+    /// [`Capture::Itself`]: super::bytecode::Capture::Itself
+    pub fn set_upvalue(&mut self, gc: Gc, index: usize, value: Value) {
+        match &mut self.objects[gc.0 as usize] {
+            Some(Obj::Closure(c)) => c.upvalues[index] = value,
+            _ => panic!("internal error: object {gc} is not a closure"),
+        }
+    }
+
     /// Free every object not reachable from `roots` or `extra`.
     pub fn collect<'a>(&mut self, roots: impl IntoIterator<Item = &'a Value>, extra: impl IntoIterator<Item = Gc>) {
         // Mark, with an explicit worklist so long chains can't overflow the stack.
@@ -237,7 +249,7 @@ impl Heap {
             }
             self.marks[i] = true;
             match self.get(gc) {
-                Obj::Closure(c) => work.extend(c.upvalues.iter().copied()),
+                Obj::Closure(c) => work.extend(c.upvalues.iter().filter_map(Value::handle)),
                 Obj::Cell(v) => work.extend(v.handle()),
                 Obj::Data(_, fields) => work.extend(fields.iter().filter_map(Value::handle)),
                 Obj::Str(_) => {}

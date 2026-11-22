@@ -185,9 +185,9 @@ impl Vm {
     // Allocation may collect, so every value still in use must be in a
     // register, global, or frame, or passed in, when these are called.
 
-    fn alloc_closure(&mut self, proto: Rc<Proto>, upvalues: Box<[Gc]>) -> Gc {
-        if self.heap.wants_collection(upvalues.len() * size_of::<Gc>()) {
-            let extra = upvalues.iter().copied().collect::<Vec<_>>();
+    fn alloc_closure(&mut self, proto: Rc<Proto>, upvalues: Box<[Value]>) -> Gc {
+        if self.heap.wants_collection(upvalues.len() * size_of::<Value>()) {
+            let extra = upvalues.iter().filter_map(Value::handle).collect::<Vec<_>>();
             self.collect_garbage_with(extra);
         }
         self.heap.alloc_closure(Closure { proto, upvalues })
@@ -369,11 +369,20 @@ impl Vm {
                     self.heap.set_cell(get!(Cell, cell), v);
                 }
                 Op::GetUpvalue { dst, index } => {
-                    let cell = self.heap.closure(closure).upvalues[index as usize];
+                    reg!(dst) = self.heap.closure(closure).upvalues[index as usize].clone();
+                }
+                Op::GetUpvalueCell { dst, index } => {
+                    let Value::Cell(cell) = self.heap.closure(closure).upvalues[index as usize]
+                    else {
+                        unreachable!("upvalue {index} is not a cell")
+                    };
                     reg!(dst) = self.heap.cell(cell).clone();
                 }
-                Op::SetUpvalue { index, src } => {
-                    let cell = self.heap.closure(closure).upvalues[index as usize];
+                Op::SetUpvalueCell { index, src } => {
+                    let Value::Cell(cell) = self.heap.closure(closure).upvalues[index as usize]
+                    else {
+                        unreachable!("upvalue {index} is not a cell")
+                    };
                     let v = reg!(src).clone();
                     self.heap.set_cell(cell, v);
                 }
@@ -383,11 +392,19 @@ impl Vm {
                         .captures
                         .iter()
                         .map(|c| match c {
-                            Capture::Local(r) => get!(Cell, *r),
-                            Capture::Upvalue(i) => self.heap.closure(closure).upvalues[*i as usize],
+                            Capture::Local(r) => reg!(*r).clone(),
+                            Capture::Upvalue(i) => {
+                                self.heap.closure(closure).upvalues[*i as usize].clone()
+                            }
+                            // Filled in below, once the closure exists.
+                            Capture::Itself => Value::Void,
                         })
                         .collect();
+                    let itself = inner.captures.iter().position(|c| *c == Capture::Itself);
                     let f = self.alloc_closure(inner, upvalues);
+                    if let Some(i) = itself {
+                        self.heap.set_upvalue(f, i, Value::Fn(f));
+                    }
                     reg!(dst) = Value::Fn(f);
                 }
 
