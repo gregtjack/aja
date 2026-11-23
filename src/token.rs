@@ -48,6 +48,8 @@ pub enum Token {
     Return,       // return
     Struct,       // struct
     Impl,         // impl
+    Import,       // import
+    Pub,          // pub
     Var,          // var
     While,        // while
 }
@@ -103,6 +105,8 @@ impl std::fmt::Display for Token {
             Token::Return => "return",
             Token::Struct => "struct",
             Token::Impl => "impl",
+            Token::Import => "import",
+            Token::Pub => "pub",
             Token::While => "while",
         };
         write!(f, "'{sym}'")

@@ -1,0 +1,18 @@
+// A counter that only ever goes up. `total` isn't `pub`, so code in other
+// modules can't set it, or build a `Counter` with whatever count it likes:
+// they go through `new` and `bump`.
+pub struct Counter { pub name: str, total: int }
+
+impl Counter {
+    pub fn new(name: str) -> Counter {
+        Counter { name, total: 0 }
+    }
+
+    pub fn bump(self) -> Counter {
+        Counter { total: self.total + 1, ..self }
+    }
+
+    pub fn count(self) -> int {
+        self.total
+    }
+}

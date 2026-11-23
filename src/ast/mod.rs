@@ -12,18 +12,29 @@ pub struct Location {
     pub line: u32,
     pub col: u32,
     pub pos: u32,
-    /// Which source the location is in: [`Source::Program`] for the program
-    /// being run, or [`Source::Prelude`].
+    /// Which source the location is in: one of the program's files, or the
+    /// prelude.
     pub source: Source,
 }
 
-/// A source of code, so that a location in the prelude isn't mistaken for
-/// one in the program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// A source of code, so that a location in one file isn't mistaken for one
+/// in another. `File(0)` is the file being run (or the REPL); the files of
+/// the modules it imports come after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Source {
-    #[default]
-    Program,
+    File(u16),
     Prelude,
+}
+
+impl Source {
+    /// The file being run.
+    pub const MAIN: Source = Source::File(0);
+}
+
+impl Default for Source {
+    fn default() -> Self {
+        Source::MAIN
+    }
 }
 
 impl Location {
@@ -32,7 +43,7 @@ impl Location {
             line,
             col,
             pos,
-            source: Source::Program,
+            source: Source::MAIN,
         }
     }
 }
@@ -110,14 +121,48 @@ pub struct TypeParam {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+/// A file: its imports, then its definitions.
+#[derive(Debug, Clone, Default)]
 pub struct Program {
+    pub imports: Vec<Import>,
     pub definitions: Vec<Definition>,
+}
+
+impl Program {
+    /// A program with no imports.
+    pub fn new(definitions: Vec<Definition>) -> Self {
+        Program {
+            imports: Vec::new(),
+            definitions,
+        }
+    }
+}
+
+/// `import geo::shapes;`, which makes `shapes::area` available, or
+/// `import geo::shapes::{Shape, area};`, which brings in those names
+/// directly. A path without braces always names a module.
+#[derive(Debug, Clone)]
+pub struct Import {
+    /// The module's path, `geo::shapes`, with where each segment appears.
+    pub path: Vec<(Id, Span)>,
+    /// The names in braces, if there are any.
+    pub items: Option<Vec<(Id, Span)>>,
+}
+
+impl Import {
+    /// Where the module's path appears.
+    pub fn path_span(&self) -> Span {
+        let first = self.path.first().expect("an import names a module").1;
+        let last = self.path.last().expect("an import names a module").1;
+        first.to(last)
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum Definition {
+    /// A function, which is `public` when marked `pub`; so are the others.
     Function {
+        public: bool,
         name: Id,
         /// Where the function's name appears.
         name_span: Span,
@@ -130,14 +175,16 @@ pub enum Definition {
     /// `struct Point { x: int, y: int }`, or `struct Pair<A, B> { ... }`.
     /// Every field's `t` is `Some`.
     Struct {
+        public: bool,
         name: Id,
         name_span: Span,
         type_params: Vec<TypeParam>,
-        fields: Vec<Variable>,
+        fields: Vec<FieldDef>,
     },
     /// `enum Shape { Circle(float), Rect(float, float), Empty }`, or
     /// `enum Option<T> { Some(T), None }`.
     Enum {
+        public: bool,
         name: Id,
         name_span: Span,
         type_params: Vec<TypeParam>,
@@ -159,6 +206,8 @@ pub enum Definition {
 /// called as `Point::origin()`, doesn't.
 #[derive(Debug, Clone)]
 pub struct Method {
+    /// Whether it is marked `pub`, so code in other modules can call it.
+    pub public: bool,
     pub name: Id,
     pub name_span: Span,
     pub type_params: Vec<TypeParam>,
@@ -168,6 +217,16 @@ pub struct Method {
     pub body: Statement,
     /// The declared return type; `None` means `void`.
     pub rtype: Option<Type>,
+}
+
+/// A field of a struct definition, which code in other modules can use
+/// only when it is `public` (marked `pub`).
+#[derive(Debug, Clone)]
+pub struct FieldDef {
+    pub public: bool,
+    pub name: Id,
+    pub t: Type,
+    pub span: Span,
 }
 
 /// One variant of an enum definition, with the types of the values it holds.
@@ -222,6 +281,8 @@ pub enum PatternKind {
     /// `Point { x, y: 0 }`, with `rest` set when it ends in `..`.
     Struct {
         name: Id,
+        /// Where the struct's name (or path) appears.
+        name_span: Span,
         fields: Vec<(Id, Span, Pattern)>,
         rest: bool,
     },
@@ -262,11 +323,17 @@ pub enum Expression {
     Closure(Vec<Variable>, Option<Type>, Box<Statement>),
     /// `value.field`, with where the field's name appears.
     Field(Box<Expr>, Id, Span),
-    /// `Enum::Variant`. Called like a function when the variant holds values.
+    /// `Enum::Variant`, `Type::function`, or `module::item`: everything
+    /// before the last `::` (which may itself hold `::`, as in
+    /// `shapes::Shape::Circle`), and the last name. Called like a function
+    /// when the variant holds values. Once modules are resolved, the first
+    /// is always a type and the second its variant or associated function.
     Path(Id, Id),
     /// `Point { x: 1, y: 2 }`, or `Point { x: 1, ..base }`.
     StructLit {
         name: Id,
+        /// Where the struct's name (or path) appears.
+        name_span: Span,
         fields: Vec<FieldInit>,
         base: Option<Box<Expr>>,
     },

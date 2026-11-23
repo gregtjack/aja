@@ -1,7 +1,7 @@
 use crate::{
     ast::{
-        types::Type, Arm, Definition, Expr, Expression, FieldInit, Location, Method, Pattern,
-        PatternKind, Program, Span, Statement, TypeParam, Variable, VariantDef,
+        types::Type, Arm, Definition, Expr, Expression, FieldDef, FieldInit, Id, Import, Location,
+        Method, Pattern, PatternKind, Program, Span, Statement, TypeParam, Variable, VariantDef,
     },
     diagnostic::Diagnostic,
     lexer::SrcSpan,
@@ -681,19 +681,122 @@ where
     }
 
     pub fn parse(&mut self) -> ParseResult<Program> {
+        let mut imports = Vec::new();
         let mut ds = Vec::new();
-        while tok_matches!(self, Token::Fn | Token::Struct | Token::Enum | Token::Impl) {
-            let d = self.parse_defn()?;
-            ds.push(d);
+        loop {
+            if tok_matches!(self, Token::Import) {
+                if !ds.is_empty() {
+                    let tok = self.peek().cloned();
+                    return Err(self
+                        .error(tok, "imports must come before any definition".to_string())
+                        .help("move this import to the top of the file"));
+                }
+                imports.push(self.parse_import()?);
+            } else if tok_matches!(
+                self,
+                Token::Fn | Token::Struct | Token::Enum | Token::Impl | Token::Pub
+            ) {
+                ds.push(self.parse_defn()?);
+            } else {
+                break;
+            }
         }
 
         if !tok_matches!(self, Token::Eof) && self.peek().is_some() {
             return Err(self
                 .expected("a definition")
-                .help("only 'fn', 'struct', 'enum', and 'impl' definitions are allowed at the top level of a file"));
+                .help("only imports and 'fn', 'struct', 'enum', and 'impl' definitions are allowed at the top level of a file"));
         }
 
-        Ok(Program { definitions: ds })
+        Ok(Program {
+            imports,
+            definitions: ds,
+        })
+    }
+
+    /// `import geo::shapes;` or `import geo::shapes::{Shape, area};`
+    fn parse_import(&mut self) -> ParseResult<Import> {
+        self.consume(Token::Import)?;
+        let mut path = Vec::new();
+        let mut items = None;
+        loop {
+            match self.peek().cloned() {
+                Some((s, Token::Ident(name), e)) => {
+                    self.next();
+                    path.push((name, Span::new(s, e)));
+                }
+                Some((_, Token::LeftBrace, _)) if !path.is_empty() => {
+                    items = Some(self.parse_import_items()?);
+                    break;
+                }
+                _ if path.is_empty() => {
+                    return Err(self.expected("a module name after 'import'").help(
+                        "name a module by its path from the program's root: `import geo::shapes;`",
+                    ))
+                }
+                _ => return Err(self.expected("a name or '{' after '::'")),
+            }
+            if tok_matches!(self, Token::DoubleColon) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+        if tok_matches!(self, Token::Comma) && items.is_none() {
+            return Err(self.expected("';'").help(
+                "to import several names from a module, put them in braces: `import geo::{Point, area};`",
+            ));
+        }
+        if !tok_matches!(self, Token::Semicolon) {
+            return Err(self.missing_semicolon());
+        }
+        self.next();
+        Ok(Import { path, items })
+    }
+
+    /// The names in braces at the end of an import: `{Shape, area}`.
+    fn parse_import_items(&mut self) -> ParseResult<Vec<(Id, Span)>> {
+        self.consume(Token::LeftBrace)?;
+        let mut items = Vec::new();
+        while !tok_matches!(self, Token::RightBrace) {
+            match self.peek().cloned() {
+                Some((s, Token::Ident(name), e)) => {
+                    self.next();
+                    items.push((name, Span::new(s, e)));
+                }
+                Some((_, Token::Mult, _)) => {
+                    let tok = self.peek().cloned();
+                    return Err(self
+                        .error(tok, "glob imports are not allowed".to_string())
+                        .help(
+                        "name each item to import, or import the module and write `module::item`",
+                    ));
+                }
+                _ => return Err(self.expected("a name to import")),
+            }
+            if tok_matches!(self, Token::Comma) {
+                self.next();
+            } else if !tok_matches!(self, Token::RightBrace) {
+                return Err(self.expected("',' or '}'"));
+            }
+        }
+        if items.is_empty() {
+            return Err(self.expected("a name to import").help(
+                "name what to import in the braces, or leave them out to import the module",
+            ));
+        }
+        self.consume(Token::RightBrace)?;
+        Ok(items)
+    }
+
+    /// `pub` before a definition, a function in an impl, or a field, if it
+    /// is there.
+    fn parse_pub(&mut self) -> bool {
+        let public = tok_matches!(self, Token::Pub);
+        if public {
+            self.next();
+        }
+        public
     }
 
     pub fn parse_expr_only(&mut self) -> ParseResult<Expr> {
@@ -705,20 +808,27 @@ where
     }
 
     fn parse_defn(&mut self) -> ParseResult<Definition> {
-        let res = match self.next() {
-            Some((_, Token::Fn, _)) => self.parse_fn_defn(),
-            Some((_, Token::Struct, _)) => self.parse_struct_defn(),
-            Some((_, Token::Enum, _)) => self.parse_enum_defn(),
+        let public = self.parse_pub();
+        match self.next() {
+            Some((_, Token::Fn, _)) => self.parse_fn_defn(public),
+            Some((_, Token::Struct, _)) => self.parse_struct_defn(public),
+            Some((_, Token::Enum, _)) => self.parse_enum_defn(public),
+            Some(tok @ (_, Token::Impl, _)) if public => Err(self
+                .error(Some(tok), "an impl can't be 'pub'".to_string())
+                .help("mark the functions in it that other modules may call as 'pub'")),
             Some((_, Token::Impl, _)) => self.parse_impl(),
+            Some(tok @ (_, Token::Import, _)) => Err(self
+                .error(Some(tok), "an import can't be 'pub'".to_string())
+                .help("an import only brings names into this file; code that needs them imports them too")),
+            tok if public => Err(self.error(tok, "expected 'fn', 'struct', or 'enum' after 'pub'".to_string())),
             tok => Err(self.error(tok, "expected a definition".to_string())),
-        };
-
-        res
+        }
     }
 
-    fn parse_fn_defn(&mut self) -> ParseResult<Definition> {
-        let m = self.parse_fn(false)?;
+    fn parse_fn_defn(&mut self, public: bool) -> ParseResult<Definition> {
+        let m = self.parse_fn(false, public)?;
         Ok(Definition::Function {
+            public,
             name: m.name,
             name_span: m.name_span,
             type_params: m.type_params,
@@ -729,7 +839,7 @@ where
     }
 
     /// A function after `fn`; in an `impl` (`in_impl`), it may take `self`.
-    fn parse_fn(&mut self, in_impl: bool) -> ParseResult<Method> {
+    fn parse_fn(&mut self, in_impl: bool, public: bool) -> ParseResult<Method> {
         if !tok_matches!(self, Token::Ident(_)) {
             return Err(self.expected("a function name after 'fn'"));
         }
@@ -747,6 +857,7 @@ where
         let body = self.parse_block()?;
 
         Ok(Method {
+            public,
             name: ident,
             name_span,
             type_params,
@@ -771,9 +882,13 @@ where
         }
         self.consume(Token::LeftBrace)?;
         let mut methods = Vec::new();
-        while tok_matches!(self, Token::Fn) {
+        while tok_matches!(self, Token::Fn | Token::Pub) {
+            let public = self.parse_pub();
+            if !tok_matches!(self, Token::Fn) {
+                return Err(self.expected("'fn' after 'pub'"));
+            }
             self.next();
-            methods.push(self.parse_fn(true)?);
+            methods.push(self.parse_fn(true, public)?);
         }
         if !tok_matches!(self, Token::RightBrace) {
             return Err(self
@@ -837,7 +952,7 @@ where
     }
 
     /// `struct Name { field: type, ... }`
-    fn parse_struct_defn(&mut self) -> ParseResult<Definition> {
+    fn parse_struct_defn(&mut self, public: bool) -> ParseResult<Definition> {
         let (name, name_span) = self.parse_type_def_name("struct")?;
         let type_params = self.parse_type_params()?;
         if tok_matches!(self, Token::LeftParen) {
@@ -848,6 +963,7 @@ where
         self.consume(Token::LeftBrace)?;
         let mut fields = Vec::new();
         while !tok_matches!(self, Token::RightBrace) {
+            let field_public = self.parse_pub();
             let (field, span) = match self.peek().cloned() {
                 Some((start, Token::Ident(f), end)) => (f, Span::new(start, end)),
                 _ => return Err(self.expected("a field name")),
@@ -858,8 +974,13 @@ where
                     .expected("':'")
                     .help(format!("every field needs a type: `{field}: int`")));
             }
-            let t = self.parse_type_annotation()?;
-            fields.push(Variable::new(field, t, span));
+            let t = self.parse_type_annotation()?.expect("a ':' was seen");
+            fields.push(FieldDef {
+                public: field_public,
+                name: field,
+                t,
+                span,
+            });
             if tok_matches!(self, Token::Comma) {
                 self.next();
             } else {
@@ -871,6 +992,7 @@ where
         }
         self.consume(Token::RightBrace)?;
         Ok(Definition::Struct {
+            public,
             name,
             name_span,
             type_params,
@@ -879,12 +1001,18 @@ where
     }
 
     /// `enum Name { A, B(int, str), ... }`
-    fn parse_enum_defn(&mut self) -> ParseResult<Definition> {
+    fn parse_enum_defn(&mut self, public: bool) -> ParseResult<Definition> {
         let (name, name_span) = self.parse_type_def_name("enum")?;
         let type_params = self.parse_type_params()?;
         self.consume(Token::LeftBrace)?;
         let mut variants = Vec::new();
         while !tok_matches!(self, Token::RightBrace) {
+            if tok_matches!(self, Token::Pub) {
+                let tok = self.peek().cloned();
+                return Err(self
+                    .error(tok, "a variant can't be 'pub'".to_string())
+                    .help(format!("every variant of a 'pub' enum can be used where the enum can; write `pub enum {name}`")));
+            }
             let (variant, span) = match self.peek().cloned() {
                 Some((start, Token::Ident(v), end)) => (v, Span::new(start, end)),
                 _ => return Err(self.expected("a variant name")),
@@ -926,6 +1054,7 @@ where
         }
         self.consume(Token::RightBrace)?;
         Ok(Definition::Enum {
+            public,
             name,
             name_span,
             type_params,
@@ -1386,20 +1515,24 @@ where
                     "true" => Expression::True,
                     "false" => Expression::False,
                     _ if tok_matches!(self, Token::DoubleColon) => {
-                        self.next();
-                        let variant = match self.peek().cloned() {
-                            Some((_, Token::Ident(v), _)) => v,
-                            _ => return Err(self.expected("a variant name after '::'")),
-                        };
-                        self.next();
-                        Expression::Path(var, variant)
+                        let mut path = self.parse_path_tail(var)?;
+                        let name_span = Span::new(start, self.last_end());
+                        if tok_matches!(self, Token::LeftBrace) && !self.no_struct {
+                            self.parse_struct_lit(path.join("::").into(), name_span)?
+                        } else {
+                            if tok_matches!(self, Token::LeftBrace) {
+                                self.struct_hint = Some(path.join("::").into());
+                            }
+                            let last = path.pop().expect("a path has two names or more");
+                            Expression::Path(path.join("::").into(), last)
+                        }
                     }
                     // `Some` for `Option::Some`, and the like.
                     v if prelude::variant_enum(v).is_some() => {
                         Expression::Path(prelude::variant_enum(v).unwrap().into(), var)
                     }
                     _ if tok_matches!(self, Token::LeftBrace) && !self.no_struct => {
-                        self.parse_struct_lit(var)?
+                        self.parse_struct_lit(var, span)?
                     }
                     _ if tok_matches!(self, Token::LeftBrace) => {
                         self.struct_hint = Some(var.clone());
@@ -1453,7 +1586,7 @@ where
     }
 
     /// The fields of a struct literal, after its name.
-    fn parse_struct_lit(&mut self, name: crate::ast::Id) -> ParseResult<Expression> {
+    fn parse_struct_lit(&mut self, name: Id, name_span: Span) -> ParseResult<Expression> {
         self.consume(Token::LeftBrace)?;
         let mut fields = Vec::new();
         let mut base = None;
@@ -1496,7 +1629,12 @@ where
             }
         }
         self.consume(Token::RightBrace)?;
-        Ok(Expression::StructLit { name, fields, base })
+        Ok(Expression::StructLit {
+            name,
+            name_span,
+            fields,
+            base,
+        })
     }
 
     /// `{ pattern => body, ... }` after `match value`.
@@ -1579,59 +1717,21 @@ where
                     "true" => PatternKind::Bool(true),
                     "false" => PatternKind::Bool(false),
                     _ if tok_matches!(self, Token::DoubleColon) => {
-                        self.next();
-                        let variant = match self.peek().cloned() {
-                            Some((_, Token::Ident(v), _)) => v,
-                            _ => return Err(self.expected("a variant name after '::'")),
-                        };
-                        self.next();
-                        self.parse_variant_pattern(name, variant)?
+                        let mut path = self.parse_path_tail(name)?;
+                        let name_span = Span::new(start, self.last_end());
+                        if tok_matches!(self, Token::LeftBrace) {
+                            self.parse_struct_pattern(path.join("::").into(), name_span)?
+                        } else {
+                            let last = path.pop().expect("a path has two names or more");
+                            self.parse_variant_pattern(path.join("::").into(), last)?
+                        }
                     }
                     // `Some(x)` for `Option::Some(x)`, and the like.
                     v if prelude::variant_enum(v).is_some() => {
                         self.parse_variant_pattern(prelude::variant_enum(v).unwrap().into(), name)?
                     }
                     _ if tok_matches!(self, Token::LeftBrace) => {
-                        self.next();
-                        let mut fields = Vec::new();
-                        let mut rest = false;
-                        while !tok_matches!(self, Token::RightBrace) {
-                            if tok_matches!(self, Token::DotDot) {
-                                self.next();
-                                rest = true;
-                                break;
-                            }
-                            let (field, span) = match self.peek().cloned() {
-                                Some((s, Token::Ident(f), e)) => (f, Span::new(s, e)),
-                                _ => return Err(self.expected("a field name")),
-                            };
-                            self.next();
-                            let pattern = if tok_matches!(self, Token::Colon) {
-                                self.next();
-                                self.parse_pattern()?
-                            } else {
-                                // Shorthand: `Point { x }` binds the field to `x`.
-                                Pattern {
-                                    kind: PatternKind::Binding(Variable::new(
-                                        field.clone(),
-                                        None,
-                                        span,
-                                    )),
-                                    span,
-                                }
-                            };
-                            fields.push((field, span, pattern));
-                            if tok_matches!(self, Token::Comma) {
-                                self.next();
-                            } else {
-                                break;
-                            }
-                        }
-                        if !tok_matches!(self, Token::RightBrace) {
-                            return Err(self.expected("',' or '}'"));
-                        }
-                        self.next();
-                        PatternKind::Struct { name, fields, rest }
+                        self.parse_struct_pattern(name, Span::new(start, name_end))?
                     }
                     _ => {
                         PatternKind::Binding(Variable::new(name, None, Span::new(start, name_end)))
@@ -1644,6 +1744,68 @@ where
             kind,
             span: Span::new(start, self.last_end()),
         })
+    }
+
+    /// The fields of a struct pattern, after its name: `{ x, y: 0, .. }`.
+    fn parse_struct_pattern(&mut self, name: Id, name_span: Span) -> ParseResult<PatternKind> {
+        self.next();
+        let mut fields = Vec::new();
+        let mut rest = false;
+        while !tok_matches!(self, Token::RightBrace) {
+            if tok_matches!(self, Token::DotDot) {
+                self.next();
+                rest = true;
+                break;
+            }
+            let (field, span) = match self.peek().cloned() {
+                Some((s, Token::Ident(f), e)) => (f, Span::new(s, e)),
+                _ => return Err(self.expected("a field name")),
+            };
+            self.next();
+            let pattern = if tok_matches!(self, Token::Colon) {
+                self.next();
+                self.parse_pattern()?
+            } else {
+                // Shorthand: `Point { x }` binds the field to `x`.
+                Pattern {
+                    kind: PatternKind::Binding(Variable::new(field.clone(), None, span)),
+                    span,
+                }
+            };
+            fields.push((field, span, pattern));
+            if tok_matches!(self, Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+        if !tok_matches!(self, Token::RightBrace) {
+            return Err(self.expected("',' or '}'"));
+        }
+        self.next();
+        Ok(PatternKind::Struct {
+            name,
+            name_span,
+            fields,
+            rest,
+        })
+    }
+
+    /// The names after the first in a path, `::b::c` in `a::b::c`, giving
+    /// every name in it.
+    fn parse_path_tail(&mut self, first: Id) -> ParseResult<Vec<Id>> {
+        let mut path = vec![first];
+        while tok_matches!(self, Token::DoubleColon) {
+            self.next();
+            match self.peek().cloned() {
+                Some((_, Token::Ident(name), _)) => {
+                    self.next();
+                    path.push(name);
+                }
+                _ => return Err(self.expected("a name after '::'")),
+            }
+        }
+        Ok(path)
     }
 
     /// The values of a variant pattern, after its name: `(a, b)`, or nothing.
@@ -1746,6 +1908,11 @@ where
             Some((start, Token::Ident(ref v), _)) => {
                 let v = v.clone();
                 self.next();
+                let v: Id = if tok_matches!(self, Token::DoubleColon) {
+                    self.parse_path_tail(v)?.join("::").into()
+                } else {
+                    v
+                };
                 if v == "any" {
                     return Err(self.error(tok, "unknown type 'any'".to_string()).help(
                         "Aja has no 'any' type; every value has one static type. \

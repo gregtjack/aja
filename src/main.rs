@@ -1,5 +1,4 @@
 use std::{
-    fs,
     io::{self, Write},
     path::PathBuf,
     process::ExitCode,
@@ -16,6 +15,7 @@ mod builtins;
 mod check;
 mod diagnostic;
 mod lexer;
+mod module;
 mod parse;
 mod prelude;
 mod token;
@@ -37,32 +37,26 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
-    // File mode
-    let path = file.display().to_string();
-    let script = match fs::read_to_string(&file) {
-        Ok(s) => s,
-        Err(e) => {
-            report(
-                &Diagnostic::new(format!("could not read '{path}': {e}")),
-                "",
-                &path,
-            );
-            return ExitCode::FAILURE;
-        }
-    };
+    // File mode: load the file and the modules it imports, from the
+    // directory it is in.
+    let root = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from(""), PathBuf::from);
+    let name = file
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let (loaded, errors) = module::load(&module::Dir(root), &name);
+    let files = loaded.files;
+    if !errors.is_empty() {
+        report_all(&errors, &files);
+        return ExitCode::FAILURE;
+    }
 
-    let tokens = match lexer::tokenize(&script) {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            report(&e.to_diagnostic(), &script, &path);
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let ast = match Parser::new(tokens.into_iter()).parse() {
+    let ast = match module::resolve(loaded.modules) {
         Ok(ast) => ast,
-        Err(e) => {
-            report(&e.to_diagnostic(), &script, &path);
+        Err(errors) => {
+            report_all(&errors, &files);
             return ExitCode::FAILURE;
         }
     };
@@ -70,7 +64,8 @@ fn main() -> ExitCode {
     let types = match check::check_program(&ast) {
         Ok(types) => types,
         Err(errors) => {
-            report_type_errors(&errors, &script, &path);
+            let errors: Vec<Diagnostic> = errors.iter().map(|e| e.to_diagnostic()).collect();
+            report_all(&errors, &files);
             return ExitCode::FAILURE;
         }
     };
@@ -78,7 +73,7 @@ fn main() -> ExitCode {
     let program = match Compiler::new().program(&ast, &types) {
         Ok(program) => program,
         Err(e) => {
-            report(&e, &script, &path);
+            report_all(&[e], &files);
             return ExitCode::FAILURE;
         }
     };
@@ -86,9 +81,23 @@ fn main() -> ExitCode {
     match Vm::new().run_program(&program) {
         Ok(_) => ExitCode::SUCCESS,
         Err(err) => {
-            report(&err.to_diagnostic(), &script, &path);
+            report_all(&[err.to_diagnostic_in(&files)], &files);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Print diagnostics from a program's files to stderr, then a summary line
+/// if there is more than one.
+fn report_all(diagnostics: &[Diagnostic], files: &diagnostic::Files) {
+    for (i, d) in diagnostics.iter().enumerate() {
+        if i > 0 {
+            eprintln!();
+        }
+        eprint!("{}", d.render_in(files, diagnostic::use_color()));
+    }
+    if diagnostics.len() > 1 {
+        eprintln!("\n{} errors found", diagnostics.len());
     }
 }
 

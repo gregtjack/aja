@@ -70,9 +70,9 @@ cargo test
 ### Programs
 
 A program is a sequence of top-level `fn`, `struct`, `enum`, and `impl`
-definitions, in any order. Execution starts at
-`fn main`, which takes no parameters. Its return value is not printed; use
-`println` for output.
+definitions, in any order, after any `import`s (see [Modules](#modules)).
+Execution starts at `fn main` in the file being run, which takes no
+parameters. Its return value is not printed; use `println` for output.
 
 ### Types and values
 
@@ -265,6 +265,47 @@ v.dot(v)
   `self` as its first argument, so tail calls and error traces work the
   same way.
 
+### Modules
+
+A file is a module, and the directory tree is the module tree: from the
+directory of the file being run, `geo/shapes.aja` is the module
+`geo::shapes`. There are no `mod` declarations.
+
+```rust
+// geo/shapes.aja
+pub struct Point { pub x: int, pub y: int }
+pub enum Shape { Circle(Point, int), Rect(Point, Point) }
+pub fn area(s: Shape) -> int { ... }
+fn helper() -> int { ... }      // private: only this file can use it
+
+// main.aja
+import geo::shapes;             // shapes::area, shapes::Shape::Circle, ...
+import geo::shapes::{Point};    // Point by itself
+
+fn main() {
+    let s = shapes::Shape::Circle(Point { x: 0, y: 0 }, 2);
+    println(shapes::area(s));
+}
+```
+
+- **`import a::b;`** makes module `a::b`'s items available through its last
+  name, `b::item`; **`import a::b::{X, y};`** brings in those names by
+  themselves. A path without braces always names a module. There are no
+  glob imports, so every name in a file is defined there, in the prelude, or
+  in an import. Imports come before any definition.
+- **Private by default.** Functions, structs, enums, methods, and struct
+  fields are visible only inside their file unless marked `pub`. A struct
+  with private fields can't be built outside its module (provide a function
+  that makes one), and a pattern for it there must end in `..`. An enum's
+  variants are as visible as the enum.
+- **No import cycles.** A cycle is an error that names every module in it.
+  The file being run can't be imported (that would always be a cycle).
+- **Methods live with their type**: an `impl` must be in the module that
+  defines its type.
+- The REPL has no imports yet.
+
+[examples/modules](examples/modules) is a program in several files.
+
 ### Type checking
 
 Every program is type-checked before it runs, and every type error is
@@ -360,8 +401,8 @@ implementation fails the tests and stops the VM at startup.
 ## Architecture
 
 ```
-source ──► Lexer ──► Parser ──► AST ──► Type checker ──► Compiler ──► Bytecode VM
-          lexer.rs   parse.rs   ast/    check/           vm/compile.rs  vm/mod.rs
+files ──► Loader ──► Lexer ──► Parser ──► Resolver ──► AST ──► Type checker ──► Compiler ──► Bytecode VM
+          module/    lexer.rs  parse.rs   module/      ast/    check/           vm/compile.rs  vm/mod.rs
 ```
 
 | Path                  | Role |
@@ -371,6 +412,7 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/lexer.rs`        | Hand-written lexer; tracks line/column for errors |
 | `src/parse.rs`        | Recursive-descent parser (plus unit tests) |
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
+| `src/module/`         | Modules: the loader reads the file being run and every module it imports, rejecting cycles; `resolve.rs` gives each definition a module-qualified name (`geo::shapes::area`), rewrites every use to it, and checks that items used across modules are `pub`. The result is one program for the checker and backends |
 | `src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness, and `methods.rs` checks `impl` blocks and method calls |
 | `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends |
 | `src/prelude.aja`, `src/prelude.rs` | The prelude (`Option`, `Result`, and their methods), written in Aja and built into the binary. Locations in it are marked as the prelude's, so errors in code it calls point at the right file |
@@ -380,7 +422,7 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/vm/value.rs`     | Runtime values |
 | `src/vm/heap.rs`      | Garbage-collected heap for closures and cells |
 | `src/vm/native.rs`    | Built-in implementations |
-| `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color) |
+| `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color), and the source files each location can point into |
 
 The VM is register-based. Each call gets a window of registers holding its
 parameters, locals, and temporaries, and instructions name registers
@@ -426,7 +468,7 @@ the VM forgets to keep reachable is caught.
 `var` with lexical scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
 structs, enums with data, and exhaustive `match`; generic functions, structs, and enums; `Option` and `Result` in the prelude, and `?`; methods and associated functions in `impl` blocks;
-static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
+modules, with `import` and `pub`; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 
 **Reserved or partially present, not yet usable:**

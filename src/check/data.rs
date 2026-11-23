@@ -23,8 +23,8 @@ use ecow::EcoString;
 use super::{key, plural, BindingKind, Checker, Class, Ty, TypeError};
 use crate::{
     ast::{
-        types::Type, Arm, Definition, Expr, FieldInit, Id, Pattern, PatternKind, Program, Span,
-        Statement, TypeParam,
+        types::Type, Arm, Definition, Expr, FieldInit, Id, Pattern, PatternKind, Program, Source,
+        Span, Statement, TypeParam,
     },
     diagnostic::closest_match,
     prelude::{self, variant_display},
@@ -36,6 +36,29 @@ use crate::{
 pub(super) struct StructInfo {
     pub params: Vec<Id>,
     pub fields: Vec<(Id, Ty)>,
+    /// The fields not marked `pub`, which only code in the struct's own
+    /// file can use.
+    pub private: HashSet<Id>,
+    /// The file the struct is defined in.
+    pub source: Source,
+}
+
+impl StructInfo {
+    /// Whether code at `at` can use the field `name`.
+    pub fn field_visible(&self, name: &Id, at: Span) -> bool {
+        !self.private.contains(name) || at.start.source == self.source
+    }
+
+    /// Whether the struct has fields that code at `at` can't use, so it
+    /// can't build one or match one without `..`.
+    pub fn hides_fields(&self, at: Span) -> bool {
+        !self.private.is_empty() && at.start.source != self.source
+    }
+}
+
+/// The module a global name is in, as written (`geo` for `geo::Point`).
+pub(super) fn module_of(name: &str) -> &str {
+    name.rsplit_once("::").map_or(name, |(m, _)| m)
 }
 
 /// An enum definition: its type parameters, and its variants in declaration
@@ -136,6 +159,8 @@ impl Checker {
                     StructInfo {
                         params,
                         fields: Vec::new(),
+                        private: HashSet::new(),
+                        source: span.start.source,
                     },
                 );
             } else {
@@ -161,8 +186,9 @@ impl Checker {
                 Definition::Struct { name, fields, .. } => {
                     let mut seen = HashSet::new();
                     let mut tys = Vec::new();
+                    let mut private = HashSet::new();
                     for f in fields {
-                        let t = f.t.as_ref().map_or(Ty::Error, |t| self.from_ast(t));
+                        let t = self.from_ast(&f.t);
                         if !seen.insert(f.name.clone()) {
                             self.error(TypeError::new(
                                 format!(
@@ -173,11 +199,16 @@ impl Checker {
                             ));
                             continue;
                         }
+                        if !f.public {
+                            private.insert(f.name.clone());
+                        }
                         tys.push((f.name.clone(), t));
                     }
                     let used: Vec<&Ty> = tys.iter().map(|(_, t)| t).collect();
                     self.require_used(type_params, &used, &format!("struct '{name}'"));
-                    self.structs.get_mut(name).unwrap().fields = tys;
+                    let info = self.structs.get_mut(name).unwrap();
+                    info.fields = tys;
+                    info.private = private;
                 }
                 Definition::Enum { name, variants, .. } => {
                     let mut seen = HashSet::new();
@@ -429,9 +460,13 @@ impl Checker {
                 let info = &self.structs[&n];
                 match info.fields.iter().position(|(f, _)| f == name) {
                     Some(i) => {
+                        let visible = info.field_visible(name, name_span);
                         let map = info.params.iter().cloned().zip(args).collect();
                         let t = Self::subst(&info.fields[i].1, &map);
                         self.fields.insert(key(span), i as u16);
+                        if !visible {
+                            self.private_field(&n, name, name_span);
+                        }
                         t
                     }
                     None => {
@@ -471,6 +506,19 @@ impl Checker {
         }
     }
 
+    fn private_field(&mut self, struct_name: &Id, name: &Id, span: Span) {
+        self.error(
+            TypeError::new(
+                format!("field '{name}' of struct '{struct_name}' is private"),
+                span,
+            )
+            .help(format!(
+                "only code in module '{}' can use it; mark it 'pub' there to use it here",
+                module_of(struct_name)
+            )),
+        );
+    }
+
     /// Suggestions for a field name that `struct_name` doesn't have.
     fn field_help(&self, struct_name: &Id) -> Vec<Id> {
         self.structs[struct_name]
@@ -499,11 +547,10 @@ impl Checker {
     pub(super) fn struct_lit(
         &mut self,
         name: &Id,
+        name_span: Span,
         fields: &[FieldInit],
         base: Option<&Expr>,
-        span: Span,
     ) -> Ty {
-        let name_span = token_span(span, name);
         let Some(info) = self.structs.get(name).cloned() else {
             for f in fields {
                 self.expr(&f.value);
@@ -515,6 +562,25 @@ impl Checker {
             return Ty::Error;
         };
 
+        if info.hides_fields(name_span) {
+            let private: Vec<String> = info
+                .fields
+                .iter()
+                .filter(|(f, _)| info.private.contains(f))
+                .map(|(f, _)| format!("'{f}'"))
+                .collect();
+            self.error(
+                TypeError::new(
+                    format!(
+                        "struct '{name}' has private fields, so it can only be built in module '{}'",
+                        module_of(name)
+                    ),
+                    name_span,
+                )
+                .help("use a function from that module that makes one")
+                .note(format!("its private fields: {}", join_and(&private))),
+            );
+        }
         let (args, map) = self.fresh_args(&info.params);
         let mut seen = HashSet::new();
         for f in fields {
@@ -852,9 +918,14 @@ impl Checker {
                     .collect();
                 Pat::Ctor(Ctor::Variant(index), subs)
             }
-            PatternKind::Struct { name, fields, rest } => {
+            PatternKind::Struct {
+                name,
+                name_span,
+                fields,
+                rest,
+            } => {
                 let Some(info) = self.structs.get(name).cloned() else {
-                    self.not_a_struct(name, token_span(p.span, name));
+                    self.not_a_struct(name, *name_span);
                     self.bind_unchecked(fields.iter().map(|(_, _, f)| f), names);
                     return Pat::Wild;
                 };
@@ -870,6 +941,9 @@ impl Checker {
                             self.bind_unchecked(std::iter::once(sub), names);
                         }
                         Some(i) => {
+                            if !info.field_visible(field, *span) {
+                                self.private_field(name, field, *span);
+                            }
                             if !seen.insert(i) {
                                 self.error(TypeError::new(
                                     format!(
@@ -883,13 +957,26 @@ impl Checker {
                         }
                     }
                 }
+                let hidden = info.hides_fields(*name_span);
                 let missing: Vec<String> = info
                     .fields
                     .iter()
                     .enumerate()
-                    .filter(|(i, _)| !seen.contains(i))
+                    .filter(|(i, (n, _))| !seen.contains(i) && info.field_visible(n, *name_span))
                     .map(|(_, (n, _))| format!("'{n}'"))
                     .collect();
+                if !rest && missing.is_empty() && hidden {
+                    self.error(
+                        TypeError::new(
+                            format!("struct '{name}' has private fields, so a pattern for it must end in '..'"),
+                            p.span,
+                        )
+                        .help(format!(
+                            "add '..' to skip the fields only module '{}' can see",
+                            module_of(name)
+                        )),
+                    );
+                }
                 if !rest && !missing.is_empty() {
                     let what = if missing.len() == 1 {
                         "field"
@@ -1181,16 +1268,6 @@ fn join_and(items: &[String]) -> String {
         [one] => one.clone(),
         [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
-}
-
-/// The span of the name at the start of `span`, which begins with the
-/// single token `name`.
-fn token_span(span: Span, name: &str) -> Span {
-    let mut end = span.start;
-    let n = name.chars().count() as u32;
-    end.col += n;
-    end.pos += n;
-    Span::new(span.start, end)
 }
 
 /// The span of the value a statement produces: a block's final expression,

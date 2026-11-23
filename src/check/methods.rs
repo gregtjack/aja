@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::{key, plural, Checker, Class, FnContext, Ty, TypeError};
 use crate::{
-    ast::{types::Type, Definition, Expr, Id, Method, Program, Span},
+    ast::{types::Type, Definition, Expr, Id, Method, Program, Source, Span},
     diagnostic::closest_match,
 };
 
@@ -35,6 +35,17 @@ pub(super) struct MethodInfo {
     pub ty: Ty,
     pub has_self: bool,
     pub param_names: Vec<Id>,
+    /// Whether it is marked `pub`; if not, only code in `source`, the file
+    /// it is defined in, can call it.
+    pub public: bool,
+    pub source: Source,
+}
+
+impl MethodInfo {
+    /// Whether code at `at` can call it.
+    fn visible(&self, at: Span) -> bool {
+        self.public || at.start.source == self.source
+    }
 }
 
 /// A method whose body is still to be checked.
@@ -215,6 +226,8 @@ impl Checker {
             ty,
             has_self: m.has_self,
             param_names: m.params.iter().map(|p| p.name.clone()).collect(),
+            public: m.public,
+            source: m.name_span.start.source,
         };
         self.methods
             .entry(type_name.clone())
@@ -358,6 +371,9 @@ impl Checker {
             }
             return Ty::Error;
         }
+        if !info.visible(callee.span) {
+            self.private_method(type_name, name, &info, callee.span);
+        }
         let map: HashMap<Id, Ty> = info
             .generics
             .iter()
@@ -417,8 +433,27 @@ impl Checker {
             );
             return Some(Ty::Error);
         }
+        if !info.visible(span) {
+            self.private_method(type_name, name, &info, span);
+        }
         self.functions.insert(key(span), info.global.clone());
         Some(self.instantiate(&info.generics, &info.ty))
+    }
+
+    fn private_method(&mut self, type_name: &Id, name: &Id, info: &MethodInfo, span: Span) {
+        let what = if info.has_self {
+            "method"
+        } else {
+            "associated function"
+        };
+        self.error(
+            TypeError::new(format!("{what} '{name}' of '{type_name}' is private"), span).help(
+                format!(
+                    "only code in module '{}' can call it; mark it 'pub' there to call it here",
+                    super::data::module_of(type_name)
+                ),
+            ),
+        );
     }
 
     /// A help message for `obj.name` without a call when `name` is a method.

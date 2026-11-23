@@ -160,6 +160,12 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
 - **Methods live next to their type or their trait.** An `impl` must be in the
   module that defines the type or the trait (Rust's orphan rule), so there is
   exactly one place to look for a method.
+- **A path without braces names a module.** `import a::b;` always imports
+  the module `a::b`; items come in only through braces,
+  `import a::b::{X};`, so an import never depends on whether `b` turns out
+  to be a file or an item. A module is used through the last name of its
+  path, so two modules imported whole can't share a last name; import
+  what's needed from one of them by name instead. (Rules 5, 10)
 - **A small prelude.** `Option`, `Result`, `Some`, `None`, `Ok`, `Err`, `List`,
   `print`, `println`, `assert`, and `panic` are in scope everywhere. Everything
   else needs an `import`.
@@ -242,8 +248,15 @@ by a number with a fractional part.
    built at runtime (with `+`) are collected. Nothing is reference-counted.
 5. **Language features for libraries.** Generics ✅, methods ✅, the core traits,
    and `for` loops (see [The standard library](#the-standard-library)).
-6. **Modules and packages.** `import`, `pub`, the prelude, `aja.toml`, and the
-   `aja` tool (see [Modules and packages](#modules-and-packages)).
+6. **Modules and packages.** `import` ✅, `pub` ✅ (on functions, types,
+   methods, and fields), cycle errors ✅, the prelude, `aja.toml`, and the
+   `aja` tool (see [Modules and packages](#modules-and-packages)). For now
+   the root is the directory of the file being run, and modules are not
+   yet checked one at a time: the resolver gives every definition a
+   module-qualified name and hands the checker one program, deciding
+   privacy within types by which file a span is in. Checking each module
+   against its imports' signatures, for incremental and parallel checking,
+   can replace that without changing the language.
 7. **Standard library**, layer by layer, starting with the prelude and core.
 8. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.

@@ -16,6 +16,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [generics.aja](generics.aja) | Generic functions, structs, and enums: `Pair`, and a list with `map`, `fold`, and `find` |
 | [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |
 | [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |
+| [modules/](modules) | A program in several files: `import`, `pub`, and a struct whose private field keeps an invariant. Run `cargo run -- examples/modules/main.aja` |
 
 ## Errors
 

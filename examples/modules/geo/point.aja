@@ -1,0 +1,19 @@
+// A point on a grid. The struct and its fields are `pub`, so other modules
+// can build points and read their coordinates.
+pub struct Point { pub x: int, pub y: int }
+
+impl Point {
+    pub fn origin() -> Point {
+        Point { x: 0, y: 0 }
+    }
+
+    // How far apart two points are, walking along the grid.
+    pub fn distance(self, other: Point) -> int {
+        abs(self.x - other.x) + abs(self.y - other.y)
+    }
+}
+
+// Not `pub`: only this module can call it.
+fn abs(n: int) -> int {
+    if n < 0 { -n } else { n }
+}

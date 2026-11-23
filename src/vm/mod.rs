@@ -12,7 +12,7 @@ use std::{mem::size_of, rc::Rc};
 use crate::{
     ast::{Source, Span},
     builtins::BUILTINS,
-    diagnostic::Diagnostic,
+    diagnostic::{Diagnostic, Files},
 };
 
 pub mod bytecode;
@@ -56,7 +56,14 @@ pub struct TraceEntry {
 }
 
 impl RuntimeError {
+    /// The error as a diagnostic, for a program in one file.
     pub fn to_diagnostic(&self) -> Diagnostic {
+        self.to_diagnostic_in(&Files::default())
+    }
+
+    /// The error as a diagnostic, naming which of `files` each call in its
+    /// trace is in, when it isn't the file being run.
+    pub fn to_diagnostic_in(&self, files: &Files) -> Diagnostic {
         const MAX_NOTES: usize = 8;
         let mut notes: Vec<String> = self
             .trace
@@ -69,8 +76,9 @@ impl RuntimeError {
                     String::new()
                 };
                 let place = match e.site.start.source {
-                    Source::Program => "",
-                    Source::Prelude => " in the prelude",
+                    Source::MAIN => String::new(),
+                    Source::Prelude => " in the prelude".to_string(),
+                    file => format!(" in {}", files.path(file)),
                 };
                 format!(
                     "in {}, called{place} at line {}, column {}{repeat}",

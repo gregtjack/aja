@@ -1,0 +1,22 @@
+// Imports name what they bring in, so every name in this file is defined
+// here, in the prelude, or in this list.
+import geo::point::{Point};
+
+pub enum Shape {
+    Circle(Point, int),
+    Rect(Point, Point),
+}
+
+pub fn area(s: Shape) -> int {
+    match s {
+        Shape::Circle(_, r) => 3 * r * r,
+        Shape::Rect(a, b) => (b.x - a.x) * (b.y - a.y),
+    }
+}
+
+pub fn name(s: Shape) -> str {
+    match s {
+        Shape::Circle(_, _) => "circle",
+        Shape::Rect(_, _) => "rectangle",
+    }
+}

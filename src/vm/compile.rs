@@ -225,6 +225,7 @@ impl Compiler {
                     // Values have one representation whatever their type, so
                     // a generic function compiles once, like any other.
                     type_params: _,
+                    public: _,
                 } => {
                     let slot = self.define_global(name.clone());
                     fns.push((slot, name, name_span, params, body, rtype));
@@ -283,10 +284,10 @@ impl Compiler {
 
 /// Identifies a variable declaration (a parameter or `let`) by where its name
 /// appears.
-type DeclKey = (u32, u32);
+type DeclKey = (crate::ast::Source, u32, u32);
 
 fn decl_key(v: &Variable) -> DeclKey {
-    (v.span.start.pos, v.span.end.pos)
+    (v.span.start.source, v.span.start.pos, v.span.end.pos)
 }
 
 /// Where a name refers to.
@@ -813,9 +814,9 @@ impl<'a> FnCompiler<'a> {
                 let layout = self.variant_layout(enum_name, variant);
                 self.new_data(dst, layout, 0, 0, span);
             }
-            Expression::StructLit { name, fields, base } => {
-                self.struct_lit(name, fields, base.as_deref(), dst, span)
-            }
+            Expression::StructLit {
+                name, fields, base, ..
+            } => self.struct_lit(name, fields, base.as_deref(), dst, span),
             Expression::Field(obj, _, _) => {
                 let obj = self.expr_any(obj);
                 let index = self.types.field(e);

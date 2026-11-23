@@ -30,7 +30,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     ast::{
-        types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Span, Statement, Variable,
+        types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Source, Span, Statement,
+        Variable,
     },
     builtins::{Params, BUILTINS},
     diagnostic::{closest_match, Diagnostic},
@@ -174,10 +175,10 @@ pub struct Types {
 
 /// Identifies an expression by where it is in the source. Two operator
 /// expressions never cover exactly the same text.
-type SpanKey = (u32, u32);
+type SpanKey = (Source, u32, u32);
 
 fn key(span: Span) -> SpanKey {
-    (span.start.pos, span.end.pos)
+    (span.start.source, span.start.pos, span.end.pos)
 }
 
 impl Types {
@@ -226,9 +227,7 @@ pub fn check_program(program: &Program) -> Result<Types, Vec<TypeError>> {
 /// Type-check the prelude itself, for compiling its functions.
 pub fn check_prelude() -> Types {
     let mut checker = Checker::bare();
-    checker.program(&Program {
-        definitions: prelude::definitions(),
-    });
+    checker.program(&Program::new(prelude::definitions()));
     match checker.finish() {
         Ok(types) => types,
         Err(errors) => panic!("the prelude has type errors: {errors:?}"),
@@ -325,9 +324,7 @@ impl Checker {
     /// functions, ready to check a program or REPL inputs.
     pub fn new() -> Self {
         let mut checker = Self::bare();
-        let prelude = Program {
-            definitions: prelude::definitions(),
-        };
+        let prelude = Program::new(prelude::definitions());
         checker.declare_types(&prelude);
         checker.declare_impls(&prelude);
         assert!(
@@ -413,7 +410,7 @@ impl Checker {
                 functions,
             });
         }
-        errors.sort_by_key(|e| (e.span.start.line, e.span.start.col));
+        errors.sort_by_key(|e| (e.span.start.source, e.span.start.line, e.span.start.col));
         Err(errors)
     }
 
@@ -931,9 +928,12 @@ impl Checker {
                 Some(t) => t,
                 None => self.variant_value(type_name, name, span),
             },
-            Expression::StructLit { name, fields, base } => {
-                self.struct_lit(name, fields, base.as_deref(), span)
-            }
+            Expression::StructLit {
+                name,
+                name_span,
+                fields,
+                base,
+            } => self.struct_lit(name, *name_span, fields, base.as_deref()),
             Expression::Match(scrutinee, arms) => self.match_(scrutinee, arms),
             Expression::Try(inner) => self.try_(inner, span),
         }

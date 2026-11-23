@@ -51,12 +51,15 @@ impl Diagnostic {
     /// Render the diagnostic against `source`, labelling it with `path`. A
     /// location in the prelude is shown in the prelude instead.
     pub fn render(&self, source: &str, path: &str, color: bool) -> String {
-        let (source, path) = match self.span {
-            Some((start, _)) if start.source == Source::Prelude => {
-                (crate::prelude::SOURCE, "<prelude>")
-            }
-            _ => (source, path),
-        };
+        let mut files = Files::default();
+        files.add(path, source);
+        self.render_in(&files, color)
+    }
+
+    /// Render the diagnostic against whichever of `files` its location is in.
+    pub fn render_in(&self, files: &Files, color: bool) -> String {
+        let source = self.span.map_or(Source::MAIN, |(start, _)| start.source);
+        let (source, path) = (files.text(source), files.path(source));
         let style = Style::new(color);
         let mut out = format!(
             "{}error{}{}: {}{}\n",
@@ -117,6 +120,38 @@ impl Diagnostic {
         }
 
         out
+    }
+}
+
+/// The source files of a program, by [`Source`]: the file being run first,
+/// then the files of the modules it imports.
+#[derive(Debug, Clone, Default)]
+pub struct Files {
+    files: Vec<(String, String)>,
+}
+
+impl Files {
+    /// Add a file's path and text, returning the source it is.
+    pub fn add(&mut self, path: impl Into<String>, text: impl Into<String>) -> Source {
+        let id = u16::try_from(self.files.len()).expect("too many source files");
+        self.files.push((path.into(), text.into()));
+        Source::File(id)
+    }
+
+    /// The path of `source`, as shown in messages.
+    pub fn path(&self, source: Source) -> &str {
+        match source {
+            Source::Prelude => "<prelude>",
+            Source::File(id) => self.files.get(id as usize).map_or("", |(p, _)| p),
+        }
+    }
+
+    /// The text of `source`.
+    pub fn text(&self, source: Source) -> &str {
+        match source {
+            Source::Prelude => crate::prelude::SOURCE,
+            Source::File(id) => self.files.get(id as usize).map_or("", |(_, t)| t),
+        }
     }
 }
 

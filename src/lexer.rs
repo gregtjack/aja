@@ -75,7 +75,7 @@ where
             line: 1,
             col: 1,
             eof: false,
-            source: Source::Program,
+            source: Source::MAIN,
         }
     }
 
@@ -403,6 +403,8 @@ where
             "struct" => Some(Token::Struct),
             "enum" => Some(Token::Enum),
             "impl" => Some(Token::Impl),
+            "import" => Some(Token::Import),
+            "pub" => Some(Token::Pub),
             _ => None,
         };
 
@@ -419,6 +421,7 @@ where
 }
 /// Tokenize a whole source string, stopping at the first lexical error.
 /// The returned tokens always end with `Token::Eof`.
+#[cfg(test)]
 pub fn tokenize(src: &str) -> Result<Vec<SrcSpan>, LexicalError> {
     tokenize_from_line(src, 1)
 }

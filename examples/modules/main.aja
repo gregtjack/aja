@@ -1,0 +1,28 @@
+// A program in several files. Run it with `cargo run -- examples/modules/main.aja`.
+//
+// A file is a module, named by its path from this directory:
+// `geo/shapes.aja` is `geo::shapes`. Importing a module makes its `pub`
+// items available through its name (`shapes::area`); importing names in
+// braces brings them in by themselves (`Point`).
+import geo::point::{Point};
+import geo::shapes;
+import counter::{Counter};
+
+fn describe(s: shapes::Shape) {
+    println("a", shapes::name(s), "with area", shapes::area(s));
+}
+
+fn main() {
+    let corner = Point { x: 3, y: 4 };
+    describe(shapes::Shape::Circle(Point::origin(), 2));
+    describe(shapes::Shape::Rect(Point::origin(), corner));
+    println("the corner is", corner.distance(Point::origin()), "steps from the origin");
+
+    var visits = Counter::new("visits");
+    var i = 0;
+    while i < 3 {
+        visits = visits.bump();
+        i = i + 1;
+    }
+    println(visits.name, "=", visits.count());
+}

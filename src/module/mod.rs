@@ -1,0 +1,284 @@
+//! Modules: finding the files a program imports, and putting them together.
+//!
+//! A file is a module, and the directory tree is the module tree: from a
+//! program's root (the directory of the file being run), `geo/shapes.aja` is
+//! the module `geo::shapes`. [`load`] reads the file being run, then every
+//! module it imports, and theirs, rejecting import cycles. [`resolve`] then
+//! gives every definition a name that says which module it is in
+//! (`geo::shapes::area`), rewrites every use of a name to that name, and
+//! checks that what one module uses from another is `pub`. The result is one
+//! [`Program`] that the type checker and the backends handle like a program
+//! in a single file.
+//!
+//! Definitions in the file being run keep their names (`main`), since no
+//! other module can import it: any import of it would be a cycle.
+
+use std::collections::HashMap;
+
+use crate::{
+    ast::{Id, Program, Source, Span},
+    diagnostic::{Diagnostic, Files},
+    lexer::tokenize_source,
+    parse::Parser,
+};
+
+mod resolve;
+#[cfg(test)]
+mod tests;
+
+pub use resolve::resolve;
+
+/// One file of a program.
+#[derive(Debug)]
+pub struct Module {
+    /// Its path from the root, `["geo", "shapes"]`.
+    pub path: Vec<Id>,
+    pub source: Source,
+    pub program: Program,
+}
+
+impl Module {
+    /// Its name as written in code, `geo::shapes`.
+    pub fn name(&self) -> String {
+        path_name(&self.path)
+    }
+
+    /// Whether it is the file being run.
+    pub fn is_main(&self) -> bool {
+        self.source == Source::MAIN
+    }
+}
+
+fn path_name(path: &[Id]) -> String {
+    let segments: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+    segments.join("::")
+}
+
+/// The file a module's source is in, relative to the root:
+/// `geo/shapes.aja` for `geo::shapes`.
+pub fn file_name(path: &[Id]) -> String {
+    let segments: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+    format!("{}.aja", segments.join("/"))
+}
+
+/// Where a module's text comes from: the file system, or (in tests) a map.
+pub trait Root {
+    /// How a file is labelled in messages.
+    fn display(&self, file: &str) -> String;
+    /// The text of `file` (relative to the root), or `None` if there is no
+    /// such file. An error reading a file that exists is an `Err`.
+    fn read(&self, file: &str) -> Result<Option<String>, String>;
+}
+
+/// A directory on disk.
+pub struct Dir(pub std::path::PathBuf);
+
+impl Root for Dir {
+    fn display(&self, file: &str) -> String {
+        self.0.join(file).display().to_string()
+    }
+
+    fn read(&self, file: &str) -> Result<Option<String>, String> {
+        match std::fs::read_to_string(self.0.join(file)) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Files held in memory, by path from the root.
+impl Root for HashMap<String, String> {
+    fn display(&self, file: &str) -> String {
+        file.to_string()
+    }
+
+    fn read(&self, file: &str) -> Result<Option<String>, String> {
+        Ok(self.get(file).cloned())
+    }
+}
+
+/// A program's modules, the file being run first, and the files they are in.
+pub struct Loaded {
+    pub modules: Vec<Module>,
+    pub files: Files,
+}
+
+/// Read and parse `main` (a file in `root`) and every module it imports,
+/// directly or not. Diagnostics are for every file that couldn't be read or
+/// parsed, and every import cycle; `files` is returned either way so they
+/// can be shown.
+pub fn load(root: &dyn Root, main: &str) -> (Loaded, Vec<Diagnostic>) {
+    let main_path: Vec<Id> = vec![main.strip_suffix(".aja").unwrap_or(main).into()];
+    let mut loader = Loader {
+        root,
+        loaded: Loaded {
+            modules: Vec::new(),
+            files: Files::default(),
+        },
+        ids: HashMap::new(),
+        stack: Vec::new(),
+        errors: Vec::new(),
+    };
+    match root.read(main) {
+        Ok(Some(text)) => {
+            loader.add(main_path, main, text);
+        }
+        Ok(None) => loader.errors.push(Diagnostic::new(format!(
+            "could not read '{}': no such file",
+            root.display(main)
+        ))),
+        Err(e) => loader.errors.push(Diagnostic::new(format!(
+            "could not read '{}': {e}",
+            root.display(main)
+        ))),
+    }
+    (loader.loaded, loader.errors)
+}
+
+struct Loader<'r> {
+    root: &'r dyn Root,
+    loaded: Loaded,
+    /// Each module seen so far, by path, and its index in `loaded.modules`
+    /// (`None` if its file couldn't be read or parsed).
+    ids: HashMap<Vec<Id>, Option<usize>>,
+    /// The modules being loaded, outermost first, each with the import of
+    /// the next one; a cycle is an import of one of them.
+    stack: Vec<(Vec<Id>, Option<Span>)>,
+    errors: Vec<Diagnostic>,
+}
+
+impl Loader<'_> {
+    /// Parse a module from `text`, then load its imports.
+    fn add(&mut self, path: Vec<Id>, file: &str, text: String) -> Option<usize> {
+        let source = self.loaded.files.add(self.root.display(file), text);
+        let text = self.loaded.files.text(source).to_string();
+        let parsed = tokenize_source(&text, source)
+            .map_err(|e| e.to_diagnostic())
+            .and_then(|tokens| {
+                Parser::new(tokens.into_iter())
+                    .parse()
+                    .map_err(|e| e.to_diagnostic())
+            });
+        let program = match parsed {
+            Ok(program) => program,
+            Err(e) => {
+                self.errors.push(e);
+                self.ids.insert(path, None);
+                return None;
+            }
+        };
+
+        let index = self.loaded.modules.len();
+        self.ids.insert(path.clone(), Some(index));
+        let imports: Vec<(Vec<Id>, Span)> = program
+            .imports
+            .iter()
+            .map(|i| {
+                (
+                    i.path.iter().map(|(s, _)| s.clone()).collect(),
+                    i.path_span(),
+                )
+            })
+            .collect();
+        self.loaded.modules.push(Module {
+            path: path.clone(),
+            source,
+            program,
+        });
+
+        self.stack.push((path, None));
+        for (import, span) in imports {
+            self.stack.last_mut().unwrap().1 = Some(span);
+            self.import(import, span);
+        }
+        self.stack.pop();
+        Some(index)
+    }
+
+    /// Load the module `path`, imported at `span`, unless it is already.
+    fn import(&mut self, path: Vec<Id>, span: Span) {
+        if let Some(start) = self.stack.iter().position(|(p, _)| *p == path) {
+            self.cycle(start, span);
+            return;
+        }
+        if self.ids.contains_key(&path) {
+            return;
+        }
+        let file = file_name(&path);
+        match self.root.read(&file) {
+            Ok(Some(text)) => {
+                self.add(path, &file, text);
+            }
+            Ok(None) => {
+                let name = path_name(&path);
+                let help = if path[0] == "std" {
+                    "the standard library doesn't exist yet".to_string()
+                } else {
+                    format!(
+                        "a module is a file, named by its path from the program's root; \
+                         '{name}' would be in '{}'",
+                        self.root.display(&file)
+                    )
+                };
+                self.errors.push(
+                    Diagnostic::new(format!("no module named '{name}'"))
+                        .with_span(span.start, span.end)
+                        .with_help(Some(help)),
+                );
+                self.ids.insert(path, None);
+            }
+            Err(e) => {
+                self.errors.push(
+                    Diagnostic::new(format!(
+                        "could not read '{}': {e}",
+                        self.root.display(&file)
+                    ))
+                    .with_span(span.start, span.end),
+                );
+                self.ids.insert(path, None);
+            }
+        }
+    }
+
+    /// Report the cycle of imports from `stack[start]` around to the import
+    /// at `span`, which is of `stack[start]` again.
+    fn cycle(&mut self, start: usize, span: Span) {
+        let mut names: Vec<String> = self.stack[start..]
+            .iter()
+            .map(|(p, _)| format!("'{}'", path_name(p)))
+            .collect();
+        names.push(names[0].clone());
+        let notes = self.stack[start..]
+            .windows(2)
+            .map(|w| {
+                let at = w[0]
+                    .1
+                    .expect("each module on the stack but the last is importing");
+                format!(
+                    "'{}' imports '{}' at {}:{}:{}",
+                    path_name(&w[0].0),
+                    path_name(&w[1].0),
+                    self.loaded.files.path(at.start.source),
+                    at.start.line,
+                    at.start.col
+                )
+            })
+            .collect();
+        let message = if names.len() == 2 {
+            format!("module {} imports itself", names[0])
+        } else {
+            format!("import cycle: {}", names.join(" -> "))
+        };
+        self.errors.push(
+            Diagnostic::new(message)
+                .with_span(span.start, span.end)
+                .with_notes(notes)
+                .with_help(Some(
+                    "modules can't import each other in a cycle; move what they share into a module \
+                     that both import"
+                        .to_string(),
+                )),
+        );
+    }
+}
