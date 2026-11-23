@@ -22,9 +22,7 @@ fn run(fs: &[(&str, &str)]) -> Result<String, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(errors);
     }
-    let program = resolve(loaded.modules)?;
-    let types = check::check_program(&program)
-        .map_err(|es| es.iter().map(|e| e.to_diagnostic()).collect::<Vec<_>>())?;
+    let (program, types) = resolve_and_check(loaded.modules)?;
     let compiled = Compiler::new()
         .program(&program, &types)
         .map_err(|d| vec![d])?;
@@ -54,16 +52,28 @@ fn errors(fs: &[(&str, &str)]) -> Vec<String> {
     }
 }
 
+/// Resolve and type-check `modules` the way `main` does, returning every
+/// error from both, in order.
+fn resolve_and_check(modules: Vec<Module>) -> Result<(Program, check::Types), Vec<Diagnostic>> {
+    let (program, mut errors) = resolve(modules);
+    match check::check_program(&program) {
+        Ok(types) if errors.is_empty() => Ok((program, types)),
+        Ok(_) => Err(errors),
+        Err(type_errors) => {
+            errors.extend(type_errors.iter().map(|e| e.to_diagnostic()));
+            errors.sort_by_key(Diagnostic::sort_key);
+            Err(errors)
+        }
+    }
+}
+
 /// The first error, rendered without color.
 fn rendered(fs: &[(&str, &str)]) -> String {
     let root = files(fs);
     let (loaded, mut errs) = load(&root, "main.aja");
     if errs.is_empty() {
-        match resolve(loaded.modules) {
-            Ok(program) => match check::check_program(&program) {
-                Ok(_) => panic!("program should fail"),
-                Err(es) => errs = es.iter().map(|e| e.to_diagnostic()).collect(),
-            },
+        match resolve_and_check(loaded.modules) {
+            Ok(_) => panic!("program should fail"),
             Err(es) => errs = es,
         }
     }
@@ -207,7 +217,65 @@ fn main() -> int { shapes::width(shapes::Point::origin(), shapes::Point::origin(
         errors(&[("main.aja", main), ("hidden.aja", hidden)]),
         [
             "'Hidden' is private to module 'hidden'",
-            "'Hidden' is private to module 'hidden'"
+            "'Hidden' is private to module 'hidden'",
+            "struct 'hidden::Hidden' has private fields, so it can only be built in module 'hidden'",
+        ]
+    );
+}
+
+#[test]
+fn name_and_type_errors_are_reported_together() {
+    // A private item is still checked where it's used, and a name that
+    // couldn't be resolved isn't reported again by the checker.
+    let main = "
+import shapes;
+import shapes::{width, nothing};
+
+fn main() -> int {
+    let a: int = shapes::width(shapes::Point::origin(), true);
+    let b = nothing(1) + shapes::missing;
+    let c: str = 1;
+    let d: shapes::Nope = 2;
+    match a {
+        nothing => 0,
+    };
+    a + b
+}";
+    assert_eq!(
+        errors(&[("main.aja", main), ("shapes.aja", SHAPES)]),
+        [
+            "'width' is private to module 'shapes'",
+            "module 'shapes' has no item named 'nothing'",
+            "'width' is private to module 'shapes'",
+            "mismatched types: parameter 'b' of function 'shapes::width' expects shapes::Point, found bool",
+            "module 'shapes' has no item named 'missing'",
+            "mismatched types: 'c' is declared as str but was given int",
+            "module 'shapes' has no item named 'Nope'",
+        ]
+    );
+    // Errors in other files come after the file being run's, in order.
+    let fs = [
+        (
+            "main.aja",
+            "import m;\nfn main() { let x: bool = 1; m::f(); }",
+        ),
+        ("m.aja", "import main2;\npub fn f() -> int { true }"),
+    ];
+    let msgs = errors(&fs);
+    assert_eq!(msgs[0], "no module named 'main2'");
+    let fs = [
+        (
+            "main.aja",
+            "import m;\nfn main() { let x: bool = 1; m::g(); }",
+        ),
+        ("m.aja", "pub fn f() -> int { true }"),
+    ];
+    assert_eq!(
+        errors(&fs),
+        [
+            "mismatched types: 'x' is declared as bool but was given int",
+            "module 'm' has no item named 'g'",
+            "mismatched types: function 'm::f' is declared to return int, but this is bool",
         ]
     );
 }
@@ -404,8 +472,7 @@ fn the_example_runs() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/modules");
     let (loaded, errors) = load(&Dir(dir), "main.aja");
     assert!(errors.is_empty(), "{errors:#?}");
-    let program = resolve(loaded.modules).expect("the example resolves");
-    let types = check::check_program(&program).expect("the example type-checks");
+    let (program, types) = resolve_and_check(loaded.modules).expect("the example checks");
     let compiled = Compiler::new().program(&program, &types).unwrap();
     Vm::new().run_program(&compiled).expect("the example runs");
 }

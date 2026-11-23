@@ -836,6 +836,10 @@ impl Checker {
     fn pattern(&mut self, p: &Pattern, expected: &Ty, names: &mut HashSet<Id>) -> Pat {
         match &p.kind {
             PatternKind::Wildcard => Pat::Wild,
+            PatternKind::Error(subs) => {
+                self.bind_unchecked(subs.iter(), names);
+                Pat::Wild
+            }
             PatternKind::Binding(var) => {
                 if let Ty::Named(n, _) = self.resolve(expected) {
                     let is_variant = self

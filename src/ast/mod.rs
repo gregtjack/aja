@@ -286,6 +286,10 @@ pub enum PatternKind {
         fields: Vec<(Id, Span, Pattern)>,
         rest: bool,
     },
+    /// A pattern whose error has already been reported (by the module
+    /// resolver), holding the patterns inside it, whose names it binds.
+    /// It is treated like `_`.
+    Error(Vec<Pattern>),
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +345,11 @@ pub enum Expression {
     /// `value?`: the value inside an `Ok` or `Some`, or else return the
     /// `Err` or `None` from the enclosing function.
     Try(Box<Expr>),
+    /// An expression whose error has already been reported (by the module
+    /// resolver), holding the expressions inside it that can still be
+    /// checked. The checker gives it a type that fits anywhere; it never
+    /// reaches a backend.
+    Error(Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]

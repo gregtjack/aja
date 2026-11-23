@@ -936,6 +936,12 @@ impl Checker {
             } => self.struct_lit(name, *name_span, fields, base.as_deref()),
             Expression::Match(scrutinee, arms) => self.match_(scrutinee, arms),
             Expression::Try(inner) => self.try_(inner, span),
+            Expression::Error(inner) => {
+                for e in inner {
+                    self.expr(e);
+                }
+                Ty::Error
+            }
         }
     }
 
@@ -1498,6 +1504,7 @@ impl Checker {
                 Box::new(self.from_ast(ret_type)),
             ),
             Type::Named(name, args, span) => self.named_type(name, args, *span),
+            Type::Error => Ty::Error,
         }
     }
 

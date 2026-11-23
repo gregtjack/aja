@@ -53,22 +53,19 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let ast = match module::resolve(loaded.modules) {
-        Ok(ast) => ast,
-        Err(errors) => {
-            report_all(&errors, &files);
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let types = match check::check_program(&ast) {
-        Ok(types) => types,
-        Err(errors) => {
-            let errors: Vec<Diagnostic> = errors.iter().map(|e| e.to_diagnostic()).collect();
-            report_all(&errors, &files);
-            return ExitCode::FAILURE;
-        }
-    };
+    // Type-check even when names failed to resolve, so every error is
+    // reported at once.
+    let (ast, mut errors) = module::resolve(loaded.modules);
+    let types = check::check_program(&ast);
+    if let Err(type_errors) = &types {
+        errors.extend(type_errors.iter().map(|e| e.to_diagnostic()));
+    }
+    if !errors.is_empty() {
+        errors.sort_by_key(diagnostic::Diagnostic::sort_key);
+        report_all(&errors, &files);
+        return ExitCode::FAILURE;
+    }
+    let types = types.expect("there are no type errors");
 
     let program = match Compiler::new().program(&ast, &types) {
         Ok(program) => program,

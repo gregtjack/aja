@@ -43,8 +43,13 @@ struct Items {
 }
 
 /// Resolve the names in `modules` (the file being run first), and put their
-/// definitions together into one program.
-pub fn resolve(modules: Vec<Module>) -> Result<Program, Vec<Diagnostic>> {
+/// definitions together into one program, with the errors found. The
+/// program can be type-checked even when there are errors: a name that
+/// couldn't be resolved becomes an [`Expression::Error`] (or a
+/// [`Type::Error`] or [`PatternKind::Error`]), which the checker accepts
+/// without reporting it again, and a private item is resolved anyway, so
+/// the code using it is still checked.
+pub fn resolve(modules: Vec<Module>) -> (Program, Vec<Diagnostic>) {
     let index: HashMap<Vec<Id>, usize> = modules
         .iter()
         .enumerate()
@@ -68,12 +73,8 @@ pub fn resolve(modules: Vec<Module>) -> Result<Program, Vec<Diagnostic>> {
         definitions.append(&mut m.program.definitions);
     }
 
-    if errors.is_empty() {
-        Ok(Program::new(definitions))
-    } else {
-        errors.sort_by_key(|e| e.span.map(|(s, _)| (s.source, s.line, s.col)));
-        Err(errors)
-    }
+    errors.sort_by_key(Diagnostic::sort_key);
+    (Program::new(definitions), errors)
 }
 
 /// The name a definition named `name` in `module` gets once resolved.
@@ -157,6 +158,9 @@ struct Resolver<'a> {
     values: HashMap<Id, Id>,
     /// Likewise for structs and enums.
     types: HashMap<Id, Id>,
+    /// Names whose import failed (and has been reported), so their uses
+    /// aren't reported again.
+    poisoned: HashSet<Id>,
     /// The local variables in scope, innermost scope last.
     locals: Vec<HashSet<Id>>,
     /// The type parameters in scope.
@@ -192,6 +196,7 @@ impl<'a> Resolver<'a> {
                 .iter()
                 .map(|(n, i)| (n.clone(), i.global.clone()))
                 .collect(),
+            poisoned: HashSet::new(),
             locals: Vec::new(),
             type_params: Vec::new(),
             errors,
@@ -276,12 +281,17 @@ impl<'a> Resolver<'a> {
         .flatten()
         .collect();
         if found.is_empty() {
+            if !self.values.contains_key(name) && !self.types.contains_key(name) {
+                self.poisoned.insert(name.clone());
+            }
             return self.no_item(target, name, span);
         }
+        let mut reported = false;
         for (is_value, item) in found {
-            if !item.public {
+            // Reported, but imported anyway, so its uses are checked.
+            if !item.public && !reported {
                 self.private(target, name, span);
-                continue;
+                reported = true;
             }
             let scope = if is_value {
                 &mut self.values
@@ -352,8 +362,8 @@ impl<'a> Resolver<'a> {
     }
 
     /// The item `name` of the module imported as `alias`, as its global name,
-    /// if it exists and is `pub` (reporting it otherwise). `types` says to
-    /// look only at structs and enums.
+    /// if it exists (reporting it otherwise, and reporting it if it isn't
+    /// `pub`). `types` says to look only at structs and enums.
     fn module_item(&mut self, module: usize, name: &Id, types: bool, span: Span) -> Option<Id> {
         let items = &self.items[module];
         let item = if types {
@@ -368,7 +378,7 @@ impl<'a> Resolver<'a> {
             }
             Some(item) if !item.public && module != self.this => {
                 self.private(module, name, span);
-                None
+                Some(item.global.clone())
             }
             Some(item) => Some(item.global.clone()),
         }
@@ -376,45 +386,52 @@ impl<'a> Resolver<'a> {
 
     // ---- Names ------------------------------------------------------------------
 
-    /// The global name of the value `name`, written by itself.
-    fn value(&self, name: &Id) -> Id {
+    /// The global name of the value `name`, written by itself, or `None` if
+    /// it is the name of a failed import.
+    fn value(&self, name: &Id) -> Option<Id> {
         if self.locals.iter().any(|scope| scope.contains(name)) {
-            return name.clone();
+            return Some(name.clone());
         }
-        self.values
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| name.clone())
-    }
-
-    /// The global name of the struct or enum written `name` (`Shape`, or
-    /// `shapes::Shape`) at `span`.
-    fn type_name(&mut self, name: &Id, span: Span) -> Id {
-        let segments: Vec<&str> = name.split("::").collect();
-        match segments[..] {
-            [_] if self.type_params.contains(name) => name.clone(),
-            [_] => self
-                .types
+        if self.poisoned.contains(name) {
+            return None;
+        }
+        Some(
+            self.values
                 .get(name)
                 .cloned()
                 .unwrap_or_else(|| name.clone()),
-            [module, item] => match self.aliases.get(module).copied() {
-                Some(m) => self
-                    .module_item(m, &item.into(), true, span)
+        )
+    }
+
+    /// The global name of the struct or enum written `name` (`Shape`, or
+    /// `shapes::Shape`) at `span`, or `None` if it can't have one, having
+    /// reported why.
+    fn type_name(&mut self, name: &Id, span: Span) -> Option<Id> {
+        let segments: Vec<&str> = name.split("::").collect();
+        match segments[..] {
+            [_] if self.type_params.contains(name) => Some(name.clone()),
+            [_] if self.poisoned.contains(name) => None,
+            [_] => Some(
+                self.types
+                    .get(name)
+                    .cloned()
                     .unwrap_or_else(|| name.clone()),
+            ),
+            [module, item] => match self.aliases.get(module).copied() {
+                Some(m) => self.module_item(m, &item.into(), true, span),
                 // `Shape::Circle` where a type is expected: the checker
                 // reports it.
                 None if self.types.contains_key(module) || prelude::is_prelude_type(module) => {
-                    name.clone()
+                    Some(name.clone())
                 }
                 None => {
                     self.not_imported(module, span);
-                    name.clone()
+                    None
                 }
             },
             _ => {
                 self.too_long(&segments, span);
-                name.clone()
+                None
             }
         }
     }
@@ -446,12 +463,15 @@ impl<'a> Resolver<'a> {
 
     fn ty(&mut self, t: &mut Type) {
         match t {
-            Type::Named(name, args, span) => {
-                *name = self.type_name(name, *span);
-                for a in args {
-                    self.ty(a);
+            Type::Named(name, args, span) => match self.type_name(name, *span) {
+                Some(global) => {
+                    *name = global;
+                    for a in args {
+                        self.ty(a);
+                    }
                 }
-            }
+                None => *t = Type::Error,
+            },
             Type::Fn {
                 param_types,
                 ret_type,
@@ -461,7 +481,7 @@ impl<'a> Resolver<'a> {
                 }
                 self.ty(ret_type);
             }
-            Type::Int | Type::Float | Type::Bool | Type::String | Type::Void => {}
+            Type::Int | Type::Float | Type::Bool | Type::String | Type::Void | Type::Error => {}
         }
     }
 
@@ -659,10 +679,25 @@ impl<'a> Resolver<'a> {
                 self.stmt(then);
                 self.stmt(otherwise);
             }
-            Expression::Var(name) => *name = self.value(name),
+            Expression::Var(name) => match self.value(name) {
+                Some(global) => *name = global,
+                None => e.kind = Expression::Error(Vec::new()),
+            },
             Expression::Assign(name, value) => {
-                *name = self.value(name);
                 self.expr(value);
+                match self.value(name) {
+                    Some(global) => *name = global,
+                    None => {
+                        let value =
+                            std::mem::replace(&mut **value, Expr::new(Expression::True, span));
+                        e.kind = Expression::Error(vec![value]);
+                    }
+                }
+            }
+            Expression::Error(es) => {
+                for x in es {
+                    self.expr(x);
+                }
             }
             Expression::Call(callee, args) => {
                 self.expr(callee);
@@ -698,12 +733,22 @@ impl<'a> Resolver<'a> {
                 fields,
                 base,
             } => {
-                *name = self.type_name(name, *name_span);
-                for f in fields {
+                for f in fields.iter_mut() {
                     self.expr(&mut f.value);
                 }
                 if let Some(b) = base {
                     self.expr(b);
+                }
+                match self.type_name(name, *name_span) {
+                    Some(global) => *name = global,
+                    None => {
+                        let mut values: Vec<Expr> = std::mem::take(fields)
+                            .into_iter()
+                            .map(|f| f.value)
+                            .collect();
+                        values.extend(base.take().map(|b| *b));
+                        e.kind = Expression::Error(values);
+                    }
                 }
             }
             Expression::Match(scrutinee, arms) => {
@@ -723,28 +768,33 @@ impl<'a> Resolver<'a> {
 
     /// `prefix::last` in an expression: a variant or associated function of
     /// a type (`Shape::Circle`, `shapes::Shape::Circle`), or an item of a
-    /// module (`shapes::area`). Returns what it becomes, if that changes.
+    /// module (`shapes::area`). Returns what it becomes, if that changes:
+    /// an [`Expression::Error`] if it can't be resolved.
     fn path(&mut self, prefix: &Id, last: &Id, span: Span) -> Option<Expression> {
+        let error = || Some(Expression::Error(Vec::new()));
         let segments: Vec<&str> = prefix.split("::").collect();
         match segments[..] {
             [_] if self.type_params.contains(prefix) => None,
             [_] if self.types.contains_key(prefix) => {
                 Some(Expression::Path(self.types[prefix].clone(), last.clone()))
             }
+            [_] if self.poisoned.contains(prefix) => error(),
             [module] => {
                 let m = *self.aliases.get(module)?;
-                let global = self.module_item(m, last, false, span)?;
-                Some(Expression::Var(global))
+                match self.module_item(m, last, false, span) {
+                    Some(global) => Some(Expression::Var(global)),
+                    None => error(),
+                }
             }
-            [_, _] => {
-                let t = self.type_name(prefix, span);
-                Some(Expression::Path(t, last.clone()))
-            }
+            [_, _] => match self.type_name(prefix, span) {
+                Some(t) => Some(Expression::Path(t, last.clone())),
+                None => error(),
+            },
             _ => {
                 let mut all = segments.clone();
                 all.push(last);
                 self.too_long(&all[..all.len() - 1], span);
-                None
+                error()
             }
         }
     }
@@ -763,7 +813,10 @@ impl<'a> Resolver<'a> {
                 fields,
                 ..
             } => {
-                if self.aliases.contains_key(enum_name.as_str())
+                for f in fields.iter_mut() {
+                    self.pattern(f);
+                }
+                let global = if self.aliases.contains_key(enum_name.as_str())
                     && !self.types.contains_key(enum_name.as_str())
                 {
                     self.error(
@@ -773,11 +826,13 @@ impl<'a> Resolver<'a> {
                             "a variant is written with its enum's name: `{enum_name}::Enum::{variant}`"
                         ),
                     );
+                    None
                 } else {
-                    *enum_name = self.type_name(enum_name, span);
-                }
-                for f in fields {
-                    self.pattern(f);
+                    self.type_name(enum_name, span)
+                };
+                match global {
+                    Some(global) => *enum_name = global,
+                    None => p.kind = PatternKind::Error(std::mem::take(fields)),
                 }
             }
             PatternKind::Struct {
@@ -786,8 +841,22 @@ impl<'a> Resolver<'a> {
                 fields,
                 ..
             } => {
-                *name = self.type_name(name, *name_span);
-                for (_, _, f) in fields {
+                for (_, _, f) in fields.iter_mut() {
+                    self.pattern(f);
+                }
+                match self.type_name(name, *name_span) {
+                    Some(global) => *name = global,
+                    None => {
+                        let subs = std::mem::take(fields)
+                            .into_iter()
+                            .map(|(_, _, f)| f)
+                            .collect();
+                        p.kind = PatternKind::Error(subs);
+                    }
+                }
+            }
+            PatternKind::Error(subs) => {
+                for f in subs {
                     self.pattern(f);
                 }
             }

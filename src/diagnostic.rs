@@ -48,6 +48,12 @@ impl Diagnostic {
         self
     }
 
+    /// Orders diagnostics by where they are: by file, then line and column.
+    /// One without a location comes first.
+    pub fn sort_key(&self) -> Option<(Source, u32, u32)> {
+        self.span.map(|(s, _)| (s.source, s.line, s.col))
+    }
+
     /// Render the diagnostic against `source`, labelling it with `path`. A
     /// location in the prelude is shown in the prelude instead.
     pub fn render(&self, source: &str, path: &str, color: bool) -> String {

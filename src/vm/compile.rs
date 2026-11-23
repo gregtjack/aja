@@ -823,6 +823,9 @@ impl<'a> FnCompiler<'a> {
                 self.emit(Op::GetField { dst, obj, index }, span);
             }
             Expression::Match(scrutinee, arms) => self.match_(scrutinee, arms, dst, span),
+            Expression::Error(_) => {
+                unreachable!("the checker reports errors before anything is compiled")
+            }
             Expression::Try(inner) => {
                 // `Ok(v)` or `Some(v)` gives `v`. Anything else (`Err(e)` or
                 // `None`) is returned as it is: a value's representation
@@ -1080,6 +1083,9 @@ impl FnCompiler<'_> {
     fn pattern(&mut self, p: &Pattern, value: Reg, fails: &mut Vec<usize>) {
         match &p.kind {
             PatternKind::Wildcard => {}
+            PatternKind::Error(_) => {
+                unreachable!("the checker reports errors before anything is compiled")
+            }
             PatternKind::Binding(var) => {
                 let reg = self.alloc();
                 self.emit(
@@ -1175,6 +1181,9 @@ impl FnCompiler<'_> {
         };
         match &p.kind {
             PatternKind::Wildcard => {}
+            PatternKind::Error(_) => {
+                unreachable!("the checker reports errors before anything is compiled")
+            }
             // Read a bound field straight into its variable's register.
             PatternKind::Binding(var) => {
                 let reg = self.alloc();
@@ -1359,6 +1368,7 @@ impl CaptureFinder {
             | Expression::Unary(_, e)
             | Expression::Field(e, ..)
             | Expression::Try(e) => self.expr(e),
+            Expression::Error(es) => es.iter().for_each(|e| self.expr(e)),
             Expression::StructLit { fields, base, .. } => {
                 for f in fields {
                     self.expr(&f.value);
@@ -1421,6 +1431,7 @@ fn pattern_bindings(p: &Pattern, out: &mut Vec<(Id, DeclKey)>) {
         PatternKind::Struct { fields, .. } => {
             fields.iter().for_each(|(_, _, f)| pattern_bindings(f, out))
         }
+        PatternKind::Error(subs) => subs.iter().for_each(|f| pattern_bindings(f, out)),
         PatternKind::Wildcard
         | PatternKind::Int(_)
         | PatternKind::Str(_)
