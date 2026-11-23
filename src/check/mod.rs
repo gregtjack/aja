@@ -38,10 +38,12 @@ use crate::{
 };
 
 mod data;
+mod methods;
 #[cfg(test)]
 mod tests;
 
 use data::{EnumInfo, StructInfo};
+use methods::MethodInfo;
 
 /// A type as the checker sees it: like [`Type`], plus inference variables
 /// and two types for special cases.
@@ -160,12 +162,14 @@ pub enum TryOn {
 
 /// What the checker learned that the backends need: the operand type of
 /// every arithmetic, comparison, and negation expression, which field each
-/// field access reads, and what each `?` is applied to.
+/// field access reads, what each `?` is applied to, and which function each
+/// method call and associated function refers to.
 #[derive(Debug, Default)]
 pub struct Types {
     operands: HashMap<SpanKey, OperandType>,
     fields: HashMap<SpanKey, u16>,
     tries: HashMap<SpanKey, TryOn>,
+    functions: HashMap<SpanKey, Id>,
 }
 
 /// Identifies an expression by where it is in the source. Two operator
@@ -202,6 +206,14 @@ impl Types {
             .get(&key(e.span))
             .expect("the type checker records what every '?' is applied to")
     }
+
+    /// The function, by the name it is compiled under (`Point::norm`), that
+    /// `e` refers to: the callee of a method call (`p.norm` in `p.norm()`),
+    /// or an associated function (`Point::origin`). `None` for anything else,
+    /// such as a variant or a field.
+    pub fn function(&self, e: &Expr) -> Option<&Id> {
+        self.functions.get(&key(e.span))
+    }
 }
 
 /// Type-check a whole program.
@@ -209,6 +221,16 @@ pub fn check_program(program: &Program) -> Result<Types, Vec<TypeError>> {
     let mut checker = Checker::new();
     checker.program(program);
     checker.finish()
+}
+
+/// Type-check the prelude itself, for compiling its functions.
+pub fn check_prelude() -> Types {
+    let mut checker = Checker::bare();
+    checker.program(&Program { definitions: prelude::definitions() });
+    match checker.finish() {
+        Ok(types) => types,
+        Err(errors) => panic!("the prelude has type errors: {errors:?}"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -286,6 +308,10 @@ pub struct Checker {
     fields: HashMap<SpanKey, u16>,
     /// What each `?` is applied to.
     tries: HashMap<SpanKey, TryOn>,
+    /// The function each method call or associated function refers to.
+    functions: HashMap<SpanKey, Id>,
+    /// The functions defined in impls, by type and then by name.
+    methods: HashMap<Id, HashMap<Id, MethodInfo>>,
     structs: HashMap<Id, StructInfo>,
     enums: HashMap<Id, EnumInfo>,
     /// The type parameters in scope: those of the definition being checked.
@@ -293,7 +319,19 @@ pub struct Checker {
 }
 
 impl Checker {
+    /// A checker that knows the built-ins and the prelude's types and
+    /// functions, ready to check a program or REPL inputs.
     pub fn new() -> Self {
+        let mut checker = Self::bare();
+        let prelude = Program { definitions: prelude::definitions() };
+        checker.declare_types(&prelude);
+        checker.declare_impls(&prelude);
+        assert!(checker.errors.is_empty(), "the prelude has type errors: {:?}", checker.errors);
+        checker
+    }
+
+    /// A checker that knows only the built-ins.
+    fn bare() -> Self {
         let mut checker = Checker {
             vars: Vec::new(),
             scopes: vec![HashMap::new()],
@@ -306,6 +344,8 @@ impl Checker {
             operands: Vec::new(),
             fields: HashMap::new(),
             tries: HashMap::new(),
+            functions: HashMap::new(),
+            methods: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
             type_params: Vec::new(),
@@ -331,9 +371,6 @@ impl Checker {
             };
             checker.scopes[0].insert(Id::from(builtin.name), binding);
         }
-        let prelude = Program { definitions: prelude::definitions() };
-        checker.declare_types(&prelude);
-        assert!(checker.errors.is_empty(), "the prelude has type errors: {:?}", checker.errors);
         checker
     }
 
@@ -360,7 +397,8 @@ impl Checker {
                 .collect();
             let fields = std::mem::take(&mut self.fields);
             let tries = std::mem::take(&mut self.tries);
-            return Ok(Types { operands, fields, tries });
+            let functions = std::mem::take(&mut self.functions);
+            return Ok(Types { operands, fields, tries, functions });
         }
         errors.sort_by_key(|e| (e.span.start.line, e.span.start.col));
         Err(errors)
@@ -374,6 +412,7 @@ impl Checker {
 
     fn program(&mut self, program: &Program) {
         self.declare_types(program);
+        let method_bodies = self.declare_impls(program);
 
         // Declare every function first, so bodies can call functions defined
         // later in the file (including mutually recursive ones).
@@ -465,6 +504,7 @@ impl Checker {
             self.type_params.clear();
             self.report_unresolved();
         }
+        self.check_method_bodies(method_bodies);
 
         // Signatures must be written out. Report missing parameter types last,
         // so the suggested annotation can use what the bodies revealed.
@@ -859,7 +899,10 @@ impl Checker {
                 Ty::Fn(param_tys, Box::new(ret))
             }
             Expression::Field(obj, name, name_span) => self.field(obj, name, *name_span, span),
-            Expression::Path(enum_name, variant) => self.variant_value(enum_name, variant, span),
+            Expression::Path(type_name, name) => match self.associated(type_name, name, span) {
+                Some(t) => t,
+                None => self.variant_value(type_name, name, span),
+            },
             Expression::StructLit { name, fields, base } => {
                 self.struct_lit(name, fields, base.as_deref(), span)
             }
@@ -1028,7 +1071,10 @@ impl Checker {
 
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
         if let Expression::Path(enum_name, variant) = &callee.kind {
-            return self.construct_variant(enum_name, variant, args, callee.span, span);
+            // `Point::origin()` calls a function; anything else is a variant.
+            if self.method(enum_name, variant).is_none() {
+                return self.construct_variant(enum_name, variant, args, callee.span, span);
+            }
         }
         let name = match &callee.kind {
             Expression::Var(n) => Some(n.clone()),
@@ -1051,11 +1097,21 @@ impl Checker {
             }
         }
 
-        let describe = match &name {
-            Some(n) => format!("function '{n}'"),
-            None => "this function".to_string(),
+        let describe = match (&name, &callee.kind) {
+            (Some(n), _) => format!("function '{n}'"),
+            (None, Expression::Path(t, f)) => format!("function '{t}::{f}'"),
+            _ => "this function".to_string(),
         };
-        let callee_ty = self.expr(callee);
+        let callee_ty = match &callee.kind {
+            Expression::Field(obj, field, field_span) => {
+                match self.method_call(obj, field, *field_span, callee, args, span) {
+                    Ok(t) => return t,
+                    // A field holding a function, called like any other.
+                    Err(t) => t,
+                }
+            }
+            _ => self.expr(callee),
+        };
         let callee_ty = self.resolve(&callee_ty);
         let (params, ret) = match &callee_ty {
             Ty::Fn(params, ret) => (params.clone(), (**ret).clone()),

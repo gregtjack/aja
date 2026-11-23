@@ -1,0 +1,88 @@
+// Methods: an `impl` block gives a struct or enum functions. One that takes
+// `self` is a method, called on a value with `.`; one that doesn't is an
+// associated function, called through the type with `::`.
+
+struct Vec2 { x: float, y: float }
+
+impl Vec2 {
+    fn new(x: float, y: float) -> Vec2 {
+        Vec2 { x, y }
+    }
+
+    fn zero() -> Vec2 {
+        Vec2::new(0.0, 0.0)
+    }
+
+    fn plus(self, other: Vec2) -> Vec2 {
+        Vec2::new(self.x + other.x, self.y + other.y)
+    }
+
+    fn scaled(self, k: float) -> Vec2 {
+        Vec2::new(self.x * k, self.y * k)
+    }
+
+    fn dot(self, other: Vec2) -> float {
+        self.x * other.x + self.y * other.y
+    }
+}
+
+// A generic type's impl declares its type parameters, and its methods can add
+// their own.
+enum Stack<T> {
+    Empty,
+    Top(T, Stack<T>),
+}
+
+impl<T> Stack<T> {
+    fn new() -> Stack<T> {
+        Stack::Empty
+    }
+
+    fn push(self, x: T) -> Stack<T> {
+        Stack::Top(x, self)
+    }
+
+    fn peek(self) -> Option<T> {
+        match self {
+            Stack::Empty => None,
+            Stack::Top(x, _) => Some(x),
+        }
+    }
+
+    fn pop(self) -> Stack<T> {
+        match self {
+            Stack::Empty => Stack::Empty,
+            Stack::Top(_, rest) => rest,
+        }
+    }
+
+    fn size(self) -> int {
+        match self {
+            Stack::Empty => 0,
+            Stack::Top(_, rest) => 1 + rest.size(),
+        }
+    }
+
+    fn map<U>(self, f: (T) -> U) -> Stack<U> {
+        match self {
+            Stack::Empty => Stack::Empty,
+            Stack::Top(x, rest) => Stack::Top(f(x), rest.map(f)),
+        }
+    }
+}
+
+fn main() {
+    // Calls chain left to right.
+    let v = Vec2::new(1.0, 2.0).plus(Vec2::new(0.5, 0.5)).scaled(2.0);
+    println("v =", v.x, v.y, "and v . v =", v.dot(v));
+    println("zero:", Vec2::zero().dot(v));
+
+    let s = Stack::new().push(1).push(2).push(3);
+    println("size", s.size(), "top", s.peek(), "after a pop", s.pop().peek());
+    println("doubled top:", s.map(fn(n) { n * 2 }).peek().unwrap_or(0));
+
+    // The prelude's types have methods too.
+    let empty: Stack<str> = Stack::new();
+    println(empty.peek().is_none(), empty.peek().or(Some("default")));
+    println(Some(20).map(fn(n) { n + 1 }).and_then(fn(n) { if n > 20 { Some(n * 2) } else { None } }));
+}

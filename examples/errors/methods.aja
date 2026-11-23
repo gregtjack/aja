@@ -1,0 +1,33 @@
+// Methods are called on values with `.`, and associated functions through the
+// type with `::`. Mixing them up, or calling a method a type doesn't have,
+// is an error that says which is which.
+//
+// expect: methods for 'Option' can only be defined where 'Option' is defined, in the prelude
+// expect: struct 'Counter' has no method 'reset'
+// expect: 'start' is an associated function of 'Counter', not a method, so it isn't called on a value
+// expect: 'next' is a method of 'Counter', so it is called on a value
+
+struct Counter { n: int }
+
+impl Counter {
+    fn start() -> Counter {
+        Counter { n: 0 }
+    }
+
+    fn next(self) -> Counter {
+        Counter { n: self.n + 1 }
+    }
+}
+
+impl<T> Option<T> {
+    fn or_zero(self) -> int {
+        0
+    }
+}
+
+fn main() {
+    let c = Counter::start().next();
+    c.reset();
+    c.start();
+    Counter::next(c);
+}

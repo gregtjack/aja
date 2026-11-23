@@ -829,3 +829,127 @@ fn question_mark_errors() {
     let e = err("fn f() { let g = fn(r) { r? }; }");
     assert_eq!(e.message, "type annotations needed: the type of this value must be known to use '?' on it");
 }
+
+// ---- Methods -------------------------------------------------------------------
+
+const POINT: &str = "struct Point { x: int, y: int }
+impl Point {
+    fn origin() -> Point { Point { x: 0, y: 0 } }
+    fn add(self, other: Point) -> Point { Point { x: self.x + other.x, y: self.y + other.y } }
+    fn sum(self) -> int { self.x + self.y }
+}
+";
+
+fn with_point(src: &str) -> String {
+    format!("{POINT}{src}")
+}
+
+#[test]
+fn methods_and_associated_functions() {
+    ok(&with_point("fn main() -> int { Point::origin().add(Point { x: 1, y: 2 }).sum() }"));
+    // An associated function is a value; a method is called on one.
+    ok(&with_point("fn main() -> int { let make = Point::origin; make().sum() }"));
+    // Methods can call each other, and be used before they're defined.
+    ok("fn main() -> int { Num { n: 3 }.twice() }
+        impl Num { fn twice(self) -> int { self.plus(self.n) } fn plus(self, k: int) -> int { self.n + k } }
+        struct Num { n: int }");
+    // A field holding a function is called like any other.
+    ok("struct S { f: (int) -> int } fn main() -> int { let s = S { f: fn(n) { n + 1 } }; s.f(1) }");
+    // Enums have methods too.
+    ok("enum Light { On, Off }
+        impl Light { fn flip(self) -> Light { match self { Light::On => Light::Off, Light::Off => Light::On } } }
+        fn main() -> bool { Light::On.flip() == Light::Off }");
+}
+
+#[test]
+fn generic_methods() {
+    let list = "enum List<T> { Nil, Cons(T, List<T>) }
+                impl<T> List<T> {
+                    fn empty() -> List<T> { List::Nil }
+                    fn push(self, x: T) -> List<T> { List::Cons(x, self) }
+                    fn map<U>(self, f: (T) -> U) -> List<U> {
+                        match self { List::Nil => List::Nil, List::Cons(x, t) => List::Cons(f(x), t.map(f)) }
+                    }
+                }";
+    ok(&format!("{list} fn main() -> List<str> {{ List::empty().push(1).map(fn(n) {{ if n > 0 {{ \"pos\" }} else {{ \"neg\" }} }}) }}"));
+    let (msg, at) = error(&format!("{list} fn main() {{ let xs: List<int> = List::empty(); xs.push(\"s\"); }}"));
+    assert_eq!(msg, "mismatched types: parameter 'x' of method 'List::push' expects int, found str");
+    assert_eq!(at, "\"s\"");
+    // The receiver's type arguments fix the impl's type parameters.
+    assert_eq!(
+        error(&format!("{list} fn main() -> List<str> {{ List::Cons(1, List::Nil).map(fn(n) {{ n }}) }}")).0,
+        "mismatched types: function 'main' is declared to return List<str>, but this is List<int>"
+    );
+}
+
+#[test]
+fn prelude_methods() {
+    ok("fn main() -> int { Some(1).map(fn(n) { n + 1 }).unwrap_or(0) }");
+    ok("fn parse(s: str) -> Result<int, str> { Ok(1) }
+        fn f() -> Result<int, int> { let n = parse(\"1\").map_err(fn(e) { 1 })?; Ok(n) }
+        fn main() -> bool { f().is_ok() && parse(\"x\").ok().is_some() }");
+    assert_eq!(
+        error("fn main() { Some(1).unwrap_or(\"none\"); }").0,
+        "mismatched types: parameter 'default' of method 'Option::unwrap_or' expects int, found str"
+    );
+}
+
+#[test]
+fn method_call_errors() {
+    let err = |src: &str| error(&with_point(src));
+    assert_eq!(err("fn main() { Point::origin().sum(1); }").0, "method 'Point::sum' takes 0 arguments but 1 was given");
+    let (msg, at) = err("fn main() { Point::origin().total(); }");
+    assert_eq!(msg, "struct 'Point' has no method 'total'");
+    assert_eq!(at, "total");
+    assert_eq!(help(&with_point("fn main() { Point::origin().ad(Point::origin()); }")), "a method with a similar name exists: 'add'");
+    assert_eq!(help(&with_point("fn main() { Point::origin().frobnicate(); }")), "its methods are: add, origin, sum");
+    assert_eq!(
+        err("fn main() { Point::origin().origin(); }").0,
+        "'origin' is an associated function of 'Point', not a method, so it isn't called on a value"
+    );
+    assert_eq!(err("fn main() { Point::sum(Point::origin()); }").0, "'sum' is a method of 'Point', so it is called on a value");
+    let (msg, _) = err("fn main() { let f = Point::origin().sum; }");
+    assert_eq!(msg, "'sum' is a function of 'Point', not a field");
+    assert_eq!(err("fn main() { let n = 1; n.abs(); }").0, "int has no method 'abs'");
+    assert_eq!(
+        err("fn main() { let f = fn(p) { p.sum() }; }").0,
+        "type annotations needed: the type of this value must be known to call its method 'sum'"
+    );
+}
+
+#[test]
+fn impl_errors() {
+    assert_eq!(
+        error("struct P { x: int } impl P { fn x(self) -> int { 1 } } fn main() { }").0,
+        "struct 'P' has a field named 'x', so it can't also have a method with that name"
+    );
+    assert_eq!(
+        error("enum E { A } impl E { fn A() { } } fn main() { }").0,
+        "enum 'E' has a variant named 'A', so it can't also have a method with that name"
+    );
+    assert_eq!(
+        error("struct P { } impl P { fn f(self) { } } impl P { fn f(self) { } } fn main() { }").0,
+        "'P' already has a method named 'f'"
+    );
+    assert_eq!(
+        error("impl<T> Option<T> { fn f(self) { } } fn main() { }").0,
+        "methods for 'Option' can only be defined where 'Option' is defined, in the prelude"
+    );
+    let errors = check("struct B<T> { v: T } impl B<int> { fn f(self) { } } fn main() { }").unwrap_err();
+    assert_eq!(errors[0].message, "an impl for 'B' must be for all of it: `impl<T> B<T>`");
+    assert_eq!(errors[0].help.as_deref(), Some("write `impl<T> B<T> { ... }`"));
+    assert_eq!(error("impl Nope { } fn main() { }").0, "cannot find type 'Nope'");
+    assert_eq!(
+        error("struct B<T> { v: T } impl<T> B<T> { fn f<T>(self) { } } fn main() { }").0,
+        "type parameter 'T' is already declared by the impl"
+    );
+    assert_eq!(
+        error("struct P { } impl P { fn f(self, n) { } } fn main() { }").0,
+        "parameter 'n' of 'P::f' needs a type annotation"
+    );
+    // A method's body is checked like any function's.
+    assert_eq!(
+        error("struct P { } impl P { fn f(self) -> int { true } } fn main() { }").0,
+        "mismatched types: function 'P::f' is declared to return int, but this is bool"
+    );
+}

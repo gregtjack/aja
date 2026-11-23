@@ -6,7 +6,11 @@
 //! for `Option::Some(1)`); the parser expands them, so later passes only see
 //! qualified variants.
 
-use crate::{ast::Definition, lexer::tokenize, parse::Parser};
+use crate::{
+    ast::{Definition, Source},
+    lexer::tokenize_source,
+    parse::Parser,
+};
 
 /// The prelude's source.
 pub const SOURCE: &str = include_str!("prelude.aja");
@@ -37,7 +41,7 @@ pub fn variant_display(enum_name: &str, variant: &str) -> String {
 
 /// The prelude's definitions.
 pub fn definitions() -> Vec<Definition> {
-    let tokens = tokenize(SOURCE).expect("the prelude lexes");
+    let tokens = tokenize_source(SOURCE, Source::Prelude).expect("the prelude lexes");
     Parser::new(tokens.into_iter())
         .parse()
         .expect("the prelude parses")

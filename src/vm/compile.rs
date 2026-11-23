@@ -27,10 +27,10 @@ use std::{
 use crate::{
     ast::{
         types::Type, Arm, Definition, Expr, Expression, FieldInit, Id, Op1, Op2, Pattern,
-        PatternKind, Program, Span, Statement, Variable,
+        Method, PatternKind, Program, Span, Statement, Variable,
     },
     builtins::BUILTINS,
-    check::{OperandType, TryOn, Types},
+    check::{self, OperandType, TryOn, Types},
     diagnostic::Diagnostic,
     prelude,
 };
@@ -49,6 +49,9 @@ pub struct Compiler {
     literals: HashMap<Box<str>, u32>,
     /// The literals numbered since the last unit was finished.
     new_literals: Literals,
+    /// Functions compiled ahead of the next unit (the prelude's), to give
+    /// the VM with it.
+    new_functions: Vec<(u32, Rc<Proto>)>,
 }
 
 /// How a struct or enum is laid out at runtime.
@@ -78,6 +81,9 @@ pub struct Compiled {
 pub struct ReplInput {
     pub proto: Rc<Proto>,
     pub literals: Literals,
+    /// Functions to define first, with their global slots: the prelude's,
+    /// with the first input.
+    pub functions: Vec<(u32, Rc<Proto>)>,
 }
 
 impl Compiler {
@@ -89,14 +95,53 @@ impl Compiler {
             data: HashMap::new(),
             literals: HashMap::new(),
             new_literals: Vec::new(),
+            new_functions: Vec::new(),
         };
         for b in BUILTINS {
             compiler.define_global(b.name.into());
         }
-        for def in prelude::definitions() {
-            compiler.define_data(&def);
+        // The prelude, checked on its own, is compiled once; its functions
+        // go to the VM with the first program or REPL input.
+        let prelude = prelude::definitions();
+        let types = check::check_prelude();
+        for def in &prelude {
+            compiler.define_data(def);
         }
+        let methods = compiler.declare_methods(&prelude);
+        let functions = compiler.compile_methods(methods, &types);
+        compiler.new_functions = functions;
         compiler
+    }
+
+    /// Give every function in the impls of `defs` a global slot, named like
+    /// `Point::norm`, returning them to compile.
+    fn declare_methods<'d>(&mut self, defs: &'d [Definition]) -> Vec<(u32, Id, &'d Method)> {
+        let mut methods = Vec::new();
+        for def in defs {
+            let Definition::Impl { target: Type::Named(type_name, ..), methods: ms, .. } = def else {
+                continue;
+            };
+            for m in ms {
+                let global: Id = format!("{type_name}::{}", m.name).into();
+                let slot = self.define_global(global.clone());
+                methods.push((slot, global, m));
+            }
+        }
+        methods
+    }
+
+    /// Compile functions from impls. A method is a function whose first
+    /// parameter is `self`.
+    fn compile_methods(&mut self, methods: Vec<(u32, Id, &Method)>, types: &Types) -> Vec<(u32, Rc<Proto>)> {
+        methods
+            .into_iter()
+            .map(|(slot, global, m)| {
+                let captured = captured_locals(&m.params, &m.body, false);
+                let mut fc = FnCompiler::new(self, types, &captured, false);
+                let proto = fc.function(Some(global), &m.params, m.rtype.as_ref(), &m.body, m.name_span);
+                (slot, Rc::new(proto))
+            })
+            .collect()
     }
 
     /// Record the layout of a struct or enum definition.
@@ -127,7 +172,7 @@ impl Compiler {
                     .collect();
                 self.data.insert(name.clone(), DataDef::Enum { variants });
             }
-            Definition::Function { .. } => {}
+            Definition::Function { .. } | Definition::Impl { .. } => {}
         }
     }
 
@@ -169,8 +214,10 @@ impl Compiler {
                     fns.push((slot, name, name_span, params, body, rtype));
                 }
                 Definition::Struct { .. } | Definition::Enum { .. } => self.define_data(def),
+                Definition::Impl { .. } => {}
             }
         }
+        let methods = self.declare_methods(&program.definitions);
 
         let mut main = None;
         let mut functions = Vec::new();
@@ -188,6 +235,11 @@ impl Compiler {
             let proto = fc.function(Some(name.clone()), params, rtype.as_ref(), body, *name_span);
             functions.push((slot, Rc::new(proto)));
         }
+        let methods = self.compile_methods(methods, types);
+        functions.extend(methods);
+        let mut all = std::mem::take(&mut self.new_functions);
+        all.extend(functions);
+        let functions = all;
 
         let main = main.ok_or_else(|| {
             Diagnostic::new("no 'main' function found; add `fn main() { ... }` as the entry point")
@@ -208,6 +260,7 @@ impl Compiler {
         ReplInput {
             proto,
             literals: std::mem::take(&mut self.new_literals),
+            functions: std::mem::take(&mut self.new_functions),
         }
     }
 }
@@ -716,7 +769,9 @@ impl<'a> FnCompiler<'a> {
                     self.emit(Op::Move { dst, src }, span);
                 }
             }
-            Expression::Call(callee, args) if matches!(callee.kind, Expression::Path(..)) => {
+            Expression::Call(callee, args)
+                if matches!(callee.kind, Expression::Path(..)) && self.types.function(callee).is_none() =>
+            {
                 let Expression::Path(enum_name, variant) = &callee.kind else {
                     unreachable!()
                 };
@@ -726,6 +781,10 @@ impl<'a> FnCompiler<'a> {
                     self.expr(arg, start + i as Reg);
                 }
                 self.new_data(dst, layout, start, args.len(), span);
+            }
+            Expression::Path(..) if self.types.function(e).is_some() => {
+                let index = self.compiler.globals[self.types.function(e).unwrap()];
+                self.emit(Op::GetGlobal { dst, index }, span);
             }
             Expression::Path(enum_name, variant) => {
                 let layout = self.variant_layout(enum_name, variant);
@@ -762,12 +821,23 @@ impl<'a> FnCompiler<'a> {
             }
             Expression::Call(callee, args) => {
                 let base = self.alloc();
-                self.expr(callee, base);
+                let method = self.types.function(callee).cloned();
+                let mut argc = args.len() as u8;
+                match (&callee.kind, &method) {
+                    // `obj.name(args)` calls `Type::name(obj, args)`.
+                    (Expression::Field(obj, ..), Some(global)) => {
+                        let index = self.compiler.globals[global];
+                        self.emit(Op::GetGlobal { dst: base, index }, callee.span);
+                        let r = self.alloc();
+                        self.expr(obj, r);
+                        argc += 1;
+                    }
+                    _ => self.expr(callee, base),
+                }
                 for arg in args {
                     let r = self.alloc();
                     self.expr(arg, r);
                 }
-                let argc = args.len() as u8;
                 let at = self.emit(
                     Op::Call {
                         dst,
@@ -776,8 +846,14 @@ impl<'a> FnCompiler<'a> {
                     },
                     span,
                 );
-                if let Expression::Var(name) = &callee.kind {
-                    self.cur().call_names.insert(at, name.clone());
+                match (&callee.kind, method) {
+                    (_, Some(global)) => {
+                        self.cur().call_names.insert(at, global);
+                    }
+                    (Expression::Var(name), None) => {
+                        self.cur().call_names.insert(at, name.clone());
+                    }
+                    _ => {}
                 }
             }
             Expression::Closure(params, rtype, body) => {

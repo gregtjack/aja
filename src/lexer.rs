@@ -2,7 +2,10 @@ use crate::token::Token;
 use ecow::EcoString;
 use std::{fmt, iter::Peekable};
 
-use crate::{ast::Location, diagnostic::Diagnostic};
+use crate::{
+    ast::{Location, Source},
+    diagnostic::Diagnostic,
+};
 
 #[derive(Debug)]
 pub struct LexicalError {
@@ -54,6 +57,7 @@ where
     line: u32,
     col: u32,
     eof: bool,
+    source: Source,
 }
 
 impl<T> Lexer<T>
@@ -67,6 +71,7 @@ where
             line: 1,
             col: 1,
             eof: false,
+            source: Source::Program,
         }
     }
 
@@ -192,6 +197,7 @@ where
             line: self.line,
             col: self.col,
             pos: self.position,
+            source: self.source,
         }
     }
 
@@ -382,6 +388,7 @@ where
             "return" => Some(Token::Return),
             "struct" => Some(Token::Struct),
             "enum" => Some(Token::Enum),
+            "impl" => Some(Token::Impl),
             _ => None,
         };
 
@@ -400,6 +407,21 @@ where
 /// The returned tokens always end with `Token::Eof`.
 pub fn tokenize(src: &str) -> Result<Vec<SrcSpan>, LexicalError> {
     tokenize_from_line(src, 1)
+}
+
+/// Like [`tokenize`], for code from `source`.
+pub fn tokenize_source(src: &str, source: Source) -> Result<Vec<SrcSpan>, LexicalError> {
+    let mut lexer = Lexer::new(src.chars());
+    lexer.source = source;
+    let mut tokens = Vec::new();
+    loop {
+        let span = lexer.token()?;
+        let eof = span.1 == Token::Eof;
+        tokens.push(span);
+        if eof {
+            return Ok(tokens);
+        }
+    }
 }
 
 /// Like [`tokenize`], but numbering lines from `first_line` (used by the REPL,

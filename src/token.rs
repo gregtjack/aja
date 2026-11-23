@@ -47,6 +47,7 @@ pub enum Token {
     Match,        // match
     Return,       // return
     Struct,       // struct
+    Impl,         // impl
     Var,          // var
     While,        // while
 }
@@ -101,6 +102,7 @@ impl std::fmt::Display for Token {
             Token::Match => "match",
             Token::Return => "return",
             Token::Struct => "struct",
+            Token::Impl => "impl",
             Token::While => "while",
         };
         write!(f, "'{sym}'")

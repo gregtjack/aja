@@ -11,7 +11,7 @@
 
 use std::io::IsTerminal;
 
-use crate::ast::Location;
+use crate::ast::{Location, Source};
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -48,8 +48,13 @@ impl Diagnostic {
         self
     }
 
-    /// Render the diagnostic against `source`, labelling it with `path`.
+    /// Render the diagnostic against `source`, labelling it with `path`. A
+    /// location in the prelude is shown in the prelude instead.
     pub fn render(&self, source: &str, path: &str, color: bool) -> String {
+        let (source, path) = match self.span {
+            Some((start, _)) if start.source == Source::Prelude => (crate::prelude::SOURCE, "<prelude>"),
+            _ => (source, path),
+        };
         let style = Style::new(color);
         let mut out = format!(
             "{}error{}{}: {}{}\n",
@@ -177,7 +182,7 @@ mod tests {
     use super::*;
 
     fn loc(line: u32, col: u32) -> Location {
-        Location { line, col, pos: 0 }
+        Location::new(0, line, col)
     }
 
     #[test]

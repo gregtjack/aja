@@ -10,7 +10,7 @@
 use std::{mem::size_of, rc::Rc};
 
 use crate::{
-    ast::Span,
+    ast::{Source, Span},
     builtins::BUILTINS,
     diagnostic::Diagnostic,
 };
@@ -68,8 +68,12 @@ impl RuntimeError {
                 } else {
                     String::new()
                 };
+                let place = match e.site.start.source {
+                    Source::Program => "",
+                    Source::Prelude => " in the prelude",
+                };
                 format!(
-                    "in {}, called at line {}, column {}{repeat}",
+                    "in {}, called{place} at line {}, column {}{repeat}",
                     e.function, e.site.start.line, e.site.start.col
                 )
             })
@@ -141,10 +145,7 @@ impl Vm {
     /// its result.
     pub fn run_program(&mut self, program: &Compiled) -> Result<Value, RuntimeError> {
         self.load_literals(&program.literals);
-        for (slot, proto) in &program.functions {
-            let f = self.alloc_closure(proto.clone(), Box::new([]));
-            self.set_global(*slot, Value::Fn(f));
-        }
+        self.load_functions(&program.functions);
         let Value::Fn(main) = self.globals[program.main as usize] else {
             unreachable!("'main' is a function");
         };
@@ -154,8 +155,17 @@ impl Vm {
     /// Run a compiled REPL input and return its value.
     pub fn run_repl(&mut self, input: &ReplInput) -> Result<Value, RuntimeError> {
         self.load_literals(&input.literals);
+        self.load_functions(&input.functions);
         let f = self.alloc_closure(input.proto.clone(), Box::new([]));
         self.run(f)
+    }
+
+    /// Define top-level functions in their global slots.
+    fn load_functions(&mut self, functions: &[(u32, Rc<Proto>)]) {
+        for (slot, proto) in functions {
+            let f = self.alloc_closure(proto.clone(), Box::new([]));
+            self.set_global(*slot, Value::Fn(f));
+        }
     }
 
     /// Put string literals on the heap, where they stay for good.

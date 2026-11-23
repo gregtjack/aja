@@ -483,12 +483,23 @@ fn repl_inputs_share_globals() {
 }
 
 /// How many heap objects are left once `src` has run and the collector has
-/// freed what is unreachable. Its top-level functions are always left.
+/// freed what is unreachable, not counting the prelude's functions. Its own
+/// top-level functions are always left.
 fn live_after(src: &str) -> usize {
+    live_with_prelude(src) - prelude_objects()
+}
+
+fn live_with_prelude(src: &str) -> usize {
     let (mut vm, result) = run_vm(src);
     result.expect("program runs");
     vm.collect_garbage();
     vm.heap.live()
+}
+
+/// The heap objects the prelude leaves: one per function in it.
+fn prelude_objects() -> usize {
+    // An empty program leaves only its `main` besides the prelude.
+    live_with_prelude("fn main() { }") - 1
 }
 
 #[test]
@@ -1006,4 +1017,56 @@ fn question_mark_returns_early() {
 fn prelude_values_print_as_written() {
     let (vm, v) = run_vm("fn main() -> Option<Result<int, str>> { Some(Err(\"no\")) }");
     assert_eq!(vm.heap.display(&v.unwrap()), "Some(Err(\"no\"))");
+}
+
+#[test]
+fn methods_run() {
+    let src = "struct Point { x: int, y: int }
+               impl Point {
+                   fn origin() -> Point { Point { x: 0, y: 0 } }
+                   fn add(self, o: Point) -> Point { Point { x: self.x + o.x, y: self.y + o.y } }
+                   fn sum(self) -> int { self.x + self.y }
+               }
+               enum List<T> { Nil, Cons(T, List<T>) }
+               impl<T> List<T> {
+                   fn len(self) -> int { self.count(0) }
+                   fn count(self, n: int) -> int { match self { List::Nil => n, List::Cons(_, t) => t.count(n + 1) } }
+                   fn push(self, x: T) -> List<T> { List::Cons(x, self) }
+               }
+               fn build(n: int, acc: List<int>) -> List<int> { if n == 0 { acc } else { build(n - 1, acc.push(n)) } }";
+    let main = |ret: &str, body: &str| value(&format!("{src} fn main() -> {ret} {{ {body} }}"));
+    assert_eq!(main("int", "Point::origin().add(Point { x: 2, y: 3 }).add(Point { x: 1, y: 1 }).sum()"), "Int(7)");
+    assert_eq!(main("int", "let f = Point::origin; f().sum()"), "Int(0)");
+    // The receiver is evaluated before the arguments.
+    assert_eq!(
+        main("int", "var log = 0; let p = fn() { log = log * 10 + 1; Point::origin() }; let q = fn() { log = log * 10 + 2; Point::origin() }; p().add(q()); log"),
+        "Int(12)"
+    );
+    // A method calling itself in tail position runs in constant space.
+    let deep = format!("{src} fn main() -> int {{ build(100000, List::Nil).len() }}");
+    assert_eq!(format!("{:?}", run_limited(&deep, 4096).unwrap()), "Int(100000)");
+}
+
+#[test]
+fn prelude_methods_run() {
+    let main = |ret: &str, body: &str| value(&format!("fn main() -> {ret} {{ {body} }}"));
+    assert_eq!(main("int", "Some(4).map(fn(n) { n * 10 }).unwrap_or(0) + None.unwrap_or(2)"), "Int(42)");
+    assert_eq!(main("bool", "Some(1).is_some() && (None.or(Some(2)) == Some(2))"), "Bool(true)");
+    let parse = "fn parse(s: str) -> Result<int, str> { if s == \"1\" { Ok(1) } else { Err(\"bad\") } }";
+    assert_eq!(
+        value(&format!("{parse} fn code(s: str) -> Result<int, int> {{ let n = parse(s).map_err(fn(e) {{ 404 }})?; Ok(n) }}
+                        fn main() -> int {{ code(\"x\").unwrap_or(0) + code(\"1\").unwrap_or(0) }}")),
+        "Int(1)"
+    );
+    let (vm, v) = run_vm("fn main() -> Option<Result<int, str>> { Some(Some(1).ok_or(\"none\")) }");
+    assert_eq!(vm.heap.display(&v.unwrap()), "Some(Ok(1))");
+}
+
+#[test]
+fn errors_in_closures_called_by_the_prelude_say_so() {
+    let err = run("fn main() { let o = Some(0).map(fn(x) { 10 / x }); }").unwrap_err();
+    assert_eq!(err.message, "division by zero");
+    let notes = err.to_diagnostic().notes;
+    assert!(notes[0].starts_with("in function 'f', called in the prelude at line "), "got {notes:?}");
+    assert_eq!(notes[1], "in function 'Option::map', called at line 1, column 21");
 }

@@ -205,7 +205,7 @@ The library grows in layers:
 Before most of this can be written, the language needs:
 
 1. **Generics** ✅, for `Option<T>`, `Result<T, E>`, `List<T>`, and `Map<K, V>`.
-2. **Methods** (`impl` blocks), so that `s.trim().split(",")` reads left to
+2. **Methods** ✅ (`impl` blocks), so that `s.trim().split(",")` reads left to
    right and editors and agents can discover an API by typing `.`.
 3. **A few traits**: `Eq`, `Hash`, `Ord`, and `Show`, which map keys, sorting,
    and printing need.
@@ -240,7 +240,7 @@ by a number with a fractional part.
    mark-and-sweep collector, which runs when the heap's size in bytes has
    doubled. String literals are allocated once and kept as roots; strings
    built at runtime (with `+`) are collected. Nothing is reference-counted.
-5. **Language features for libraries.** Generics ✅, methods, the core traits,
+5. **Language features for libraries.** Generics ✅, methods ✅, the core traits,
    and `for` loops (see [The standard library](#the-standard-library)).
 6. **Modules and packages.** `import`, `pub`, the prelude, `aja.toml`, and the
    `aja` tool (see [Modules and packages](#modules-and-packages)).
@@ -271,5 +271,10 @@ by a number with a fractional part.
 - **Explicit type arguments.** Type arguments are always inferred, and an
   annotation fixes one inference can't. Is a call-site syntax
   (`none::<int>()`) ever needed, and does it fit "one way to do it"?
+- **Methods on built-in types.** `s.len()` and `n.abs()` need `impl str` and
+  `impl int` in the prelude, and bodies for some of them that only the
+  runtime can provide. How does the prelude declare a natively implemented
+  function (the thin native layer the standard library sits on), so each
+  backend knows to supply it?
 - **Strings.** UTF-8 everywhere, and is indexing by byte, by code point, or not
   allowed at all?

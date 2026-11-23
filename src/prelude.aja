@@ -10,10 +10,124 @@ enum Option<T> {
     None,
 }
 
+impl<T> Option<T> {
+    fn is_some(self) -> bool {
+        match self {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn is_none(self) -> bool {
+        match self {
+            Some(_) => false,
+            None => true,
+        }
+    }
+
+    // The value, or `default` if there is none.
+    fn unwrap_or(self, default: T) -> T {
+        match self {
+            Some(x) => x,
+            None => default,
+        }
+    }
+
+    // `f` applied to the value, if there is one.
+    fn map<U>(self, f: (T) -> U) -> Option<U> {
+        match self {
+            Some(x) => Some(f(x)),
+            None => None,
+        }
+    }
+
+    // `f` applied to the value, if there is one, for an `f` that may itself
+    // have nothing to give.
+    fn and_then<U>(self, f: (T) -> Option<U>) -> Option<U> {
+        match self {
+            Some(x) => f(x),
+            None => None,
+        }
+    }
+
+    // This option if it has a value, or else `other`.
+    fn or(self, other: Option<T>) -> Option<T> {
+        match self {
+            Some(x) => Some(x),
+            None => other,
+        }
+    }
+
+    // The value as an `Ok`, or `Err(error)` if there is none.
+    fn ok_or<E>(self, error: E) -> Result<T, E> {
+        match self {
+            Some(x) => Ok(x),
+            None => Err(error),
+        }
+    }
+}
+
 // The result of something that can fail: a value, or an error saying why.
 // `expr?` gives the value inside an `Ok`, or returns the `Err` from the
 // function it's in.
 enum Result<T, E> {
     Ok(T),
     Err(E),
+}
+
+impl<T, E> Result<T, E> {
+    fn is_ok(self) -> bool {
+        match self {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+
+    fn is_err(self) -> bool {
+        match self {
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    }
+
+    // The value, or `default` if this is an error.
+    fn unwrap_or(self, default: T) -> T {
+        match self {
+            Ok(x) => x,
+            Err(_) => default,
+        }
+    }
+
+    // `f` applied to the value, leaving an error as it is.
+    fn map<U>(self, f: (T) -> U) -> Result<U, E> {
+        match self {
+            Ok(x) => Ok(f(x)),
+            Err(e) => Err(e),
+        }
+    }
+
+    // `f` applied to the error, leaving a value as it is: how one kind of
+    // error is turned into another, for `?`.
+    fn map_err<F>(self, f: (E) -> F) -> Result<T, F> {
+        match self {
+            Ok(x) => Ok(x),
+            Err(e) => Err(f(e)),
+        }
+    }
+
+    // `f` applied to the value, for an `f` that can fail too.
+    fn and_then<U>(self, f: (T) -> Result<U, E>) -> Result<U, E> {
+        match self {
+            Ok(x) => f(x),
+            Err(e) => Err(e),
+        }
+    }
+
+    // The value as a `Some`, or `None` if this is an error.
+    fn ok(self) -> Option<T> {
+        match self {
+            Ok(x) => Some(x),
+            Err(_) => None,
+        }
+    }
 }

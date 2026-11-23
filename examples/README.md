@@ -15,6 +15,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [data.aja](data.aja) | Structs, enums with data, recursive types, and `match` with nested patterns and guards |
 | [generics.aja](generics.aja) | Generic functions, structs, and enums: `Pair`, and a list with `map`, `fold`, and `find` |
 | [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |
+| [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |
 
 ## Errors
 
@@ -35,6 +36,7 @@ there.
 | [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
 | [generic_body.aja](errors/generic_body.aja) | Generic code assuming things about a type parameter, and mismatched type arguments |
 | [question_mark.aja](errors/question_mark.aja) | `?` in a function that doesn't return a `Result`, and with a different error type |
+| [methods.aja](errors/methods.aja) | A missing method, mixing up methods and associated functions, and an impl away from its type |
 
 `cargo test` runs every example: the ones here must succeed, and each one in
 `errors/` must fail with exactly the errors listed in its `// expect:` lines.

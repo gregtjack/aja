@@ -84,7 +84,7 @@ impl Checker {
             let (name, span, type_params, is_struct) = match def {
                 Definition::Struct { name, name_span, type_params, .. } => (name, *name_span, type_params, true),
                 Definition::Enum { name, name_span, type_params, .. } => (name, *name_span, type_params, false),
-                Definition::Function { .. } => continue,
+                Definition::Function { .. } | Definition::Impl { .. } => continue,
             };
             if Type::try_from(name.to_string()).is_ok() {
                 self.error(
@@ -160,7 +160,7 @@ impl Checker {
                     self.require_used(type_params, &used, &format!("enum '{name}'"));
                     self.enums.get_mut(name).unwrap().variants = vs;
                 }
-                Definition::Function { .. } => unreachable!(),
+                Definition::Function { .. } | Definition::Impl { .. } => unreachable!(),
             }
             self.type_params.clear();
         }
@@ -331,6 +331,18 @@ impl Checker {
     /// `obj.name`
     pub(super) fn field(&mut self, obj: &Expr, name: &Id, name_span: Span, span: Span) -> Ty {
         let t = self.expr(obj);
+        self.field_on(&t, obj.span, name, name_span, span)
+    }
+
+    /// `obj.name`, where `obj` (at `obj_span`) has type `t`.
+    pub(super) fn field_on(&mut self, t: &Ty, obj_span: Span, name: &Id, name_span: Span, span: Span) -> Ty {
+        let t = t.clone();
+        if let Ty::Named(n, _) = self.resolve(&t) {
+            if let Some(help) = self.method_not_called(&n, name) {
+                self.error(TypeError::new(format!("'{name}' is a function of '{n}', not a field"), name_span).help(help));
+                return Ty::Error;
+            }
+        }
         match self.resolve(&t) {
             Ty::Named(n, args) if self.structs.contains_key(&n) => {
                 let info = &self.structs[&n];
@@ -360,7 +372,7 @@ impl Checker {
                 self.error(
                     TypeError::new(
                         format!("type annotations needed: the type of this value must be known to access its field '{name}'"),
-                        obj.span,
+                        obj_span,
                     )
                     .help("annotate the variable or parameter it comes from, e.g. `p: Point`"),
                 );

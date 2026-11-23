@@ -69,7 +69,8 @@ cargo test
 
 ### Programs
 
-A program is a sequence of top-level `fn` definitions. Execution starts at
+A program is a sequence of top-level `fn`, `struct`, `enum`, and `impl`
+definitions, in any order. Execution starts at
 `fn main`, which takes no parameters. Its return value is not printed; use
 `println` for output.
 
@@ -204,11 +205,65 @@ fn sum(a: str, b: str) -> Result<int, str> {
 - `?` on a `Result` needs the function to return a `Result` with the **same
   error type**, and `?` on an `Option` needs it to return an `Option`.
   Nothing is converted automatically: not one error type into another, and
-  not a `None` into an error. Use `match` to do that explicitly.
+  not a `None` into an error. Do it explicitly, with `match` or the
+  prelude's methods: `parse(s).map_err(fn(e) { 404 })?`,
+  `find(x).ok_or("not found")?`.
 - `main` returns nothing, so it can't use `?`; it handles errors with
   `match`.
 - A closure's return type is inferred from its `?`:
   `fn(s) { let n = parse(s)?; Ok(n * 2) }` returns a `Result<int, str>`.
+
+The prelude gives both types methods:
+
+| `Option<T>` | `Result<T, E>` |
+|-------------|----------------|
+| `is_some()`, `is_none()` | `is_ok()`, `is_err()` |
+| `unwrap_or(default)` | `unwrap_or(default)` |
+| `map(f)`, `and_then(f)` | `map(f)`, `and_then(f)`, `map_err(f)` |
+| `or(other)`, `ok_or(error)` | `ok()` |
+
+### Methods
+
+An `impl` block gives a struct or enum functions. One whose first parameter
+is `self` is a **method**, called on a value with `.`; one without `self` is
+an **associated function**, called through the type with `::`:
+
+```rust
+struct Vec2 { x: float, y: float }
+
+impl Vec2 {
+    fn new(x: float, y: float) -> Vec2 { Vec2 { x, y } }
+    fn plus(self, other: Vec2) -> Vec2 { Vec2::new(self.x + other.x, self.y + other.y) }
+    fn dot(self, other: Vec2) -> float { self.x * other.x + self.y * other.y }
+}
+
+let v = Vec2::new(1.0, 2.0).plus(Vec2::new(3.0, 4.0));
+v.dot(v)
+```
+
+- **`self` has no annotation**: its type is the impl's type. Like any
+  parameter, it can't be assigned to.
+- **One way to call each.** A method is only called on a value
+  (`v.dot(w)`, never `Vec2::dot(v, w)`), and an associated function only
+  through its type. To pass a method around, wrap it in a closure:
+  `fn(v) { v.dot(v) }`. An associated function is a value already:
+  `let make = Vec2::new;`.
+- **Generic types** declare their type parameters on the impl and give them
+  as the type's arguments, `impl<T> Stack<T> { ... }`, for every `T` at
+  once (there's no `impl Stack<int>`). Methods can add their own:
+  `fn map<U>(self, f: (T) -> U) -> Stack<U>`.
+- **A type's methods live next to it.** An `impl` must be in the same
+  program as its type, so the prelude's types get their methods only in
+  the prelude. A method can't share its name with one of its struct's
+  fields or its enum's variants. A field that holds a function is still
+  called as `s.f(x)`.
+- The receiver's type must be known where a method is called, as for a
+  field: in `fn(p) { p.norm() }`, annotate `p`.
+- Built-in types (`int`, `str`, ...) have no methods yet; they'll come with
+  the standard library.
+- A method compiles to an ordinary function named like `Vec2::plus`, with
+  `self` as its first argument, so tail calls and error traces work the
+  same way.
 
 ### Type checking
 
@@ -316,9 +371,9 @@ source ──► Lexer ──► Parser ──► AST ──► Type checker ─
 | `src/lexer.rs`        | Hand-written lexer; tracks line/column for errors |
 | `src/parse.rs`        | Recursive-descent parser (plus unit tests) |
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
-| `src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness |
+| `src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness, and `methods.rs` checks `impl` blocks and method calls |
 | `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends |
-| `src/prelude.aja`, `src/prelude.rs` | The prelude (`Option`, `Result`), written in Aja and built into the binary |
+| `src/prelude.aja`, `src/prelude.rs` | The prelude (`Option`, `Result`, and their methods), written in Aja and built into the binary. Locations in it are marked as the prelude's, so errors in code it calls point at the right file |
 | `src/vm/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
 | `src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
 | `src/vm/mod.rs`       | The VM: call frames, the dispatch loop, runtime errors |
@@ -370,7 +425,7 @@ the VM forgets to keep reachable is caught.
 **Working:** ints, floats, bools, strings; immutable `let` and mutable
 `var` with lexical scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
-structs, enums with data, and exhaustive `match`; generic functions, structs, and enums; `Option` and `Result` in the prelude, and `?`;
+structs, enums with data, and exhaustive `match`; generic functions, structs, and enums; `Option` and `Result` in the prelude, and `?`; methods and associated functions in `impl` blocks;
 static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 

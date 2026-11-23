@@ -12,11 +12,23 @@ pub struct Location {
     pub line: u32,
     pub col: u32,
     pub pos: u32,
+    /// Which source the location is in: [`Source::Program`] for the program
+    /// being run, or [`Source::Prelude`].
+    pub source: Source,
+}
+
+/// A source of code, so that a location in the prelude isn't mistaken for
+/// one in the program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Source {
+    #[default]
+    Program,
+    Prelude,
 }
 
 impl Location {
     pub fn new(pos: u32, line: u32, col: u32) -> Self {
-        Location { line, col, pos }
+        Location { line, col, pos, source: Source::Program }
     }
 }
 
@@ -126,6 +138,31 @@ pub enum Definition {
         type_params: Vec<TypeParam>,
         variants: Vec<VariantDef>,
     },
+    /// `impl Point { fn norm(self) -> int { ... } }`, or
+    /// `impl<T> Option<T> { ... }`: methods of the struct or enum `target`
+    /// names, which must give exactly the impl's type parameters as its
+    /// arguments.
+    Impl {
+        type_params: Vec<TypeParam>,
+        target: Type,
+        methods: Vec<Method>,
+    },
+}
+
+/// A function in an `impl` block. A method takes `self`, its first
+/// parameter (named `self`, with no annotation); an associated function,
+/// called as `Point::origin()`, doesn't.
+#[derive(Debug, Clone)]
+pub struct Method {
+    pub name: Id,
+    pub name_span: Span,
+    pub type_params: Vec<TypeParam>,
+    /// Every parameter, starting with `self` for a method.
+    pub params: Vec<Variable>,
+    pub has_self: bool,
+    pub body: Statement,
+    /// The declared return type; `None` means `void`.
+    pub rtype: Option<Type>,
 }
 
 /// One variant of an enum definition, with the types of the values it holds.

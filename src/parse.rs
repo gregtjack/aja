@@ -1,7 +1,7 @@
 use crate::{
     ast::{
         types::Type, Arm, Definition, Expr, Expression, FieldInit, Location, Pattern, PatternKind,
-        Program, Span, Statement, TypeParam, Variable, VariantDef,
+        Method, Program, Span, Statement, TypeParam, Variable, VariantDef,
     },
     diagnostic::Diagnostic,
     lexer::SrcSpan,
@@ -394,6 +394,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_impls() {
+        let src = "impl<T> Option<T> { fn get(self, d: T) -> T { d } fn none() -> Option<T> { None } }";
+        let program = create_parser(src).parse().unwrap();
+        let Definition::Impl { type_params, target, methods } = &program.definitions[0] else {
+            panic!("expected an impl, got {:?}", program.definitions[0]);
+        };
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(target.to_string(), "Option<T>");
+        assert_eq!(methods.len(), 2);
+        assert!(methods[0].has_self);
+        assert_eq!(methods[0].params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["self", "d"]);
+        assert!(!methods[1].has_self);
+
+        let err = |src: &str| create_parser(src).parse().unwrap_err();
+        assert_eq!(err("impl P { fn f(self: P) { } }").message, "'self' has no type annotation");
+        assert_eq!(err("fn f(self) { }").message, "'self' can't be used as a parameter name");
+        assert_eq!(err("impl P { fn f(x: int, self) { } }").message, "'self' can't be used as a parameter name");
+        assert_eq!(err("fn main() { let self = 1; }").message, "'self' can't be used as a variable name");
+        assert_eq!(err("impl P { let x = 1; }").help.as_deref(), Some("an impl can only hold functions"));
+    }
+
+    #[test]
     fn test_struct_literals_need_parens_in_conditions() {
         // `p == P` is the condition, and `{ x: 1 }` is a (malformed) body.
         let err = create_parser("fn main() { if p == P { x: 1 } { } }").parse().unwrap_err();
@@ -569,7 +591,7 @@ where
 
     pub fn parse(&mut self) -> ParseResult<Program> {
         let mut ds = Vec::new();
-        while tok_matches!(self, Token::Fn | Token::Struct | Token::Enum) {
+        while tok_matches!(self, Token::Fn | Token::Struct | Token::Enum | Token::Impl) {
             let d = self.parse_defn()?;
             ds.push(d);
         }
@@ -577,7 +599,7 @@ where
         if !tok_matches!(self, Token::Eof) && self.peek().is_some() {
             return Err(self
                 .expected("a definition")
-                .help("only 'fn', 'struct', and 'enum' definitions are allowed at the top level of a file"));
+                .help("only 'fn', 'struct', 'enum', and 'impl' definitions are allowed at the top level of a file"));
         }
 
         Ok(Program { definitions: ds })
@@ -596,6 +618,7 @@ where
             Some((_, Token::Fn, _)) => self.parse_fn_defn(),
             Some((_, Token::Struct, _)) => self.parse_struct_defn(),
             Some((_, Token::Enum, _)) => self.parse_enum_defn(),
+            Some((_, Token::Impl, _)) => self.parse_impl(),
             tok => Err(self.error(tok, "expected a definition".to_string())),
         };
 
@@ -603,6 +626,19 @@ where
     }
 
     fn parse_fn_defn(&mut self) -> ParseResult<Definition> {
+        let m = self.parse_fn(false)?;
+        Ok(Definition::Function {
+            name: m.name,
+            name_span: m.name_span,
+            type_params: m.type_params,
+            params: m.params,
+            body: m.body,
+            rtype: m.rtype,
+        })
+    }
+
+    /// A function after `fn`; in an `impl` (`in_impl`), it may take `self`.
+    fn parse_fn(&mut self, in_impl: bool) -> ParseResult<Method> {
         if !tok_matches!(self, Token::Ident(_)) {
             return Err(self.expected("a function name after 'fn'"));
         }
@@ -615,18 +651,42 @@ where
         self.check_new_name(tok, &ident, "a function name")?;
 
         let type_params = self.parse_type_params()?;
-        let params = self.parse_fn_params()?;
+        let (params, has_self) = self.parse_params(in_impl)?;
         let rtype = self.parse_fn_return_type_annotation()?;
         let body = self.parse_block()?;
 
-        Ok(Definition::Function {
+        Ok(Method {
             name: ident,
             name_span,
             type_params,
             params,
+            has_self,
             body,
             rtype,
         })
+    }
+
+    /// `impl Point { fn ... }`, or `impl<T> Option<T> { ... }`.
+    fn parse_impl(&mut self) -> ParseResult<Definition> {
+        let type_params = self.parse_type_params()?;
+        if !tok_matches!(self, Token::Ident(_)) {
+            return Err(self.expected("a type after 'impl'"));
+        }
+        let target = self.parse_type_name()?;
+        if tok_matches!(self, Token::LeftParen) {
+            return Err(self.expected("'{'").help("an impl holds functions: `impl Point { fn norm(self) -> int { ... } }`"));
+        }
+        self.consume(Token::LeftBrace)?;
+        let mut methods = Vec::new();
+        while tok_matches!(self, Token::Fn) {
+            self.next();
+            methods.push(self.parse_fn(true)?);
+        }
+        if !tok_matches!(self, Token::RightBrace) {
+            return Err(self.expected("'fn' or '}'").help("an impl can only hold functions"));
+        }
+        self.next();
+        Ok(Definition::Impl { type_params, target, methods })
     }
 
     /// The name after `struct` or `enum`.
@@ -788,7 +848,14 @@ where
     }
 
     fn parse_fn_params(&mut self) -> ParseResult<Vec<Variable>> {
+        Ok(self.parse_params(false)?.0)
+    }
+
+    /// A parameter list, and whether it starts with `self`, which only a
+    /// function in an impl (`self_ok`) can.
+    fn parse_params(&mut self, self_ok: bool) -> ParseResult<(Vec<Variable>, bool)> {
         let mut xs = Vec::new();
+        let mut has_self = false;
 
         self.consume(Token::LeftParen)?;
 
@@ -799,6 +866,22 @@ where
                     _ => return Err(self.expected("a parameter name")),
                 };
                 let tok = self.peek().cloned();
+                if name == "self" && self_ok && xs.is_empty() {
+                    self.next();
+                    if tok_matches!(self, Token::Colon) {
+                        let tok = self.peek().cloned();
+                        return Err(self
+                            .error(tok, "'self' has no type annotation".to_string())
+                            .help("its type is always the type the impl is for: write `self`"));
+                    }
+                    has_self = true;
+                    xs.push(Variable::new(name, None, span));
+                    if tok_matches!(self, Token::Comma) {
+                        self.next();
+                        continue;
+                    }
+                    break;
+                }
                 self.check_new_name(tok, &name, "a parameter name")?;
                 self.next();
                 let vtype = self.parse_type_annotation()?;
@@ -814,7 +897,7 @@ where
 
         self.consume(Token::RightParen)?;
 
-        Ok(xs)
+        Ok((xs, has_self))
     }
 
     /// Parse a statement
@@ -1453,6 +1536,11 @@ where
     /// Reject a prelude variant's name (`None`) where a new name is
     /// declared: written by itself, it always means the variant.
     fn check_new_name(&mut self, tok: Option<SrcSpan>, name: &str, what: &str) -> ParseResult<()> {
+        if name == "self" {
+            return Err(self
+                .error(tok, format!("'self' can't be used as {what}"))
+                .help("'self' can only be the first parameter of a function in an impl"));
+        }
         match prelude::variant_enum(name) {
             Some(e) => Err(self
                 .error(tok, format!("'{name}' is a variant of '{e}', so it can't be used as {what}"))
