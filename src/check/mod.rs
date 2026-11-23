@@ -226,7 +226,9 @@ pub fn check_program(program: &Program) -> Result<Types, Vec<TypeError>> {
 /// Type-check the prelude itself, for compiling its functions.
 pub fn check_prelude() -> Types {
     let mut checker = Checker::bare();
-    checker.program(&Program { definitions: prelude::definitions() });
+    checker.program(&Program {
+        definitions: prelude::definitions(),
+    });
     match checker.finish() {
         Ok(types) => types,
         Err(errors) => panic!("the prelude has type errors: {errors:?}"),
@@ -323,10 +325,16 @@ impl Checker {
     /// functions, ready to check a program or REPL inputs.
     pub fn new() -> Self {
         let mut checker = Self::bare();
-        let prelude = Program { definitions: prelude::definitions() };
+        let prelude = Program {
+            definitions: prelude::definitions(),
+        };
         checker.declare_types(&prelude);
         checker.declare_impls(&prelude);
-        assert!(checker.errors.is_empty(), "the prelude has type errors: {:?}", checker.errors);
+        assert!(
+            checker.errors.is_empty(),
+            "the prelude has type errors: {:?}",
+            checker.errors
+        );
         checker
     }
 
@@ -398,7 +406,12 @@ impl Checker {
             let fields = std::mem::take(&mut self.fields);
             let tries = std::mem::take(&mut self.tries);
             let functions = std::mem::take(&mut self.functions);
-            return Ok(Types { operands, fields, tries, functions });
+            return Ok(Types {
+                operands,
+                fields,
+                tries,
+                functions,
+            });
         }
         errors.sort_by_key(|e| (e.span.start.line, e.span.start.col));
         Err(errors)
@@ -489,7 +502,9 @@ impl Checker {
             } => Some((name, name_span, params, body, rtype)),
             _ => None,
         });
-        for ((name, name_span, params, body, rtype), (param_tys, ret, generics)) in fns.clone().zip(&sigs) {
+        for ((name, name_span, params, body, rtype), (param_tys, ret, generics)) in
+            fns.clone().zip(&sigs)
+        {
             let ret = ret.clone();
             let ctx = FnContext {
                 name: Some(name.clone()),
@@ -625,7 +640,11 @@ impl Checker {
                     p.name, p.name
                 )
             } else {
-                format!("add a type, for example `{}: {}`", p.name, self.show_example(&t))
+                format!(
+                    "add a type, for example `{}: {}`",
+                    p.name,
+                    self.show_example(&t)
+                )
             });
             if !matches!(t, Ty::Var(_)) {
                 err = err.note(format!("its type is only partly known: {}", self.show(&t)));
@@ -836,20 +855,29 @@ impl Checker {
                         let (why, help) = match kind {
                             BindingKind::Let => (
                                 "it was declared with 'let'",
-                                format!("declare it with 'var' to make it mutable: `var {name} = ...;`"),
+                                format!(
+                                    "declare it with 'var' to make it mutable: `var {name} = ...;`"
+                                ),
                             ),
                             BindingKind::Param => (
                                 "it is a parameter",
-                                format!("copy it into a mutable variable first: `var {name} = {name};`"),
+                                format!(
+                                    "copy it into a mutable variable first: `var {name} = {name};`"
+                                ),
                             ),
                             _ => (
                                 "it is bound by a pattern",
-                                format!("copy it into a mutable variable first: `var {name} = {name};`"),
+                                format!(
+                                    "copy it into a mutable variable first: `var {name} = {name};`"
+                                ),
                             ),
                         };
                         self.error(
-                            TypeError::new(format!("cannot assign to '{name}' because {why}"), span)
-                                .help(help),
+                            TypeError::new(
+                                format!("cannot assign to '{name}' because {why}"),
+                                span,
+                            )
+                            .help(help),
                         );
                         ty
                     }
@@ -918,7 +946,9 @@ impl Checker {
         let t = self.expr(inner);
         let (on, value, error) = match self.resolve(&t) {
             Ty::Named(n, args) if n == "Option" => (TryOn::Option, args[0].clone(), None),
-            Ty::Named(n, args) if n == "Result" => (TryOn::Result, args[0].clone(), Some(args[1].clone())),
+            Ty::Named(n, args) if n == "Result" => {
+                (TryOn::Result, args[0].clone(), Some(args[1].clone()))
+            }
             Ty::Error | Ty::Never => return Ty::Error,
             Ty::Var(_) => {
                 self.error(
@@ -931,8 +961,13 @@ impl Checker {
             other => {
                 let shown = self.show(&other);
                 self.error(
-                    TypeError::new(format!("'?' can only be used on an Option or a Result, but this is {shown}"), span)
-                        .help("remove the '?'"),
+                    TypeError::new(
+                        format!(
+                            "'?' can only be used on an Option or a Result, but this is {shown}"
+                        ),
+                        span,
+                    )
+                    .help("remove the '?'"),
                 );
                 return Ty::Error;
             }
@@ -940,7 +975,10 @@ impl Checker {
         self.tries.insert(key(span), on);
 
         let Some(ctx) = self.fns.last().cloned() else {
-            self.error(TypeError::new("'?' can only be used inside a function", span));
+            self.error(TypeError::new(
+                "'?' can only be used inside a function",
+                span,
+            ));
             return value;
         };
         let what = match &ctx.name {
@@ -994,20 +1032,26 @@ impl Checker {
                 let other_kind = matches!(&ret, Ty::Named(n, _) if n == "Result" || n == "Option");
                 err = match (&ctx.name, &error) {
                     (_, _) if other_kind => err.help("use `match` to handle it here"),
-                    (Some(name), _) if name == "main" => {
-                        err.help(format!("handle the {} with `match` instead", if error.is_some() { "error" } else { "None" }))
-                    }
+                    (Some(name), _) if name == "main" => err.help(format!(
+                        "handle the {} with `match` instead",
+                        if error.is_some() { "error" } else { "None" }
+                    )),
                     (Some(_), _) if ctx.ret_declared || ret == Ty::Void => {
                         let suggested = match &error {
                             None => Ty::Named("Option".into(), vec![ret.clone()]),
                             Some(e) => Ty::Named("Result".into(), vec![ret.clone(), e.clone()]),
                         };
-                        err.help(format!("change the return type to `{}`, or use `match`", self.show_example(&suggested)))
+                        err.help(format!(
+                            "change the return type to `{}`, or use `match`",
+                            self.show_example(&suggested)
+                        ))
                     }
                     _ => err.help("use `match` instead"),
                 };
                 if other_kind {
-                    err = err.note("a None is not converted to an error, or an error to a None, automatically");
+                    err = err.note(
+                        "a None is not converted to an error, or an error to a None, automatically",
+                    );
                 }
                 self.error(err);
             }
@@ -1030,10 +1074,9 @@ impl Checker {
 
         let (class, result) = match op {
             Op2::Addition => (Class::Add, None),
-            Op2::Subtraction
-            | Op2::Multiplication
-            | Op2::Division
-            | Op2::Modulo => (Class::Num, None),
+            Op2::Subtraction | Op2::Multiplication | Op2::Division | Op2::Modulo => {
+                (Class::Num, None)
+            }
             Op2::LessThan | Op2::LessEqual | Op2::GreaterThan | Op2::GreaterEqual => {
                 (Class::Num, Some(Ty::Bool))
             }
@@ -1206,10 +1249,14 @@ impl Checker {
     // ---- Scopes ------------------------------------------------------------
 
     fn define(&mut self, name: Id, ty: Ty, kind: BindingKind) {
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(name, Binding { ty, kind, generics: Vec::new() });
+        self.scopes.last_mut().unwrap().insert(
+            name,
+            Binding {
+                ty,
+                kind,
+                generics: Vec::new(),
+            },
+        );
     }
 
     fn lookup(&self, name: &Id) -> Option<&Binding> {
@@ -1268,7 +1315,10 @@ impl Checker {
                 params.iter().map(|p| Self::subst(p, map)).collect(),
                 Box::new(Self::subst(ret, map)),
             ),
-            Ty::Named(name, args) => Ty::Named(name.clone(), args.iter().map(|a| Self::subst(a, map)).collect()),
+            Ty::Named(name, args) => Ty::Named(
+                name.clone(),
+                args.iter().map(|a| Self::subst(a, map)).collect(),
+            ),
             t => t.clone(),
         }
     }
@@ -1410,7 +1460,9 @@ impl Checker {
             (Ty::Param(p), Ty::Param(q)) if p != q => err.note(format!(
                 "'{p}' and '{q}' are different type parameters, so they may be different types"
             )),
-            (Ty::Param(p), other) | (other, Ty::Param(p)) if !matches!(other, Ty::Param(_) | Ty::Var(_)) => {
+            (Ty::Param(p), other) | (other, Ty::Param(p))
+                if !matches!(other, Ty::Param(_) | Ty::Var(_)) =>
+            {
                 err.note(format!(
                     "'{p}' is a type parameter: it stands for whatever type the caller chooses, \
                      which might not be {}",

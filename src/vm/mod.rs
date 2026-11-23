@@ -79,7 +79,10 @@ impl RuntimeError {
             })
             .collect();
         if self.trace.len() > MAX_NOTES {
-            notes.push(format!("... and {} more calls", self.trace.len() - MAX_NOTES));
+            notes.push(format!(
+                "... and {} more calls",
+                self.trace.len() - MAX_NOTES
+            ));
         }
 
         let d = Diagnostic::new(self.message.clone()).with_notes(notes);
@@ -126,8 +129,9 @@ impl Vm {
         let globals = BUILTINS
             .iter()
             .map(|b| {
-                let f = native::implementation(b.name)
-                    .unwrap_or_else(|| panic!("built-in '{}' has no implementation in the VM", b.name));
+                let f = native::implementation(b.name).unwrap_or_else(|| {
+                    panic!("built-in '{}' has no implementation in the VM", b.name)
+                });
                 Value::Native(b, f)
             })
             .collect();
@@ -192,15 +196,24 @@ impl Vm {
     // register, global, or frame, or passed in, when these are called.
 
     fn alloc_closure(&mut self, proto: Rc<Proto>, upvalues: Box<[Value]>) -> Gc {
-        if self.heap.wants_collection(upvalues.len() * size_of::<Value>()) {
-            let extra = upvalues.iter().filter_map(Value::handle).collect::<Vec<_>>();
+        if self
+            .heap
+            .wants_collection(upvalues.len() * size_of::<Value>())
+        {
+            let extra = upvalues
+                .iter()
+                .filter_map(Value::handle)
+                .collect::<Vec<_>>();
             self.collect_garbage_with(extra);
         }
         self.heap.alloc_closure(Closure { proto, upvalues })
     }
 
     fn alloc_data(&mut self, layout: Rc<Layout>, fields: Box<[Value]>) -> Gc {
-        if self.heap.wants_collection(fields.len() * size_of::<Value>()) {
+        if self
+            .heap
+            .wants_collection(fields.len() * size_of::<Value>())
+        {
             let extra = fields.iter().filter_map(Value::handle).collect();
             self.collect_garbage_with(extra);
         }
@@ -232,8 +245,13 @@ impl Vm {
             .unwrap_or(0)
             .min(self.regs.len());
         let roots: Vec<Gc> = self.frames.iter().map(|f| f.closure).chain(extra).collect();
-        self.heap
-            .collect(self.regs[..live_regs].iter().chain(&self.globals).chain(&self.literals), roots);
+        self.heap.collect(
+            self.regs[..live_regs]
+                .iter()
+                .chain(&self.globals)
+                .chain(&self.literals),
+            roots,
+        );
     }
 
     fn set_global(&mut self, slot: u32, value: Value) {
@@ -414,7 +432,12 @@ impl Vm {
                     reg!(dst) = Value::Fn(f);
                 }
 
-                Op::NewData { dst, layout, start, count } => {
+                Op::NewData {
+                    dst,
+                    layout,
+                    start,
+                    count,
+                } => {
                     let from = base + start as usize;
                     let fields: Box<[Value]> = self.regs[from..from + count as usize].into();
                     let layout = proto.layouts[layout as usize].clone();
@@ -503,7 +526,10 @@ impl Vm {
                         let callee_proto = self.heap.closure(f).proto.clone();
                         debug_assert_eq!(callee_proto.arity, argc, "the type checker checks arity");
                         let new_base = base + callee as usize + 1;
-                        reserve!(new_base + callee_proto.num_regs as usize, self.frames.len() + 1);
+                        reserve!(
+                            new_base + callee_proto.num_regs as usize,
+                            self.frames.len() + 1
+                        );
                         self.frames.last_mut().unwrap().ip = ip;
                         self.frames.push(Frame {
                             closure: f,
@@ -573,16 +599,19 @@ impl Vm {
         // instruction no longer describes it. The outermost frame has none,
         // unless its function made a tail call. Tail calls are an
         // implementation detail, so the trace doesn't distinguish them.
-        let calls = self.frames.iter().enumerate().rev().filter_map(|(i, frame)| {
-            match &frame.tail_call {
+        let calls = self
+            .frames
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(i, frame)| match &frame.tail_call {
                 Some((proto, at)) => Some((proto, *at)),
                 None if i > 0 => {
                     let caller = &self.frames[i - 1];
                     Some((&caller.proto, caller.ip - 1))
                 }
                 None => None,
-            }
-        });
+            });
 
         let mut trace: Vec<TraceEntry> = Vec::new();
         let mut last: Option<(*const Proto, usize)> = None;

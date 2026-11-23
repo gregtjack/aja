@@ -5,7 +5,9 @@ use crate::{check, lexer::tokenize, parse::Parser};
 /// result. The collector runs before every allocation, so a value the VM
 /// forgot to keep reachable is freed, and its use then panics.
 fn run_vm(src: &str) -> (Vm, Result<Value, RuntimeError>) {
-    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let ast = Parser::new(tokenize(src).unwrap().into_iter())
+        .parse()
+        .unwrap();
     let types = match check::check_program(&ast) {
         Ok(types) => types,
         Err(errors) => {
@@ -13,7 +15,9 @@ fn run_vm(src: &str) -> (Vm, Result<Value, RuntimeError>) {
             panic!("test program has type errors: {msgs:#?}");
         }
     };
-    let program = Compiler::new().program(&ast, &types).expect("program compiles");
+    let program = Compiler::new()
+        .program(&ast, &types)
+        .expect("program compiles");
     let mut vm = Vm::new();
     vm.heap.stress = true;
     let result = vm.run_program(&program);
@@ -75,32 +79,67 @@ fn minus_is_an_operator() {
 
 #[test]
 fn comparisons() {
-    assert_eq!(main_value("bool", "1 < 2 && 2 <= 2 && 3 > 2 && 3 >= 3"), "Bool(true)");
-    assert_eq!(main_value("bool", "2 < 1 || 3 <= 2 || 2 > 3 || 2 >= 3"), "Bool(false)");
+    assert_eq!(
+        main_value("bool", "1 < 2 && 2 <= 2 && 3 > 2 && 3 >= 3"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "2 < 1 || 3 <= 2 || 2 > 3 || 2 >= 3"),
+        "Bool(false)"
+    );
     assert_eq!(main_value("bool", "1.5 < 2.5 && 2.5 > 1.5"), "Bool(true)");
     assert_eq!(main_value("bool", "(1 == 1) && (1 != 2)"), "Bool(true)");
-    assert_eq!(main_value("bool", "(1.5 == 1.5) && (1.5 != 2.5)"), "Bool(true)");
-    assert_eq!(main_value("bool", "(true == true) && (true != false)"), "Bool(true)");
-    assert_eq!(main_value("bool", "(\"ab\" == \"ab\") && (\"ab\" != \"b\")"), "Bool(true)");
+    assert_eq!(
+        main_value("bool", "(1.5 == 1.5) && (1.5 != 2.5)"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "(true == true) && (true != false)"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "(\"ab\" == \"ab\") && (\"ab\" != \"b\")"),
+        "Bool(true)"
+    );
     assert_eq!(main_value("bool", "!(1 == 2)"), "Bool(true)");
 }
 
 #[test]
 fn logical_operators_short_circuit() {
     let boom = "fn boom() -> bool { assert(false); true }";
-    assert_eq!(value(&format!("{boom} fn main() -> bool {{ false && boom() }}")), "Bool(false)");
-    assert_eq!(value(&format!("{boom} fn main() -> bool {{ true || boom() }}")), "Bool(true)");
-    assert_eq!(failure(&format!("{boom} fn main() -> bool {{ true && boom() }}")), "assertion failed");
+    assert_eq!(
+        value(&format!("{boom} fn main() -> bool {{ false && boom() }}")),
+        "Bool(false)"
+    );
+    assert_eq!(
+        value(&format!("{boom} fn main() -> bool {{ true || boom() }}")),
+        "Bool(true)"
+    );
+    assert_eq!(
+        failure(&format!("{boom} fn main() -> bool {{ true && boom() }}")),
+        "assertion failed"
+    );
 }
 
 #[test]
 fn control_flow() {
     assert_eq!(main_value("int", "if 1 < 2 { 10 } else { 20 }"), "Int(10)");
-    assert_eq!(main_value("int", "var i = 0; var s = 0; while i < 5 { s = s + i; i = i + 1; } s"), "Int(10)");
-    assert_eq!(main_value("int", "var x = 1; if true { x = 2; } x"), "Int(2)");
     assert_eq!(
-        value("fn sign(n: int) -> int { if n < 0 { return -1; } if n == 0 { return 0; } 1 }
-               fn main() -> int { sign(-5) * 100 + sign(0) * 10 + sign(7) }"),
+        main_value(
+            "int",
+            "var i = 0; var s = 0; while i < 5 { s = s + i; i = i + 1; } s"
+        ),
+        "Int(10)"
+    );
+    assert_eq!(
+        main_value("int", "var x = 1; if true { x = 2; } x"),
+        "Int(2)"
+    );
+    assert_eq!(
+        value(
+            "fn sign(n: int) -> int { if n < 0 { return -1; } if n == 0 { return 0; } 1 }
+               fn main() -> int { sign(-5) * 100 + sign(0) * 10 + sign(7) }"
+        ),
         "Int(-99)"
     );
 }
@@ -114,7 +153,9 @@ fn recursion_uses_per_call_registers() {
 
 /// Run a program with the call stack limited to `limit` bytes.
 fn run_limited(src: &str, limit: usize) -> Result<Value, RuntimeError> {
-    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let ast = Parser::new(tokenize(src).unwrap().into_iter())
+        .parse()
+        .unwrap();
     let types = check::check_program(&ast).unwrap();
     let program = Compiler::new().program(&ast, &types).unwrap();
     let mut vm = Vm::new();
@@ -133,24 +174,36 @@ fn deep_recursion_does_not_overflow_the_rust_stack() {
 #[test]
 fn runaway_recursion_is_a_stack_overflow() {
     let src = "fn f(n: int) -> int { 1 + f(n + 1) } fn main() -> int { f(0) }";
-    let msg = run_limited(src, 1 << 20).expect_err("should overflow").message;
-    assert!(msg.starts_with("stack overflow: the call stack has grown past 1 MB ("), "got {msg}");
+    let msg = run_limited(src, 1 << 20)
+        .expect_err("should overflow")
+        .message;
+    assert!(
+        msg.starts_with("stack overflow: the call stack has grown past 1 MB ("),
+        "got {msg}"
+    );
 }
 
 #[test]
 fn tail_calls_run_in_constant_space() {
     // A million calls deep, with room for only a handful of frames.
     let limit = 4096;
-    let count = "fn count(n: int, acc: int) -> int { if n == 0 { acc } else { count(n - 1, acc + 1) } }
+    let count =
+        "fn count(n: int, acc: int) -> int { if n == 0 { acc } else { count(n - 1, acc + 1) } }
                  fn main() -> int { count(1000000, 0) }";
-    assert_eq!(format!("{:?}", run_limited(count, limit).unwrap()), "Int(1000000)");
+    assert_eq!(
+        format!("{:?}", run_limited(count, limit).unwrap()),
+        "Int(1000000)"
+    );
 
     // `return` and both branches of an `if` are tail positions, and mutual
     // recursion works too.
     let even = "fn is_even(n: int) -> bool { if n == 0 { return true; } return is_odd(n - 1); }
                 fn is_odd(n: int) -> bool { if n == 0 { false } else { is_even(n - 1) } }
                 fn main() -> bool { is_even(1000001) }";
-    assert_eq!(format!("{:?}", run_limited(even, limit).unwrap()), "Bool(false)");
+    assert_eq!(
+        format!("{:?}", run_limited(even, limit).unwrap()),
+        "Bool(false)"
+    );
 
     // Closures, including ones that capture variables, can be tail-called.
     let closure = "fn main() -> int {
@@ -159,7 +212,10 @@ fn tail_calls_run_in_constant_space() {
                        f = fn(n: int) -> int { if n >= 1000000 { n } else { f(n + step) } };
                        f(0)
                    }";
-    assert_eq!(format!("{:?}", run_limited(closure, limit).unwrap()), "Int(1000000)");
+    assert_eq!(
+        format!("{:?}", run_limited(closure, limit).unwrap()),
+        "Int(1000000)"
+    );
 
     // A call that isn't last still needs its frame.
     let not_tail = "fn depth(n: int) -> int { if n == 0 { 0 } else { 1 + depth(n - 1) } }
@@ -175,11 +231,15 @@ fn tail_calls_pass_arguments_correctly() {
     assert_eq!(value(src), "Int(21)");
     // Tail calls to a function with more registers than the caller, and to
     // a built-in.
-    let src = "fn big(x: int) -> int { let a = x + 1; let b = a + 1; let c = b + 1; let d = c + 1; d }
+    let src =
+        "fn big(x: int) -> int { let a = x + 1; let b = a + 1; let c = b + 1; let d = c + 1; d }
                fn small(x: int) -> int { big(x) }
                fn main() -> int { small(1) }";
     assert_eq!(value(src), "Int(5)");
-    assert_eq!(value("fn main() { println(\"tail-called built-in\") }"), "Void");
+    assert_eq!(
+        value("fn main() { println(\"tail-called built-in\") }"),
+        "Void"
+    );
 }
 
 #[test]
@@ -190,17 +250,29 @@ fn functions_can_be_called_before_they_are_defined() {
 
 #[test]
 fn assignment_is_an_expression() {
-    assert_eq!(main_value("int", "var a = 1; let b = (a = 5) + a; b"), "Int(10)");
+    assert_eq!(
+        main_value("int", "var a = 1; let b = (a = 5) + a; b"),
+        "Int(10)"
+    );
     // The right operand changes `a` only after the left one has been read.
     assert_eq!(main_value("int", "var a = 1; a + (a = 5)"), "Int(6)");
-    assert_eq!(main_value("bool", "var a = true; let b = false; a = b && a; a"), "Bool(false)");
+    assert_eq!(
+        main_value("bool", "var a = true; let b = false; a = b && a; a"),
+        "Bool(false)"
+    );
 }
 
 #[test]
 fn let_shadowing() {
     assert_eq!(main_value("int", "let a = 1; let a = a + 1; a"), "Int(2)");
-    assert_eq!(main_value("str", "let a: int = 1; let a: str = \"s\"; a"), "Str(\"s\")");
-    assert_eq!(main_value("int", "let a = 1; if true { let a = 2; } a"), "Int(1)");
+    assert_eq!(
+        main_value("str", "let a: int = 1; let a: str = \"s\"; a"),
+        "Str(\"s\")"
+    );
+    assert_eq!(
+        main_value("int", "let a = 1; if true { let a = 2; } a"),
+        "Int(1)"
+    );
 }
 
 #[test]
@@ -235,10 +307,16 @@ fn each_counter_has_its_own_variable() {
 /// functions and the closures in them.
 fn cells_made(src: &str) -> usize {
     fn count(p: &Proto) -> usize {
-        let here = p.code.iter().filter(|op| matches!(op, Op::NewCell { .. })).count();
+        let here = p
+            .code
+            .iter()
+            .filter(|op| matches!(op, Op::NewCell { .. }))
+            .count();
         here + p.protos.iter().map(|p| count(p)).sum::<usize>()
     }
-    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let ast = Parser::new(tokenize(src).unwrap().into_iter())
+        .parse()
+        .unwrap();
     let types = check::check_program(&ast).unwrap();
     let program = Compiler::new().program(&ast, &types).unwrap();
     program.functions.iter().map(|(_, p)| count(p)).sum()
@@ -257,7 +335,8 @@ fn only_captured_vars_get_cells() {
     assert_eq!(cells_made(src), 0);
     assert_eq!(value(src), "Int(15)");
     // A captured `var` is shared, so it needs one; an uncaptured one doesn't.
-    let src = "fn main() -> int { var a = 1; var b = 2; let f = fn() { a = a + 1; }; f(); b = a; b }";
+    let src =
+        "fn main() -> int { var a = 1; var b = 2; let f = fn() { a = a + 1; }; f(); b = a; b }";
     assert_eq!(cells_made(src), 1);
     assert_eq!(value(src), "Int(2)");
 }
@@ -279,7 +358,10 @@ fn closures_can_call_themselves() {
                    let count = fn(n: int, acc: int) -> int { if n == 0 { acc } else { count(n - 1, acc + 1) } };
                    count(100000, 0)
                }";
-    assert_eq!(format!("{:?}", run_limited(src, 4096).unwrap()), "Int(100000)");
+    assert_eq!(
+        format!("{:?}", run_limited(src, 4096).unwrap()),
+        "Int(100000)"
+    );
     // Through a closure nested inside it, and with an outer `f` shadowed.
     let src = "fn main() -> int {
                    let f = 7;
@@ -296,7 +378,10 @@ fn closures_can_call_themselves() {
                }";
     assert_eq!(value(src), "Int(11)");
     // A value that isn't a closure still sees the earlier variable.
-    assert_eq!(value("fn main() -> int { let a = 1; let a = a + 1; a }"), "Int(2)");
+    assert_eq!(
+        value("fn main() -> int { let a = 1; let a = a + 1; a }"),
+        "Int(2)"
+    );
 }
 
 #[test]
@@ -356,8 +441,14 @@ fn values_display_like_print() {
     };
     assert_eq!(shown("fn main() -> float { 1.0 }"), "1.0");
     assert_eq!(shown("fn main() -> str { \"a\\tb\" }"), "a\tb");
-    assert_eq!(shown("fn main() -> (int) -> int { fn(x: int) -> int { x } }"), "<fn (x: int) -> int>");
-    assert_eq!(shown("fn main() -> () -> int { clock }"), "<native fn: clock>");
+    assert_eq!(
+        shown("fn main() -> (int) -> int { fn(x: int) -> int { x } }"),
+        "<fn (x: int) -> int>"
+    );
+    assert_eq!(
+        shown("fn main() -> () -> int { clock }"),
+        "<native fn: clock>"
+    );
     assert_eq!(shown("fn main() { }"), "()");
 }
 
@@ -365,36 +456,64 @@ fn values_display_like_print() {
 fn integer_errors() {
     assert_eq!(failure("fn main() -> int { 7 / 0 }"), "division by zero");
     assert_eq!(failure("fn main() -> int { 7 % 0 }"), "modulo by zero");
-    assert_eq!(failure("fn main() -> int { 9223372036854775807 + 1 }"), "integer overflow in '+'");
-    assert_eq!(failure("fn main() -> int { let m = -9223372036854775807 - 1; -m }"), "integer overflow in '-'");
-    assert_eq!(failure("fn main() -> int { let m = -9223372036854775807 - 1; m / -1 }"), "integer overflow in '/'");
+    assert_eq!(
+        failure("fn main() -> int { 9223372036854775807 + 1 }"),
+        "integer overflow in '+'"
+    );
+    assert_eq!(
+        failure("fn main() -> int { let m = -9223372036854775807 - 1; -m }"),
+        "integer overflow in '-'"
+    );
+    assert_eq!(
+        failure("fn main() -> int { let m = -9223372036854775807 - 1; m / -1 }"),
+        "integer overflow in '/'"
+    );
 }
 
 #[test]
 fn ints_are_64_bit() {
     assert_eq!(main_value("int", "2147483647 + 1"), "Int(2147483648)");
     assert_eq!(main_value("int", "3_000_000_000 * 3"), "Int(9000000000)");
-    assert_eq!(main_value("int", "-9223372036854775807 - 1"), "Int(-9223372036854775808)");
+    assert_eq!(
+        main_value("int", "-9223372036854775807 - 1"),
+        "Int(-9223372036854775808)"
+    );
     // Milliseconds since 1970 fit, and are after 2020-01-01.
-    assert_eq!(main_value("bool", "clock() > 1_577_836_800_000"), "Bool(true)");
+    assert_eq!(
+        main_value("bool", "clock() > 1_577_836_800_000"),
+        "Bool(true)"
+    );
 }
 
 #[test]
 fn floats_are_64_bit() {
     // An f32 would round these; an f64 keeps them.
     assert_eq!(main_value("float", "16777217.0"), "Float(16777217.0)");
-    assert_eq!(main_value("float", "0.1 + 0.2"), "Float(0.30000000000000004)");
+    assert_eq!(
+        main_value("float", "0.1 + 0.2"),
+        "Float(0.30000000000000004)"
+    );
 }
 
 #[test]
 fn program_level_errors() {
     let compile = |src: &str| {
-        let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+        let ast = Parser::new(tokenize(src).unwrap().into_iter())
+            .parse()
+            .unwrap();
         let types = check::check_program(&ast).unwrap();
-        Compiler::new().program(&ast, &types).err().map(|d| d.message)
+        Compiler::new()
+            .program(&ast, &types)
+            .err()
+            .map(|d| d.message)
     };
-    assert!(compile("fn helper() { }").unwrap().starts_with("no 'main' function found"));
-    assert_eq!(compile("fn main(x: int) { }").unwrap(), "'main' cannot take parameters");
+    assert!(compile("fn helper() { }")
+        .unwrap()
+        .starts_with("no 'main' function found"));
+    assert_eq!(
+        compile("fn main(x: int) { }").unwrap(),
+        "'main' cannot take parameters"
+    );
 }
 
 /// The source text an error points at, plus its call-trace notes.
@@ -412,7 +531,10 @@ fn located(src: &str) -> (String, Vec<String>) {
 
 #[test]
 fn runtime_errors_point_at_the_failing_expression() {
-    assert_eq!(located("fn main() -> int { let a = 0; 1 + 6 / a }").0, "6 / a");
+    assert_eq!(
+        located("fn main() -> int { let a = 0; 1 + 6 / a }").0,
+        "6 / a"
+    );
     assert_eq!(located("fn main() { assert(1 == 2) }").0, "assert(1 == 2)");
 }
 
@@ -444,9 +566,8 @@ fn runtime_errors_carry_a_call_trace() {
 
     // A tail call replaces its caller's frame, so the caller isn't listed,
     // but the note doesn't mention tail calls: it reads like any other call.
-    let (_, notes) = located(
-        "fn c(x: int) -> int { x / 0 }\nfn b(x: int) -> int { c(x) }\nfn main() { b(1); }",
-    );
+    let (_, notes) =
+        located("fn c(x: int) -> int { x / 0 }\nfn b(x: int) -> int { c(x) }\nfn main() { b(1); }");
     assert_eq!(notes, vec!["in function 'c', called at line 2, column 23"]);
 
     // Closures are described by the name they were called through.
@@ -461,9 +582,14 @@ fn repl_inputs_share_globals() {
     let mut vm = Vm::new();
     vm.heap.stress = true;
     let mut eval = |src: &str| {
-        let stmt = Parser::new(tokenize(src).unwrap().into_iter()).parse_stmt_only().unwrap();
+        let stmt = Parser::new(tokenize(src).unwrap().into_iter())
+            .parse_stmt_only()
+            .unwrap();
         let types = checker.check_repl_stmt(&stmt).unwrap();
-        let span = Span::new(crate::ast::Location::new(0, 1, 1), crate::ast::Location::new(0, 1, 1));
+        let span = Span::new(
+            crate::ast::Location::new(0, 1, 1),
+            crate::ast::Location::new(0, 1, 1),
+        );
         let input = compiler.repl(&stmt, &types, span);
         let v = vm.run_repl(&input).unwrap();
         show(&vm, &v)
@@ -472,13 +598,19 @@ fn repl_inputs_share_globals() {
     assert_eq!(eval("let add = fn(n: int) -> int { x = x + n; x }"), "Void");
     assert_eq!(eval("add(4)"), "Int(5)");
     assert_eq!(eval("x"), "Int(5)");
-    assert_eq!(eval("{ let y = 2; let g = fn() -> int { y * x }; g() }"), "Int(10)");
+    assert_eq!(
+        eval("{ let y = 2; let g = fn() -> int { y * x }; g() }"),
+        "Int(10)"
+    );
     // A new `x` doesn't change the one `add` uses.
     assert_eq!(eval("let x = \"s\""), "Void");
     assert_eq!(eval("add(1)"), "Int(6)");
     assert_eq!(eval("x"), "Str(\"s\")");
     // A top-level closure can call itself.
-    assert_eq!(eval("let f = fn(n: int) -> int { if n == 0 { 0 } else { 2 + f(n - 1) } }"), "Void");
+    assert_eq!(
+        eval("let f = fn(n: int) -> int { if n == 0 { 0 } else { 2 + f(n - 1) } }"),
+        "Void"
+    );
     assert_eq!(eval("f(4)"), "Int(8)");
 }
 
@@ -552,11 +684,16 @@ fn collection_runs_without_stress_mode() {
                    while i < 10000 { var c = 0; let g = fn() -> int { c = c + 1; c }; g(); i = i + 1; }
                    keep()
                }";
-    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let ast = Parser::new(tokenize(src).unwrap().into_iter())
+        .parse()
+        .unwrap();
     let types = check::check_program(&ast).unwrap();
     let program = Compiler::new().program(&ast, &types).unwrap();
     let mut vm = Vm::new();
-    assert_eq!(format!("{:?}", vm.run_program(&program).unwrap()), "Int(10000)");
+    assert_eq!(
+        format!("{:?}", vm.run_program(&program).unwrap()),
+        "Int(10000)"
+    );
     assert!(vm.heap.live() < 3000, "{} objects live", vm.heap.live());
 }
 
@@ -582,16 +719,34 @@ fn data_value(ret: &str, body: &str) -> String {
 
 #[test]
 fn structs_are_built_and_read() {
-    assert_eq!(data_value("Point", "Point { x: 1, y: 2 }"), "Point { x: 1, y: 2 }");
+    assert_eq!(
+        data_value("Point", "Point { x: 1, y: 2 }"),
+        "Point { x: 1, y: 2 }"
+    );
     // Fields can be written in any order.
-    assert_eq!(data_value("Point", "Point { y: 2, x: 1 }"), "Point { x: 1, y: 2 }");
-    assert_eq!(data_value("int", "let p = Point { x: 3, y: 4 }; p.x * 10 + p.y"), "34");
-    assert_eq!(data_value("Point", "let x = 5; let y = 6; Point { x, y }"), "Point { x: 5, y: 6 }");
-    assert_eq!(data_value("Point", "let p = Point { x: 1, y: 2 }; Point { y: 9, ..p }"), "Point { x: 1, y: 9 }");
+    assert_eq!(
+        data_value("Point", "Point { y: 2, x: 1 }"),
+        "Point { x: 1, y: 2 }"
+    );
+    assert_eq!(
+        data_value("int", "let p = Point { x: 3, y: 4 }; p.x * 10 + p.y"),
+        "34"
+    );
+    assert_eq!(
+        data_value("Point", "let x = 5; let y = 6; Point { x, y }"),
+        "Point { x: 5, y: 6 }"
+    );
+    assert_eq!(
+        data_value("Point", "let p = Point { x: 1, y: 2 }; Point { y: 9, ..p }"),
+        "Point { x: 1, y: 9 }"
+    );
     // Fields of fields, and of call results.
     let src = "struct Line { a: Point, b: Point }
                fn line() -> Line { Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 } } }";
-    assert_eq!(value(&format!("{DATA} {src} fn main() -> int {{ line().b.x }}")), "Int(3)");
+    assert_eq!(
+        value(&format!("{DATA} {src} fn main() -> int {{ line().b.x }}")),
+        "Int(3)"
+    );
 }
 
 #[test]
@@ -609,10 +764,16 @@ fn fields_are_evaluated_in_the_order_written() {
 fn enums_are_built_and_shown() {
     assert_eq!(data_value("Shape", "Shape::Empty"), "Shape::Empty");
     assert_eq!(
-        data_value("Shape", "Shape::Rect(Point { x: 0, y: 0 }, Point { x: 2, y: 3 })"),
+        data_value(
+            "Shape",
+            "Shape::Rect(Point { x: 0, y: 0 }, Point { x: 2, y: 3 })"
+        ),
         "Shape::Rect(Point { x: 0, y: 0 }, Point { x: 2, y: 3 })"
     );
-    assert_eq!(data_value("List", "range(3)"), "List::Cons(0, List::Cons(1, List::Cons(2, List::Nil)))");
+    assert_eq!(
+        data_value("List", "range(3)"),
+        "List::Cons(0, List::Cons(1, List::Cons(2, List::Nil)))"
+    );
     // Strings inside a value are quoted, so `\"1\"` and `1` look different.
     let src = "enum E { S(str) } fn main() -> E { E::S(\"hi\") }";
     let (vm, result) = run_vm(src);
@@ -631,7 +792,10 @@ fn match_selects_the_first_matching_arm() {
     let main = "area(Shape::Circle(Point { x: 0, y: 0 }, 2)) * 10000
                 + area(Shape::Rect(Point { x: 1, y: 1 }, Point { x: 4, y: 3 })) * 100
                 + area(Shape::Empty)";
-    assert_eq!(value(&format!("{DATA} {area} fn main() -> int {{ {main} }}")), "Int(120600)");
+    assert_eq!(
+        value(&format!("{DATA} {area} fn main() -> int {{ {main} }}")),
+        "Int(120600)"
+    );
 
     let describe = "fn describe(p: Point) -> str {
                         match p {
@@ -652,7 +816,11 @@ fn match_selects_the_first_matching_arm() {
         ("2, y: 3", "elsewhere"),
     ] {
         let src = format!("{DATA} {describe} fn main() -> str {{ describe(Point {{ x: {p} }}) }}");
-        assert_eq!(value(&src), format!("Str({expected:?})"), "for Point {{ x: {p} }}");
+        assert_eq!(
+            value(&src),
+            format!("Str({expected:?})"),
+            "for Point {{ x: {p} }}"
+        );
     }
 }
 
@@ -685,10 +853,19 @@ fn nested_patterns() {
 #[test]
 fn match_is_an_expression_and_a_statement() {
     assert_eq!(
-        data_value("int", "var n = 0; match Shape::Empty { Shape::Empty => { n = 5; }, _ => { } } n"),
+        data_value(
+            "int",
+            "var n = 0; match Shape::Empty { Shape::Empty => { n = 5; }, _ => { } } n"
+        ),
         "5"
     );
-    assert_eq!(data_value("int", "let s = Shape::Empty; 1 + match s { Shape::Empty => 1, _ => 2 } * 10"), "11");
+    assert_eq!(
+        data_value(
+            "int",
+            "let s = Shape::Empty; 1 + match s { Shape::Empty => 1, _ => 2 } * 10"
+        ),
+        "11"
+    );
     // A `return` inside an arm returns from the function.
     let src = "fn f(s: Shape) -> int { let n = match s { Shape::Empty => { return 7; }, _ => 1 }; n * 2 }
                fn main() -> int { f(Shape::Empty) * 10 + f(Shape::Circle(Point { x: 0, y: 0 }, 1)) }";
@@ -728,15 +905,30 @@ fn closures_capture_pattern_bindings() {
 fn match_arms_are_tail_positions() {
     let src = "fn len(l: List, acc: int) -> int { match l { List::Nil => acc, List::Cons(_, t) => len(t, acc + 1) } }
                fn main() -> int { len(range(100000), 0) }";
-    assert_eq!(format!("{:?}", run_limited(&format!("{DATA} {src}"), 4096).unwrap()), "Int(100000)");
+    assert_eq!(
+        format!("{:?}", run_limited(&format!("{DATA} {src}"), 4096).unwrap()),
+        "Int(100000)"
+    );
 }
 
 #[test]
 fn structural_equality() {
-    assert_eq!(data_value("bool", "Point { x: 1, y: 2 } == Point { x: 1, y: 2 }"), "true");
-    assert_eq!(data_value("bool", "Point { x: 1, y: 2 } != Point { x: 1, y: 3 }"), "true");
+    assert_eq!(
+        data_value("bool", "Point { x: 1, y: 2 } == Point { x: 1, y: 2 }"),
+        "true"
+    );
+    assert_eq!(
+        data_value("bool", "Point { x: 1, y: 2 } != Point { x: 1, y: 3 }"),
+        "true"
+    );
     assert_eq!(data_value("bool", "Shape::Empty == Shape::Empty"), "true");
-    assert_eq!(data_value("bool", "Shape::Empty == Shape::Circle(Point { x: 0, y: 0 }, 1)"), "false");
+    assert_eq!(
+        data_value(
+            "bool",
+            "Shape::Empty == Shape::Circle(Point { x: 0, y: 0 }, 1)"
+        ),
+        "false"
+    );
     assert_eq!(data_value("bool", "range(3) == range(3)"), "true");
     assert_eq!(data_value("bool", "range(3) == range(4)"), "false");
 }
@@ -747,7 +939,9 @@ fn long_lists_are_compared_and_shown_without_deep_recursion() {
     // lists quadratic.
     let run = |ret: &str, body: &str| {
         let src = format!("{DATA} fn main() -> {ret} {{ {body} }}");
-        let ast = Parser::new(tokenize(&src).unwrap().into_iter()).parse().unwrap();
+        let ast = Parser::new(tokenize(&src).unwrap().into_iter())
+            .parse()
+            .unwrap();
         let types = check::check_program(&ast).unwrap();
         let program = Compiler::new().program(&ast, &types).unwrap();
         let mut vm = Vm::new();
@@ -756,7 +950,10 @@ fn long_lists_are_compared_and_shown_without_deep_recursion() {
     };
     let shown = run("List", "range(200000)");
     assert!(shown.starts_with("List::Cons(0, List::Cons(1, "));
-    assert!(shown.ends_with(&format!("List::Cons(199999, List::Nil{}", ")".repeat(200000))));
+    assert!(shown.ends_with(&format!(
+        "List::Cons(199999, List::Nil{}",
+        ")".repeat(200000)
+    )));
     assert_eq!(run("bool", "range(200000) == range(200000)"), "true");
 }
 
@@ -780,18 +977,27 @@ fn struct_and_enum_values_are_collected() {
 fn statements_ending_in_a_block_need_no_semicolon() {
     // An `if` / `else` followed by more statements.
     assert_eq!(
-        main_value("int", "var x = 0; if x == 0 { x = 1; } else { x = 2; } x = x * 10; x"),
+        main_value(
+            "int",
+            "var x = 0; if x == 0 { x = 1; } else { x = 2; } x = x * 10; x"
+        ),
         "Int(10)"
     );
     // A nested block keeps its statements, and its scope.
-    assert_eq!(main_value("int", "var a = 1; { var a = 2; a = a + 1; } a"), "Int(1)");
+    assert_eq!(
+        main_value("int", "var a = 1; { var a = 2; a = a + 1; } a"),
+        "Int(1)"
+    );
     assert_eq!(main_value("int", "{ var b = 2; b = b * 3; } 4"), "Int(4)");
     assert_eq!(main_value("int", "{ 5 }"), "Int(5)");
 }
 
 #[test]
 fn if_expressions_can_be_assigned() {
-    assert_eq!(main_value("int", "var n = 3; n = if n > 2 { n * 2 } else { 0 }; n"), "Int(6)");
+    assert_eq!(
+        main_value("int", "var n = 3; n = if n > 2 { n * 2 } else { 0 }; n"),
+        "Int(6)"
+    );
 }
 
 /// Run an Aja source file through every stage, returning the messages of
@@ -803,8 +1009,12 @@ fn run_source(src: &str) -> Result<(), Vec<String>> {
         .map_err(|e| vec![e.to_diagnostic().message])?;
     let types = check::check_program(&ast)
         .map_err(|errors| errors.into_iter().map(|e| e.message).collect::<Vec<_>>())?;
-    let program = Compiler::new().program(&ast, &types).map_err(|d| vec![d.message])?;
-    Vm::new().run_program(&program).map_err(|e| vec![e.message])?;
+    let program = Compiler::new()
+        .program(&ast, &types)
+        .map_err(|d| vec![d.message])?;
+    Vm::new()
+        .run_program(&program)
+        .map_err(|e| vec![e.message])?;
     Ok(())
 }
 
@@ -839,7 +1049,11 @@ fn error_examples_fail_as_described() {
             .lines()
             .filter_map(|l| l.trim().strip_prefix("// expect: "))
             .collect();
-        assert!(!expected.is_empty(), "{} has no `// expect:` lines", path.display());
+        assert!(
+            !expected.is_empty(),
+            "{} has no `// expect:` lines",
+            path.display()
+        );
         match run_source(&src) {
             Ok(()) => panic!("{} should fail", path.display()),
             Err(errors) => assert_eq!(errors, expected, "{}", path.display()),
@@ -852,13 +1066,34 @@ fn error_examples_fail_as_described() {
 #[test]
 fn strings_concatenate() {
     assert_eq!(main_value("str", "\"foo\" + \"bar\""), "Str(\"foobar\")");
-    assert_eq!(main_value("str", "var s = \"\"; var i = 0; while i < 3 { s = s + \"ab\"; i = i + 1; } s"), "Str(\"ababab\")");
+    assert_eq!(
+        main_value(
+            "str",
+            "var s = \"\"; var i = 0; while i < 3 { s = s + \"ab\"; i = i + 1; } s"
+        ),
+        "Str(\"ababab\")"
+    );
     // Inferred: `a + b` on strings.
-    assert_eq!(main_value("str", "let join = fn(a, b) { a + \" \" + b }; join(\"hello\", \"world\")"), "Str(\"hello world\")");
+    assert_eq!(
+        main_value(
+            "str",
+            "let join = fn(a, b) { a + \" \" + b }; join(\"hello\", \"world\")"
+        ),
+        "Str(\"hello world\")"
+    );
     // A built string equals a literal with the same contents.
-    assert_eq!(main_value("bool", "\"ab\" + \"c\" == \"abc\""), "Bool(true)");
+    assert_eq!(
+        main_value("bool", "\"ab\" + \"c\" == \"abc\""),
+        "Bool(true)"
+    );
     assert_eq!(main_value("bool", "\"ab\" + \"c\" != \"ab\""), "Bool(true)");
-    assert_eq!(main_value("int", "match \"a\" + \"b\" { \"a\" => 1, \"ab\" => 2, _ => 3 }"), "Int(2)");
+    assert_eq!(
+        main_value(
+            "int",
+            "match \"a\" + \"b\" { \"a\" => 1, \"ab\" => 2, _ => 3 }"
+        ),
+        "Int(2)"
+    );
     // Multi-byte characters survive.
     assert_eq!(main_value("str", "\"é\" + \"✓\""), "Str(\"é✓\")");
 }
@@ -921,11 +1156,16 @@ fn large_strings_trigger_collection() {
                    while i < 1000 { let copy = big + big; i = i + 1; }
                    i
                }";
-    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let ast = Parser::new(tokenize(src).unwrap().into_iter())
+        .parse()
+        .unwrap();
     let types = check::check_program(&ast).unwrap();
     let program = Compiler::new().program(&ast, &types).unwrap();
     let mut vm = Vm::new();
-    assert_eq!(format!("{:?}", vm.run_program(&program).unwrap()), "Int(1000)");
+    assert_eq!(
+        format!("{:?}", vm.run_program(&program).unwrap()),
+        "Int(1000)"
+    );
     assert!(vm.heap.bytes() < 4 << 20, "{} bytes live", vm.heap.bytes());
 }
 
@@ -936,10 +1176,15 @@ fn repl_literals_are_kept_and_renumbered_after_a_failed_input() {
     let mut vm = Vm::new();
     vm.heap.stress = true;
     let mut eval = |src: &str| {
-        let stmt = Parser::new(tokenize(src).unwrap().into_iter()).parse_stmt_only().unwrap();
+        let stmt = Parser::new(tokenize(src).unwrap().into_iter())
+            .parse_stmt_only()
+            .unwrap();
         let saved = (checker.clone(), compiler.clone());
         let types = checker.check_repl_stmt(&stmt).unwrap();
-        let span = Span::new(crate::ast::Location::new(0, 1, 1), crate::ast::Location::new(0, 1, 1));
+        let span = Span::new(
+            crate::ast::Location::new(0, 1, 1),
+            crate::ast::Location::new(0, 1, 1),
+        );
         let input = compiler.repl(&stmt, &types, span);
         match vm.run_repl(&input) {
             Ok(v) => show(&vm, &v),
@@ -950,9 +1195,15 @@ fn repl_literals_are_kept_and_renumbered_after_a_failed_input() {
             }
         }
     };
-    assert_eq!(eval("let greet = fn(n: str) -> str { \"hi \" + n }"), "Void");
+    assert_eq!(
+        eval("let greet = fn(n: str) -> str { \"hi \" + n }"),
+        "Void"
+    );
     // This input's literal is numbered, then rolled back with the compiler.
-    assert_eq!(eval("{ let s = \"lost\"; assert(false); s }"), "assertion failed");
+    assert_eq!(
+        eval("{ let s = \"lost\"; assert(false); s }"),
+        "assertion failed"
+    );
     // So the next literal reuses its number, and must not see "lost".
     assert_eq!(eval("greet(\"there\")"), "Str(\"hi there\")");
     assert_eq!(eval("\"hi \" + \"again\""), "Str(\"hi again\")");
@@ -972,14 +1223,29 @@ fn generic_code_runs() {
     let main = |ret: &str, body: &str| value(&format!("{types} fn main() -> {ret} {{ {body} }}"));
 
     let xs = "List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))";
-    assert_eq!(main("int", &format!("fold(map({xs}, fn(x) {{ x * 10 }}), 0, fn(a, x) {{ a + x }})")), "Int(60)");
     assert_eq!(
-        main("str", &format!("fold(map({xs}, fn(x: int) -> str {{ \"ab\" }}), \"\", fn(a, s) {{ a + s }})")),
+        main(
+            "int",
+            &format!("fold(map({xs}, fn(x) {{ x * 10 }}), 0, fn(a, x) {{ a + x }})")
+        ),
+        "Int(60)"
+    );
+    assert_eq!(
+        main(
+            "str",
+            &format!("fold(map({xs}, fn(x: int) -> str {{ \"ab\" }}), \"\", fn(a, s) {{ a + s }})")
+        ),
         "Str(\"ababab\")"
     );
     assert_eq!(main("int", "get(Some(5), 0) + get(None, 7)"), "Int(12)");
     assert_eq!(main("str", "let p = Pair { first: 1, second: \"one\" }; Pair { first: p.second, second: p.first }.first"), "Str(\"one\")");
-    assert_eq!(main("bool", "Some(Pair { first: 1, second: \"x\" }) == Some(Pair { first: 1, second: \"x\" })"), "Bool(true)");
+    assert_eq!(
+        main(
+            "bool",
+            "Some(Pair { first: 1, second: \"x\" }) == Some(Pair { first: 1, second: \"x\" })"
+        ),
+        "Bool(true)"
+    );
     assert_eq!(main("bool", "Some(1) == None"), "Bool(false)");
     // Generic recursion in tail position runs in constant space.
     let src = format!(
@@ -987,7 +1253,10 @@ fn generic_code_runs() {
          fn build(n: int, acc: List<bool>) -> List<bool> {{ if n == 0 {{ acc }} else {{ build(n - 1, List::Cons(true, acc)) }} }}
          fn main() -> int {{ count(build(100000, List::Nil), 0) }}"
     );
-    assert_eq!(format!("{:?}", run_limited(&src, 4096).unwrap()), "Int(100000)");
+    assert_eq!(
+        format!("{:?}", run_limited(&src, 4096).unwrap()),
+        "Int(100000)"
+    );
 }
 
 #[test]
@@ -997,11 +1266,23 @@ fn question_mark_returns_early() {
                fn show(r: Result<int, str>) -> str { match r { Ok(_) => \"ok\", Err(e) => e } }
                fn first(o: Option<int>) -> Option<int> { let n = o?; Some(n * 10) }";
     let main = |ret: &str, body: &str| value(&format!("{lib} fn main() -> {ret} {{ {body} }}"));
-    assert_eq!(main("int", "match sum(\"1\", \"2\") { Ok(n) => n, Err(_) => -1 }"), "Int(3)");
+    assert_eq!(
+        main(
+            "int",
+            "match sum(\"1\", \"2\") { Ok(n) => n, Err(_) => -1 }"
+        ),
+        "Int(3)"
+    );
     // The first error is returned, and nothing after it runs.
     assert_eq!(main("str", "show(sum(\"x\", \"y\"))"), "Str(\"bad: x\")");
     assert_eq!(main("str", "show(sum(\"1\", \"y\"))"), "Str(\"bad: y\")");
-    assert_eq!(main("bool", "(first(Some(4)) == Some(40)) && (first(None) == None)"), "Bool(true)");
+    assert_eq!(
+        main(
+            "bool",
+            "(first(Some(4)) == Some(40)) && (first(None) == None)"
+        ),
+        "Bool(true)"
+    );
     // In a closure, `?` returns from the closure.
     assert_eq!(
         main("int", "let f = fn(s) { let n = digit(s)?; Ok(n + 100) }; match f(\"2\") { Ok(n) => n, Err(_) => 0 } + match f(\"z\") { Ok(n) => n, Err(_) => 7 }"),
@@ -1035,7 +1316,13 @@ fn methods_run() {
                }
                fn build(n: int, acc: List<int>) -> List<int> { if n == 0 { acc } else { build(n - 1, acc.push(n)) } }";
     let main = |ret: &str, body: &str| value(&format!("{src} fn main() -> {ret} {{ {body} }}"));
-    assert_eq!(main("int", "Point::origin().add(Point { x: 2, y: 3 }).add(Point { x: 1, y: 1 }).sum()"), "Int(7)");
+    assert_eq!(
+        main(
+            "int",
+            "Point::origin().add(Point { x: 2, y: 3 }).add(Point { x: 1, y: 1 }).sum()"
+        ),
+        "Int(7)"
+    );
     assert_eq!(main("int", "let f = Point::origin; f().sum()"), "Int(0)");
     // The receiver is evaluated before the arguments.
     assert_eq!(
@@ -1044,15 +1331,28 @@ fn methods_run() {
     );
     // A method calling itself in tail position runs in constant space.
     let deep = format!("{src} fn main() -> int {{ build(100000, List::Nil).len() }}");
-    assert_eq!(format!("{:?}", run_limited(&deep, 4096).unwrap()), "Int(100000)");
+    assert_eq!(
+        format!("{:?}", run_limited(&deep, 4096).unwrap()),
+        "Int(100000)"
+    );
 }
 
 #[test]
 fn prelude_methods_run() {
     let main = |ret: &str, body: &str| value(&format!("fn main() -> {ret} {{ {body} }}"));
-    assert_eq!(main("int", "Some(4).map(fn(n) { n * 10 }).unwrap_or(0) + None.unwrap_or(2)"), "Int(42)");
-    assert_eq!(main("bool", "Some(1).is_some() && (None.or(Some(2)) == Some(2))"), "Bool(true)");
-    let parse = "fn parse(s: str) -> Result<int, str> { if s == \"1\" { Ok(1) } else { Err(\"bad\") } }";
+    assert_eq!(
+        main(
+            "int",
+            "Some(4).map(fn(n) { n * 10 }).unwrap_or(0) + None.unwrap_or(2)"
+        ),
+        "Int(42)"
+    );
+    assert_eq!(
+        main("bool", "Some(1).is_some() && (None.or(Some(2)) == Some(2))"),
+        "Bool(true)"
+    );
+    let parse =
+        "fn parse(s: str) -> Result<int, str> { if s == \"1\" { Ok(1) } else { Err(\"bad\") } }";
     assert_eq!(
         value(&format!("{parse} fn code(s: str) -> Result<int, int> {{ let n = parse(s).map_err(fn(e) {{ 404 }})?; Ok(n) }}
                         fn main() -> int {{ code(\"x\").unwrap_or(0) + code(\"1\").unwrap_or(0) }}")),
@@ -1067,6 +1367,12 @@ fn errors_in_closures_called_by_the_prelude_say_so() {
     let err = run("fn main() { let o = Some(0).map(fn(x) { 10 / x }); }").unwrap_err();
     assert_eq!(err.message, "division by zero");
     let notes = err.to_diagnostic().notes;
-    assert!(notes[0].starts_with("in function 'f', called in the prelude at line "), "got {notes:?}");
-    assert_eq!(notes[1], "in function 'Option::map', called at line 1, column 21");
+    assert!(
+        notes[0].starts_with("in function 'f', called in the prelude at line "),
+        "got {notes:?}"
+    );
+    assert_eq!(
+        notes[1],
+        "in function 'Option::map', called at line 1, column 21"
+    );
 }

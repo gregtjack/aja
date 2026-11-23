@@ -238,7 +238,11 @@ impl Heap {
     }
 
     /// Free every object not reachable from `roots` or `extra`.
-    pub fn collect<'a>(&mut self, roots: impl IntoIterator<Item = &'a Value>, extra: impl IntoIterator<Item = Gc>) {
+    pub fn collect<'a>(
+        &mut self,
+        roots: impl IntoIterator<Item = &'a Value>,
+        extra: impl IntoIterator<Item = Gc>,
+    ) {
         // Mark, with an explicit worklist so long chains can't overflow the stack.
         let mut work: Vec<Gc> = roots.into_iter().filter_map(Value::handle).collect();
         work.extend(extra);

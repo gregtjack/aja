@@ -23,8 +23,8 @@ use ecow::EcoString;
 use super::{key, plural, BindingKind, Checker, Class, Ty, TypeError};
 use crate::{
     ast::{
-        types::Type, Arm, Definition, Expr, FieldInit, Id, Pattern, PatternKind, Program, Span, Statement,
-        TypeParam,
+        types::Type, Arm, Definition, Expr, FieldInit, Id, Pattern, PatternKind, Program, Span,
+        Statement, TypeParam,
     },
     diagnostic::closest_match,
     prelude::{self, variant_display},
@@ -82,21 +82,41 @@ impl Checker {
         let mut accepted = Vec::new();
         for def in &program.definitions {
             let (name, span, type_params, is_struct) = match def {
-                Definition::Struct { name, name_span, type_params, .. } => (name, *name_span, type_params, true),
-                Definition::Enum { name, name_span, type_params, .. } => (name, *name_span, type_params, false),
+                Definition::Struct {
+                    name,
+                    name_span,
+                    type_params,
+                    ..
+                } => (name, *name_span, type_params, true),
+                Definition::Enum {
+                    name,
+                    name_span,
+                    type_params,
+                    ..
+                } => (name, *name_span, type_params, false),
                 Definition::Function { .. } | Definition::Impl { .. } => continue,
             };
             if Type::try_from(name.to_string()).is_ok() {
                 self.error(
-                    TypeError::new(format!("'{name}' is a built-in type, so it can't be redefined"), span)
-                        .help("choose a different name"),
+                    TypeError::new(
+                        format!("'{name}' is a built-in type, so it can't be redefined"),
+                        span,
+                    )
+                    .help("choose a different name"),
                 );
                 continue;
             }
-            if prelude::is_prelude_type(name) && (self.structs.contains_key(name) || self.enums.contains_key(name)) {
+            if prelude::is_prelude_type(name)
+                && (self.structs.contains_key(name) || self.enums.contains_key(name))
+            {
                 self.error(
-                    TypeError::new(format!("'{name}' is defined in the prelude, so it can't be redefined"), span)
-                        .help(format!("use the prelude's '{name}', or choose a different name")),
+                    TypeError::new(
+                        format!("'{name}' is defined in the prelude, so it can't be redefined"),
+                        span,
+                    )
+                    .help(format!(
+                        "use the prelude's '{name}', or choose a different name"
+                    )),
                 );
                 continue;
             }
@@ -111,15 +131,29 @@ impl Checker {
             // known; their number is needed now, to check uses of the type.
             let params: Vec<Id> = type_params.iter().map(|p| p.name.clone()).collect();
             if is_struct {
-                self.structs.insert(name.clone(), StructInfo { params, fields: Vec::new() });
+                self.structs.insert(
+                    name.clone(),
+                    StructInfo {
+                        params,
+                        fields: Vec::new(),
+                    },
+                );
             } else {
-                self.enums.insert(name.clone(), EnumInfo { params, variants: Vec::new() });
+                self.enums.insert(
+                    name.clone(),
+                    EnumInfo {
+                        params,
+                        variants: Vec::new(),
+                    },
+                );
             }
             accepted.push(def);
         }
 
         for def in accepted {
-            let (Definition::Struct { type_params, .. } | Definition::Enum { type_params, .. }) = def else {
+            let (Definition::Struct { type_params, .. } | Definition::Enum { type_params, .. }) =
+                def
+            else {
                 unreachable!()
             };
             self.type_params = self.declare_type_params(type_params);
@@ -131,7 +165,10 @@ impl Checker {
                         let t = f.t.as_ref().map_or(Ty::Error, |t| self.from_ast(t));
                         if !seen.insert(f.name.clone()) {
                             self.error(TypeError::new(
-                                format!("struct '{name}' has more than one field named '{}'", f.name),
+                                format!(
+                                    "struct '{name}' has more than one field named '{}'",
+                                    f.name
+                                ),
                                 f.span,
                             ));
                             continue;
@@ -149,7 +186,10 @@ impl Checker {
                         let tys: Vec<Ty> = v.fields.iter().map(|t| self.from_ast(t)).collect();
                         if !seen.insert(v.name.clone()) {
                             self.error(TypeError::new(
-                                format!("enum '{name}' has more than one variant named '{}'", v.name),
+                                format!(
+                                    "enum '{name}' has more than one variant named '{}'",
+                                    v.name
+                                ),
                                 v.span,
                             ));
                             continue;
@@ -172,11 +212,20 @@ impl Checker {
         let mut names: Vec<Id> = Vec::new();
         for p in params {
             let err = if names.contains(&p.name) {
-                Some(TypeError::new(format!("type parameter '{}' is declared more than once", p.name), p.span))
+                Some(TypeError::new(
+                    format!("type parameter '{}' is declared more than once", p.name),
+                    p.span,
+                ))
             } else if Type::try_from(p.name.to_string()).is_ok() {
                 Some(
-                    TypeError::new(format!("'{}' is a built-in type, so it can't be a type parameter", p.name), p.span)
-                        .help("type parameters are usually single capital letters, e.g. `T`"),
+                    TypeError::new(
+                        format!(
+                            "'{}' is a built-in type, so it can't be a type parameter",
+                            p.name
+                        ),
+                        p.span,
+                    )
+                    .help("type parameters are usually single capital letters, e.g. `T`"),
                 )
             } else if self.structs.contains_key(&p.name) || self.enums.contains_key(&p.name) {
                 Some(
@@ -189,7 +238,8 @@ impl Checker {
             } else {
                 None
             };
-            let clashes_with_type = self.structs.contains_key(&p.name) || self.enums.contains_key(&p.name);
+            let clashes_with_type =
+                self.structs.contains_key(&p.name) || self.enums.contains_key(&p.name);
             match err {
                 // Keep a parameter that only clashes with a type's name, so
                 // its uses refer to it and don't cause more errors.
@@ -214,10 +264,17 @@ impl Checker {
         for p in params {
             // A built-in type's name isn't a parameter, and has been reported.
             if !used.contains(&p.name) && Type::try_from(p.name.to_string()).is_err() {
-                let where_ = if owner.starts_with("function") { "its signature" } else { "its definition" };
+                let where_ = if owner.starts_with("function") {
+                    "its signature"
+                } else {
+                    "its definition"
+                };
                 self.error(
-                    TypeError::new(format!("type parameter '{}' of {owner} is never used", p.name), p.span)
-                        .help(format!("remove it, or use it in {where_}")),
+                    TypeError::new(
+                        format!("type parameter '{}' of {owner} is never used", p.name),
+                        p.span,
+                    )
+                    .help(format!("remove it, or use it in {where_}")),
                 );
             }
         }
@@ -230,8 +287,11 @@ impl Checker {
         if self.type_params.contains(name) {
             if !args.is_empty() {
                 self.error(
-                    TypeError::new(format!("type parameter '{name}' takes no type arguments"), span)
-                        .help(format!("write `{name}`")),
+                    TypeError::new(
+                        format!("type parameter '{name}' takes no type arguments"),
+                        span,
+                    )
+                    .help(format!("write `{name}`")),
                 );
             }
             return Ty::Param(name.clone());
@@ -266,7 +326,10 @@ impl Checker {
             };
             let mut err = TypeError::new(message, span).help(format!("write `{example}`"));
             if !params.is_empty() {
-                err = err.note(format!("'{name}' is declared as `{name}<{}>`", params.join(", ")));
+                err = err.note(format!(
+                    "'{name}' is declared as `{name}<{}>`",
+                    params.join(", ")
+                ));
             }
             self.error(err);
             return Ty::Error;
@@ -306,7 +369,8 @@ impl Checker {
     fn comparable_field(&self, t: &Ty, visiting: &mut HashSet<Id>) -> bool {
         match t {
             Ty::Named(n, args) => {
-                self.comparable(n, visiting) && args.iter().all(|a| self.comparable_field(a, visiting))
+                self.comparable(n, visiting)
+                    && args.iter().all(|a| self.comparable_field(a, visiting))
             }
             // Checked against the type argument wherever the type is used.
             Ty::Param(_) => true,
@@ -317,11 +381,15 @@ impl Checker {
     /// A help message for using the type name `name` as a variable, if it is one.
     pub(super) fn type_used_as_value(&self, name: &Id) -> Option<String> {
         if self.structs.contains_key(name) {
-            return Some(format!("'{name}' is a struct; make one with `{name} {{ ... }}`"));
+            return Some(format!(
+                "'{name}' is a struct; make one with `{name} {{ ... }}`"
+            ));
         }
         let first = self.enums.get(name)?.variants.first();
         Some(match first {
-            Some((v, _)) => format!("'{name}' is an enum; make a value with one of its variants, e.g. `{name}::{v}`"),
+            Some((v, _)) => format!(
+                "'{name}' is an enum; make a value with one of its variants, e.g. `{name}::{v}`"
+            ),
             None => format!("'{name}' is an enum with no variants, so it has no values"),
         })
     }
@@ -335,11 +403,24 @@ impl Checker {
     }
 
     /// `obj.name`, where `obj` (at `obj_span`) has type `t`.
-    pub(super) fn field_on(&mut self, t: &Ty, obj_span: Span, name: &Id, name_span: Span, span: Span) -> Ty {
+    pub(super) fn field_on(
+        &mut self,
+        t: &Ty,
+        obj_span: Span,
+        name: &Id,
+        name_span: Span,
+        span: Span,
+    ) -> Ty {
         let t = t.clone();
         if let Ty::Named(n, _) = self.resolve(&t) {
             if let Some(help) = self.method_not_called(&n, name) {
-                self.error(TypeError::new(format!("'{name}' is a function of '{n}', not a field"), name_span).help(help));
+                self.error(
+                    TypeError::new(
+                        format!("'{name}' is a function of '{n}', not a field"),
+                        name_span,
+                    )
+                    .help(help),
+                );
                 return Ty::Error;
             }
         }
@@ -381,7 +462,10 @@ impl Checker {
             }
             other => {
                 let shown = self.show(&other);
-                self.error(TypeError::new(format!("{shown} has no field '{name}'"), name_span));
+                self.error(TypeError::new(
+                    format!("{shown} has no field '{name}'"),
+                    name_span,
+                ));
                 Ty::Error
             }
         }
@@ -389,7 +473,11 @@ impl Checker {
 
     /// Suggestions for a field name that `struct_name` doesn't have.
     fn field_help(&self, struct_name: &Id) -> Vec<Id> {
-        self.structs[struct_name].fields.iter().map(|(f, _)| f.clone()).collect()
+        self.structs[struct_name]
+            .fields
+            .iter()
+            .map(|(f, _)| f.clone())
+            .collect()
     }
 
     fn no_field(&mut self, struct_name: &Id, name: &Id, span: Span, fields: Vec<Id>) {
@@ -399,12 +487,22 @@ impl Checker {
             None => format!("its fields are: {}", fields.join(", ")),
         };
         self.error(
-            TypeError::new(format!("struct '{struct_name}' has no field '{name}'"), span).help(help),
+            TypeError::new(
+                format!("struct '{struct_name}' has no field '{name}'"),
+                span,
+            )
+            .help(help),
         );
     }
 
     /// `Name { field: value, ..base }`
-    pub(super) fn struct_lit(&mut self, name: &Id, fields: &[FieldInit], base: Option<&Expr>, span: Span) -> Ty {
+    pub(super) fn struct_lit(
+        &mut self,
+        name: &Id,
+        fields: &[FieldInit],
+        base: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
         let name_span = token_span(span, name);
         let Some(info) = self.structs.get(name).cloned() else {
             for f in fields {
@@ -427,12 +525,18 @@ impl Checker {
                     self.no_field(name, &f.name, f.span, help);
                 }
                 Some(i) if !seen.insert(i) => {
-                    self.error(TypeError::new(format!("field '{}' is given more than once", f.name), f.span));
+                    self.error(TypeError::new(
+                        format!("field '{}' is given more than once", f.name),
+                        f.span,
+                    ));
                 }
                 Some(i) => {
                     let expected = Self::subst(&info.fields[i].1, &map);
                     self.expect(&expected, &found, f.value.span, |e, fd| {
-                        format!("mismatched types: field '{}' of '{name}' is {e}, but was given {fd}", f.name)
+                        format!(
+                            "mismatched types: field '{}' of '{name}' is {e}, but was given {fd}",
+                            f.name
+                        )
                     });
                 }
             }
@@ -455,7 +559,11 @@ impl Checker {
                     .map(|(_, (n, _))| format!("'{n}'"))
                     .collect();
                 if !missing.is_empty() {
-                    let what = if missing.len() == 1 { "field" } else { "fields" };
+                    let what = if missing.len() == 1 {
+                        "field"
+                    } else {
+                        "fields"
+                    };
                     self.error(
                         TypeError::new(
                             format!("missing {what} {} in '{name}'", join_and(&missing)),
@@ -471,7 +579,10 @@ impl Checker {
 
     fn not_a_struct(&mut self, name: &Id, span: Span) {
         let err = if let Some(info) = self.enums.get(name) {
-            let example = info.variants.first().map_or(String::new(), |(v, _)| format!(", e.g. `{name}::{v}`"));
+            let example = info
+                .variants
+                .first()
+                .map_or(String::new(), |(v, _)| format!(", e.g. `{name}::{v}`"));
             TypeError::new(format!("'{name}' is an enum, not a struct"), span)
                 .help(format!("make a value with one of its variants{example}"))
         } else {
@@ -487,7 +598,12 @@ impl Checker {
     /// The index of variant `Enum::Variant` and the types of the values it
     /// holds, for a new use of the enum with fresh type arguments, which make
     /// up the returned type. Reports it if there is no such variant.
-    fn lookup_variant(&mut self, enum_name: &Id, variant: &Id, span: Span) -> Option<(usize, Vec<Ty>, Ty)> {
+    fn lookup_variant(
+        &mut self,
+        enum_name: &Id,
+        variant: &Id,
+        span: Span,
+    ) -> Option<(usize, Vec<Ty>, Ty)> {
         let Some(info) = self.enums.get(enum_name) else {
             let err = if self.structs.contains_key(enum_name) {
                 TypeError::new(format!("'{enum_name}' is a struct, not an enum"), span)
@@ -517,7 +633,11 @@ impl Checker {
                     None => format!("its variants are: {}", names.join(", ")),
                 };
                 self.error(
-                    TypeError::new(format!("enum '{enum_name}' has no variant '{variant}'"), span).help(help),
+                    TypeError::new(
+                        format!("enum '{enum_name}' has no variant '{variant}'"),
+                        span,
+                    )
+                    .help(help),
                 );
                 None
             }
@@ -534,7 +654,10 @@ impl Checker {
             let name = variant_display(enum_name, variant);
             self.error(
                 TypeError::new(
-                    format!("variant '{name}' holds {}, so it must be given them", plural(tys.len(), "value")),
+                    format!(
+                        "variant '{name}' holds {}, so it must be given them",
+                        plural(tys.len(), "value")
+                    ),
                     span,
                 )
                 .help(format!("construct it with `{name}({blanks})`")),
@@ -544,7 +667,14 @@ impl Checker {
     }
 
     /// `Enum::Variant(args)`
-    pub(super) fn construct_variant(&mut self, enum_name: &Id, variant: &Id, args: &[Expr], callee: Span, span: Span) -> Ty {
+    pub(super) fn construct_variant(
+        &mut self,
+        enum_name: &Id,
+        variant: &Id,
+        args: &[Expr],
+        callee: Span,
+        span: Span,
+    ) -> Ty {
         let Some((_, tys, this)) = self.lookup_variant(enum_name, variant, callee) else {
             for a in args {
                 self.expr(a);
@@ -554,8 +684,11 @@ impl Checker {
         let name = variant_display(enum_name, variant);
         if tys.len() != args.len() || tys.is_empty() {
             let err = if tys.is_empty() {
-                TypeError::new(format!("variant '{name}' holds no values, so it can't be called"), span)
-                    .help(format!("write `{name}` without parentheses"))
+                TypeError::new(
+                    format!("variant '{name}' holds no values, so it can't be called"),
+                    span,
+                )
+                .help(format!("write `{name}` without parentheses"))
             } else {
                 TypeError::new(
                     format!(
@@ -576,7 +709,10 @@ impl Checker {
         for (i, (arg, t)) in args.iter().zip(&tys).enumerate() {
             let found = self.expr(arg);
             self.expect(t, &found, arg.span, |e, f| {
-                format!("mismatched types: value {} of '{name}' is {e}, found {f}", i + 1)
+                format!(
+                    "mismatched types: value {} of '{name}' is {e}, found {f}",
+                    i + 1
+                )
             });
         }
         this
@@ -597,7 +733,9 @@ impl Checker {
             patterns_ok &= self.errors.len() == before;
             if let Some(guard) = &arm.guard {
                 let g = self.expr(guard);
-                self.expect(&Ty::Bool, &g, guard.span, |_, f| format!("a match guard must be a bool, found {f}"));
+                self.expect(&Ty::Bool, &g, guard.span, |_, f| {
+                    format!("a match guard must be a bool, found {f}")
+                });
             }
             let found = self.stmt(&arm.body);
             self.scopes.pop();
@@ -613,7 +751,11 @@ impl Checker {
                     }
                 }
             }
-            rows.push(Row { pat, guarded: arm.guard.is_some(), span: arm.pattern.span });
+            rows.push(Row {
+                pat,
+                guarded: arm.guard.is_some(),
+                span: arm.pattern.span,
+            });
         }
 
         if patterns_ok {
@@ -630,7 +772,10 @@ impl Checker {
             PatternKind::Wildcard => Pat::Wild,
             PatternKind::Binding(var) => {
                 if let Ty::Named(n, _) = self.resolve(expected) {
-                    let is_variant = self.enums.get(&n).is_some_and(|e| e.variants.iter().any(|(v, _)| *v == var.name));
+                    let is_variant = self
+                        .enums
+                        .get(&n)
+                        .is_some_and(|e| e.variants.iter().any(|(v, _)| *v == var.name));
                     if is_variant {
                         self.error(
                             TypeError::new(
@@ -662,8 +807,14 @@ impl Checker {
                 self.pattern_type(&Ty::Bool, expected, p.span);
                 Pat::Ctor(Ctor::Bool(*b), vec![])
             }
-            PatternKind::Variant { enum_name, variant, fields, parens } => {
-                let Some((index, tys, this)) = self.lookup_variant(enum_name, variant, p.span) else {
+            PatternKind::Variant {
+                enum_name,
+                variant,
+                fields,
+                parens,
+            } => {
+                let Some((index, tys, this)) = self.lookup_variant(enum_name, variant, p.span)
+                else {
                     self.bind_unchecked(fields.iter(), names);
                     return Pat::Wild;
                 };
@@ -672,8 +823,11 @@ impl Checker {
                     let name = variant_display(enum_name, variant);
                     let err = if !parens {
                         let blanks = vec!["_"; tys.len()].join(", ");
-                        TypeError::new(format!("variant '{name}' holds {}", plural(tys.len(), "value")), p.span)
-                            .help(format!("match its values too: `{name}({blanks})`"))
+                        TypeError::new(
+                            format!("variant '{name}' holds {}", plural(tys.len(), "value")),
+                            p.span,
+                        )
+                        .help(format!("match its values too: `{name}({blanks})`"))
                     } else if tys.is_empty() {
                         TypeError::new(format!("variant '{name}' holds no values"), p.span)
                             .help(format!("write `{name}` without parentheses"))
@@ -691,7 +845,11 @@ impl Checker {
                     self.bind_unchecked(fields.iter(), names);
                     return Pat::Wild;
                 }
-                let subs = fields.iter().zip(&tys).map(|(f, t)| self.pattern(f, t, names)).collect();
+                let subs = fields
+                    .iter()
+                    .zip(&tys)
+                    .map(|(f, t)| self.pattern(f, t, names))
+                    .collect();
                 Pat::Ctor(Ctor::Variant(index), subs)
             }
             PatternKind::Struct { name, fields, rest } => {
@@ -714,7 +872,9 @@ impl Checker {
                         Some(i) => {
                             if !seen.insert(i) {
                                 self.error(TypeError::new(
-                                    format!("field '{field}' appears more than once in this pattern"),
+                                    format!(
+                                        "field '{field}' appears more than once in this pattern"
+                                    ),
                                     *span,
                                 ));
                             }
@@ -731,10 +891,17 @@ impl Checker {
                     .map(|(_, (n, _))| format!("'{n}'"))
                     .collect();
                 if !rest && !missing.is_empty() {
-                    let what = if missing.len() == 1 { "field" } else { "fields" };
+                    let what = if missing.len() == 1 {
+                        "field"
+                    } else {
+                        "fields"
+                    };
                     self.error(
-                        TypeError::new(format!("pattern does not mention {what} {}", join_and(&missing)), p.span)
-                            .help("list every field, or end the pattern with `..` to ignore the rest"),
+                        TypeError::new(
+                            format!("pattern does not mention {what} {}", join_and(&missing)),
+                            p.span,
+                        )
+                        .help("list every field, or end the pattern with `..` to ignore the rest"),
                     );
                 }
                 Pat::Ctor(Ctor::Struct, subs)
@@ -744,7 +911,11 @@ impl Checker {
 
     /// Define the bindings in patterns that couldn't be checked, so their
     /// uses don't cause more errors.
-    fn bind_unchecked<'p>(&mut self, patterns: impl Iterator<Item = &'p Pattern>, names: &mut HashSet<Id>) {
+    fn bind_unchecked<'p>(
+        &mut self,
+        patterns: impl Iterator<Item = &'p Pattern>,
+        names: &mut HashSet<Id>,
+    ) {
         for p in patterns {
             self.pattern(p, &Ty::Error, names);
         }
@@ -813,7 +984,8 @@ impl Checker {
         let help = if missing.len() == 1 && !more {
             format!("add an arm for it: `{} => ...`", missing[0])
         } else {
-            "add arms for the missing cases, or a `_ => ...` arm to match everything else".to_string()
+            "add arms for the missing cases, or a `_ => ...` arm to match everything else"
+                .to_string()
         };
         let mut err = TypeError::new(format!("non-exhaustive match: {list} not covered"), span)
             .help(help)
@@ -835,7 +1007,11 @@ impl Checker {
             Pat::Ctor(c, args) => {
                 let fields = self.ctor_fields(ty, c);
                 let q: Vec<Pat> = args.iter().chain(rest).cloned().collect();
-                let w = self.useful(&specialize(rows, c, args.len()), &q, &concat(&fields, &tys[1..]))?;
+                let w = self.useful(
+                    &specialize(rows, c, args.len()),
+                    &q,
+                    &concat(&fields, &tys[1..]),
+                )?;
                 Some(rebuild(c, args.len(), w))
             }
             Pat::Wild => {
@@ -850,12 +1026,21 @@ impl Checker {
                 match &all {
                     // Every constructor of the type appears: `_` is useful
                     // exactly if it is for one of them.
-                    Some(all) if all.iter().all(|c| heads.contains(&c)) => all.iter().find_map(|c| {
-                        let fields = self.ctor_fields(ty, c);
-                        let q: Vec<Pat> = vec![Pat::Wild; fields.len()].into_iter().chain(rest.iter().cloned()).collect();
-                        let w = self.useful(&specialize(rows, c, fields.len()), &q, &concat(&fields, &tys[1..]))?;
-                        Some(rebuild(c, fields.len(), w))
-                    }),
+                    Some(all) if all.iter().all(|c| heads.contains(&c)) => {
+                        all.iter().find_map(|c| {
+                            let fields = self.ctor_fields(ty, c);
+                            let q: Vec<Pat> = vec![Pat::Wild; fields.len()]
+                                .into_iter()
+                                .chain(rest.iter().cloned())
+                                .collect();
+                            let w = self.useful(
+                                &specialize(rows, c, fields.len()),
+                                &q,
+                                &concat(&fields, &tys[1..]),
+                            )?;
+                            Some(rebuild(c, fields.len(), w))
+                        })
+                    }
                     // Some constructor doesn't appear, so only the rows that
                     // start with `_` can stop a value built with it.
                     _ => {
@@ -896,12 +1081,24 @@ impl Checker {
     /// The types of the values a constructor of `ty` holds.
     fn ctor_fields(&self, ty: &Ty, c: &Ctor) -> Vec<Ty> {
         let (params, tys): (&[Id], Vec<&Ty>) = match (ty, c) {
-            (Ty::Named(n, _), Ctor::Variant(i)) => (&self.enums[n].params, self.enums[n].variants[*i].1.iter().collect()),
-            (Ty::Named(n, _), Ctor::Struct) => (&self.structs[n].params, self.structs[n].fields.iter().map(|(_, t)| t).collect()),
+            (Ty::Named(n, _), Ctor::Variant(i)) => (
+                &self.enums[n].params,
+                self.enums[n].variants[*i].1.iter().collect(),
+            ),
+            (Ty::Named(n, _), Ctor::Struct) => (
+                &self.structs[n].params,
+                self.structs[n].fields.iter().map(|(_, t)| t).collect(),
+            ),
             _ => return Vec::new(),
         };
-        let Ty::Named(_, args) = ty else { unreachable!() };
-        let map = params.iter().cloned().zip(args.iter().map(|a| self.zonk(a))).collect();
+        let Ty::Named(_, args) = ty else {
+            unreachable!()
+        };
+        let map = params
+            .iter()
+            .cloned()
+            .zip(args.iter().map(|a| self.zonk(a)))
+            .collect();
         tys.into_iter().map(|t| Self::subst(t, &map)).collect()
     }
 
@@ -911,7 +1108,11 @@ impl Checker {
             return "_".to_string();
         };
         let fields = self.ctor_fields(ty, c);
-        let args: Vec<String> = args.iter().zip(&fields).map(|(a, t)| self.show_pat(a, t)).collect();
+        let args: Vec<String> = args
+            .iter()
+            .zip(&fields)
+            .map(|(a, t)| self.show_pat(a, t))
+            .collect();
         match (ty, c) {
             (Ty::Named(n, _), Ctor::Variant(i)) => {
                 let v = variant_display(n, &self.enums[n].variants[*i].0);
@@ -964,7 +1165,9 @@ fn specialize(rows: &[Vec<Pat>], c: &Ctor, arity: usize) -> Vec<Vec<Pat>> {
 /// into one built with `c`.
 fn rebuild(c: &Ctor, arity: usize, mut w: Vec<Pat>) -> Vec<Pat> {
     let rest = w.split_off(arity);
-    std::iter::once(Pat::Ctor(c.clone(), w)).chain(rest).collect()
+    std::iter::once(Pat::Ctor(c.clone(), w))
+        .chain(rest)
+        .collect()
 }
 
 fn concat(a: &[Ty], b: &[Ty]) -> Vec<Ty> {

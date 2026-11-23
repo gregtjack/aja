@@ -19,17 +19,40 @@ pub type Reg = u16;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Op {
     // ---- Constants and moves ----------------------------------------------
-    LoadVoid { dst: Reg },
-    LoadBool { dst: Reg, value: bool },
-    LoadInt { dst: Reg, value: i64 },
-    LoadFloat { dst: Reg, value: f64 },
+    LoadVoid {
+        dst: Reg,
+    },
+    LoadBool {
+        dst: Reg,
+        value: bool,
+    },
+    LoadInt {
+        dst: Reg,
+        value: i64,
+    },
+    LoadFloat {
+        dst: Reg,
+        value: f64,
+    },
     /// Load the string literal numbered `index` (see [`Literals`]).
-    LoadStr { dst: Reg, index: u32 },
-    Move { dst: Reg, src: Reg },
+    LoadStr {
+        dst: Reg,
+        index: u32,
+    },
+    Move {
+        dst: Reg,
+        src: Reg,
+    },
 
     // ---- Globals: built-ins, top-level functions, REPL variables -------------
-    GetGlobal { dst: Reg, index: u32 },
-    SetGlobal { index: u32, src: Reg },
+    GetGlobal {
+        dst: Reg,
+        index: u32,
+    },
+    SetGlobal {
+        index: u32,
+        src: Reg,
+    },
 
     // ---- Captured variables ----------------------------------------------------
     // A closure copies the variables it captures when it is made. A `var`
@@ -37,73 +60,213 @@ pub enum Op {
     // cell, so the function that declares the `var` and every closure that
     // captures it share one variable. Immutable variables need no cell.
     /// Put the value in `src` into a new cell, stored in `dst`.
-    NewCell { dst: Reg, src: Reg },
-    GetCell { dst: Reg, cell: Reg },
-    SetCell { cell: Reg, src: Reg },
+    NewCell {
+        dst: Reg,
+        src: Reg,
+    },
+    GetCell {
+        dst: Reg,
+        cell: Reg,
+    },
+    SetCell {
+        cell: Reg,
+        src: Reg,
+    },
     /// Load the current closure's captured value number `index`.
-    GetUpvalue { dst: Reg, index: u16 },
+    GetUpvalue {
+        dst: Reg,
+        index: u16,
+    },
     /// Load the value in the cell the current closure captured as number
     /// `index`.
-    GetUpvalueCell { dst: Reg, index: u16 },
+    GetUpvalueCell {
+        dst: Reg,
+        index: u16,
+    },
     /// Store into the cell the current closure captured as number `index`.
-    SetUpvalueCell { index: u16, src: Reg },
+    SetUpvalueCell {
+        index: u16,
+        src: Reg,
+    },
     /// Make a closure from `protos[proto]`, capturing the values its
     /// [`Proto::captures`] lists.
-    Closure { dst: Reg, proto: u32 },
+    Closure {
+        dst: Reg,
+        proto: u32,
+    },
 
     // ---- Structs and enums ---------------------------------------------------
     /// Make a struct or enum value described by `layouts[layout]`, holding
     /// the `count` values in the registers from `start` on.
-    NewData { dst: Reg, layout: u32, start: Reg, count: u16 },
+    NewData {
+        dst: Reg,
+        layout: u32,
+        start: Reg,
+        count: u16,
+    },
     /// Read the field (or variant value) at `index` of the value in `obj`.
-    GetField { dst: Reg, obj: Reg, index: u16 },
+    GetField {
+        dst: Reg,
+        obj: Reg,
+        index: u16,
+    },
     /// Whether the enum value in `obj` is the variant numbered `tag`.
-    TestTag { dst: Reg, obj: Reg, tag: u32 },
+    TestTag {
+        dst: Reg,
+        obj: Reg,
+        tag: u32,
+    },
 
     // ---- Arithmetic --------------------------------------------------------------
-    AddI { dst: Reg, a: Reg, b: Reg },
-    SubI { dst: Reg, a: Reg, b: Reg },
-    MulI { dst: Reg, a: Reg, b: Reg },
-    DivI { dst: Reg, a: Reg, b: Reg },
-    RemI { dst: Reg, a: Reg, b: Reg },
-    NegI { dst: Reg, src: Reg },
-    AddF { dst: Reg, a: Reg, b: Reg },
-    SubF { dst: Reg, a: Reg, b: Reg },
-    MulF { dst: Reg, a: Reg, b: Reg },
-    DivF { dst: Reg, a: Reg, b: Reg },
-    RemF { dst: Reg, a: Reg, b: Reg },
-    NegF { dst: Reg, src: Reg },
+    AddI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    SubI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    MulI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    DivI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    RemI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    NegI {
+        dst: Reg,
+        src: Reg,
+    },
+    AddF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    SubF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    MulF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    DivF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    RemF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    NegF {
+        dst: Reg,
+        src: Reg,
+    },
     /// Concatenate two strings into a new one.
-    AddS { dst: Reg, a: Reg, b: Reg },
+    AddS {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
 
     // ---- Comparison (`>` and `>=` swap the operands of `<` and `<=`) --------
-    LtI { dst: Reg, a: Reg, b: Reg },
-    LeI { dst: Reg, a: Reg, b: Reg },
-    LtF { dst: Reg, a: Reg, b: Reg },
-    LeF { dst: Reg, a: Reg, b: Reg },
-    EqI { dst: Reg, a: Reg, b: Reg },
-    EqF { dst: Reg, a: Reg, b: Reg },
-    EqB { dst: Reg, a: Reg, b: Reg },
-    EqS { dst: Reg, a: Reg, b: Reg },
+    LtI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    LeI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    LtF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    LeF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    EqI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    EqF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    EqB {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    EqS {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
     /// Structural equality of two values of the same struct or enum type.
-    EqD { dst: Reg, a: Reg, b: Reg },
-    Not { dst: Reg, src: Reg },
+    EqD {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    Not {
+        dst: Reg,
+        src: Reg,
+    },
 
     // ---- Control flow -------------------------------------------------------------
-    Jump { target: u32 },
-    JumpIfFalse { cond: Reg, target: u32 },
-    JumpIfTrue { cond: Reg, target: u32 },
+    Jump {
+        target: u32,
+    },
+    JumpIfFalse {
+        cond: Reg,
+        target: u32,
+    },
+    JumpIfTrue {
+        cond: Reg,
+        target: u32,
+    },
     /// Call the function in `callee` with the `argc` arguments in the
     /// registers right after it, and put the result in `dst`. The callee's
     /// register window starts at the first argument, so arguments become its
     /// parameters without being copied.
-    Call { dst: Reg, callee: Reg, argc: u8 },
+    Call {
+        dst: Reg,
+        callee: Reg,
+        argc: u8,
+    },
     /// Call the function in `callee` and return its result. The call reuses
     /// the current frame, so tail calls run in constant space however deep
     /// they recurse. The compiler emits it for every call whose result is
     /// returned directly.
-    TailCall { callee: Reg, argc: u8 },
-    Return { src: Reg },
+    TailCall {
+        callee: Reg,
+        argc: u8,
+    },
+    Return {
+        src: Reg,
+    },
     /// The end of a `match` whose arms all failed. The type checker proves
     /// every `match` exhaustive, so reaching this is a bug in the compiler.
     NoMatch,
@@ -172,7 +335,11 @@ impl fmt::Display for Proto {
     /// A listing of the bytecode, for debugging and tests.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = self.name.as_deref().unwrap_or("<anonymous>");
-        writeln!(f, "fn {name}{} ({} registers)", self.signature, self.num_regs)?;
+        writeln!(
+            f,
+            "fn {name}{} ({} registers)",
+            self.signature, self.num_regs
+        )?;
         for (i, c) in self.captures.iter().enumerate() {
             writeln!(f, "  capture {i}: {c:?}")?;
         }

@@ -41,7 +41,11 @@ impl LexicalError {
 
 impl fmt::Display for LexicalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: {}", self.start.line, self.start.col, self.message)
+        write!(
+            f,
+            "{}:{}: {}",
+            self.start.line, self.start.col, self.message
+        )
     }
 }
 
@@ -257,7 +261,11 @@ where
                     )
                 }
             }
-            _ => Err(LexicalError::new(start, self.get_location(), "invalid operator")),
+            _ => Err(LexicalError::new(
+                start,
+                self.get_location(),
+                "invalid operator",
+            )),
         }
     }
 
@@ -315,8 +323,10 @@ where
 
         let mut quote_end = start;
         quote_end.col += 1;
-        Err(LexicalError::new(start, quote_end, "unterminated string literal")
-            .help("add a closing '\"' to end the string"))
+        Err(
+            LexicalError::new(start, quote_end, "unterminated string literal")
+                .help("add a closing '\"' to end the string"),
+        )
     }
 
     fn tok_number(&mut self, c: char, start: Location) -> LexResult {
@@ -359,7 +369,11 @@ where
                     self.get_location(),
                     format!("integer literal '{}' is too large", num_str),
                 )
-                .help(format!("int values must be between {} and {}", i64::MIN, i64::MAX))),
+                .help(format!(
+                    "int values must be between {} and {}",
+                    i64::MIN,
+                    i64::MAX
+                ))),
             }
         }
     }
@@ -468,7 +482,10 @@ mod tests {
         assert_eq!(tokens[0].1, Token::Int(i64::MAX));
 
         let err = tokenize("9223372036854775808").unwrap_err();
-        assert_eq!(err.message, "integer literal '9223372036854775808' is too large");
+        assert_eq!(
+            err.message,
+            "integer literal '9223372036854775808' is too large"
+        );
         assert_eq!(
             err.help.as_deref(),
             Some("int values must be between -9223372036854775808 and 9223372036854775807")

@@ -52,7 +52,9 @@ impl Diagnostic {
     /// location in the prelude is shown in the prelude instead.
     pub fn render(&self, source: &str, path: &str, color: bool) -> String {
         let (source, path) = match self.span {
-            Some((start, _)) if start.source == Source::Prelude => (crate::prelude::SOURCE, "<prelude>"),
+            Some((start, _)) if start.source == Source::Prelude => {
+                (crate::prelude::SOURCE, "<prelude>")
+            }
             _ => (source, path),
         };
         let style = Style::new(color);
@@ -166,7 +168,10 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 /// The closest candidate to `name`, if any is close enough to be a likely typo.
-pub fn closest_match<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+pub fn closest_match<'a>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
     let max = (name.chars().count() / 3).max(1);
     candidates
         .into_iter()

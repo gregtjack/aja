@@ -26,8 +26,8 @@ use std::{
 
 use crate::{
     ast::{
-        types::Type, Arm, Definition, Expr, Expression, FieldInit, Id, Op1, Op2, Pattern,
-        Method, PatternKind, Program, Span, Statement, Variable,
+        types::Type, Arm, Definition, Expr, Expression, FieldInit, Id, Method, Op1, Op2, Pattern,
+        PatternKind, Program, Span, Statement, Variable,
     },
     builtins::BUILTINS,
     check::{self, OperandType, TryOn, Types},
@@ -118,7 +118,12 @@ impl Compiler {
     fn declare_methods<'d>(&mut self, defs: &'d [Definition]) -> Vec<(u32, Id, &'d Method)> {
         let mut methods = Vec::new();
         for def in defs {
-            let Definition::Impl { target: Type::Named(type_name, ..), methods: ms, .. } = def else {
+            let Definition::Impl {
+                target: Type::Named(type_name, ..),
+                methods: ms,
+                ..
+            } = def
+            else {
                 continue;
             };
             for m in ms {
@@ -132,13 +137,23 @@ impl Compiler {
 
     /// Compile functions from impls. A method is a function whose first
     /// parameter is `self`.
-    fn compile_methods(&mut self, methods: Vec<(u32, Id, &Method)>, types: &Types) -> Vec<(u32, Rc<Proto>)> {
+    fn compile_methods(
+        &mut self,
+        methods: Vec<(u32, Id, &Method)>,
+        types: &Types,
+    ) -> Vec<(u32, Rc<Proto>)> {
         methods
             .into_iter()
             .map(|(slot, global, m)| {
                 let captured = captured_locals(&m.params, &m.body, false);
                 let mut fc = FnCompiler::new(self, types, &captured, false);
-                let proto = fc.function(Some(global), &m.params, m.rtype.as_ref(), &m.body, m.name_span);
+                let proto = fc.function(
+                    Some(global),
+                    &m.params,
+                    m.rtype.as_ref(),
+                    &m.body,
+                    m.name_span,
+                );
                 (slot, Rc::new(proto))
             })
             .collect()
@@ -154,7 +169,8 @@ impl Compiler {
                     tag: 0,
                     fields: Some(fields.clone()),
                 });
-                self.data.insert(name.clone(), DataDef::Struct { layout, fields });
+                self.data
+                    .insert(name.clone(), DataDef::Struct { layout, fields });
             }
             Definition::Enum { name, variants, .. } => {
                 let variants = variants
@@ -631,7 +647,13 @@ impl<'a> FnCompiler<'a> {
             self.declare(var.name.clone(), reg, true);
             let closure = self.alloc();
             self.expr(value, closure);
-            self.emit(Op::SetCell { cell: reg, src: closure }, var.span);
+            self.emit(
+                Op::SetCell {
+                    cell: reg,
+                    src: closure,
+                },
+                var.span,
+            );
             self.release(closure);
             return;
         }
@@ -770,7 +792,8 @@ impl<'a> FnCompiler<'a> {
                 }
             }
             Expression::Call(callee, args)
-                if matches!(callee.kind, Expression::Path(..)) && self.types.function(callee).is_none() =>
+                if matches!(callee.kind, Expression::Path(..))
+                    && self.types.function(callee).is_none() =>
             {
                 let Expression::Path(enum_name, variant) = &callee.kind else {
                     unreachable!()
@@ -812,11 +835,31 @@ impl<'a> FnCompiler<'a> {
                 };
                 let tag = self.variant_tag(&enum_name.into(), &variant.into());
                 let ok = self.alloc();
-                self.emit(Op::TestTag { dst: ok, obj: value, tag }, span);
-                let jump = self.emit(Op::JumpIfTrue { cond: ok, target: 0 }, span);
+                self.emit(
+                    Op::TestTag {
+                        dst: ok,
+                        obj: value,
+                        tag,
+                    },
+                    span,
+                );
+                let jump = self.emit(
+                    Op::JumpIfTrue {
+                        cond: ok,
+                        target: 0,
+                    },
+                    span,
+                );
                 self.emit(Op::Return { src: value }, span);
                 self.patch(jump);
-                self.emit(Op::GetField { dst, obj: value, index: 0 }, span);
+                self.emit(
+                    Op::GetField {
+                        dst,
+                        obj: value,
+                        index: 0,
+                    },
+                    span,
+                );
                 self.release(mark);
             }
             Expression::Call(callee, args) => {
@@ -1275,7 +1318,11 @@ impl CaptureFinder {
                 let declare_first = value.is_closure() && !repl_global;
                 if declare_first {
                     let key = decl_key(var);
-                    self.scopes.last_mut().unwrap().1.push((var.name.clone(), key));
+                    self.scopes
+                        .last_mut()
+                        .unwrap()
+                        .1
+                        .push((var.name.clone(), key));
                 }
                 self.expr(value);
                 if !repl_global && !declare_first {

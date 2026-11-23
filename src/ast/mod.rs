@@ -28,7 +28,12 @@ pub enum Source {
 
 impl Location {
     pub fn new(pos: u32, line: u32, col: u32) -> Self {
-        Location { line, col, pos, source: Source::Program }
+        Location {
+            line,
+            col,
+            pos,
+            source: Source::Program,
+        }
     }
 }
 

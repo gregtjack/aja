@@ -1,7 +1,7 @@
 use crate::{
     ast::{
-        types::Type, Arm, Definition, Expr, Expression, FieldInit, Location, Pattern, PatternKind,
-        Method, Program, Span, Statement, TypeParam, Variable, VariantDef,
+        types::Type, Arm, Definition, Expr, Expression, FieldInit, Location, Method, Pattern,
+        PatternKind, Program, Span, Statement, TypeParam, Variable, VariantDef,
     },
     diagnostic::Diagnostic,
     lexer::SrcSpan,
@@ -301,7 +301,9 @@ mod tests {
     #[test]
     fn test_parse_reports_bad_input_without_panicking() {
         // `any` is not a type
-        assert!(create_parser("fn main() { let x: any = 1; x }").parse().is_err());
+        assert!(create_parser("fn main() { let x: any = 1; x }")
+            .parse()
+            .is_err());
         // Trailing tokens after the last definition
         assert!(create_parser("fn main() { 1 } 42").parse().is_err());
         // Input that ends mid-definition
@@ -344,18 +346,32 @@ mod tests {
             d => panic!("expected an enum, got {d:?}"),
         }
         match &program.definitions[2] {
-            Definition::Function { type_params, params, rtype, .. } => {
+            Definition::Function {
+                type_params,
+                params,
+                rtype,
+                ..
+            } => {
                 assert_eq!(names(type_params), ["A", "B"]);
                 assert_eq!(params[0].t.as_ref().unwrap().to_string(), "Pair<A, B>");
                 // `>>` closes two type argument lists.
-                assert_eq!(rtype.as_ref().unwrap().to_string(), "Pair<B, Option<Option<A>>>");
+                assert_eq!(
+                    rtype.as_ref().unwrap().to_string(),
+                    "Pair<B, Option<Option<A>>>"
+                );
             }
             d => panic!("expected a function, got {d:?}"),
         }
 
         let err = |src: &str| create_parser(src).parse().unwrap_err();
-        assert_eq!(err("fn f<>() {}").help.as_deref(), Some("leave out the '<>' if there are no type parameters"));
-        assert_eq!(err("fn f<int>(x: List<) {}").message, "expected a type, found ')'");
+        assert_eq!(
+            err("fn f<>() {}").help.as_deref(),
+            Some("leave out the '<>' if there are no type parameters")
+        );
+        assert_eq!(
+            err("fn f<int>(x: List<) {}").message,
+            "expected a type, found ')'"
+        );
         let e = err("fn f(x: int<str>) {}");
         assert_eq!(e.message, "type 'int' takes no type arguments");
         assert_eq!(e.help.as_deref(), Some("write `int`"));
@@ -367,62 +383,115 @@ mod tests {
         let e = create_parser("Some(1)").parse_expr_only().unwrap();
         match &e.kind {
             Expression::Call(callee, _) => {
-                assert!(matches!(&callee.kind, Expression::Path(en, v) if en == "Option" && v == "Some"))
+                assert!(
+                    matches!(&callee.kind, Expression::Path(en, v) if en == "Option" && v == "Some")
+                )
             }
             k => panic!("expected a call, got {k:?}"),
         }
         let e = create_parser("None").parse_expr_only().unwrap();
         assert!(matches!(&e.kind, Expression::Path(en, v) if en == "Option" && v == "None"));
         let p = create_parser("Err(e)").parse_pattern().unwrap();
-        assert!(matches!(&p.kind, PatternKind::Variant { enum_name, variant, parens: true, .. }
-            if enum_name == "Result" && variant == "Err"));
+        assert!(
+            matches!(&p.kind, PatternKind::Variant { enum_name, variant, parens: true, .. }
+            if enum_name == "Result" && variant == "Err")
+        );
 
         // `?` is postfix, binding like a call: `f(x)?.y` is `((f(x))?).y`.
         let e = create_parser("f(x)?.y").parse_expr_only().unwrap();
-        let Expression::Field(inner, name, _) = &e.kind else { panic!("expected a field, got {e:?}") };
+        let Expression::Field(inner, name, _) = &e.kind else {
+            panic!("expected a field, got {e:?}")
+        };
         assert_eq!(name, "y");
-        assert!(matches!(&inner.kind, Expression::Try(call) if matches!(call.kind, Expression::Call(..))));
+        assert!(
+            matches!(&inner.kind, Expression::Try(call) if matches!(call.kind, Expression::Call(..)))
+        );
         let e = create_parser("a? + b?").parse_expr_only().unwrap();
         assert!(matches!(&e.kind, Expression::BinOp(l, _, r)
             if matches!(l.kind, Expression::Try(_)) && matches!(r.kind, Expression::Try(_))));
 
         // The variants' names can't be declared as other names.
         let err = |src: &str| create_parser(src).parse().unwrap_err().message;
-        assert_eq!(err("fn main() { let None = 1; }"), "'None' is a variant of 'Option', so it can't be used as a variable name");
-        assert_eq!(err("fn f(Ok: int) { }"), "'Ok' is a variant of 'Result', so it can't be used as a parameter name");
-        assert_eq!(err("fn Some() { }"), "'Some' is a variant of 'Option', so it can't be used as a function name");
+        assert_eq!(
+            err("fn main() { let None = 1; }"),
+            "'None' is a variant of 'Option', so it can't be used as a variable name"
+        );
+        assert_eq!(
+            err("fn f(Ok: int) { }"),
+            "'Ok' is a variant of 'Result', so it can't be used as a parameter name"
+        );
+        assert_eq!(
+            err("fn Some() { }"),
+            "'Some' is a variant of 'Option', so it can't be used as a function name"
+        );
     }
 
     #[test]
     fn test_parse_impls() {
-        let src = "impl<T> Option<T> { fn get(self, d: T) -> T { d } fn none() -> Option<T> { None } }";
+        let src =
+            "impl<T> Option<T> { fn get(self, d: T) -> T { d } fn none() -> Option<T> { None } }";
         let program = create_parser(src).parse().unwrap();
-        let Definition::Impl { type_params, target, methods } = &program.definitions[0] else {
+        let Definition::Impl {
+            type_params,
+            target,
+            methods,
+        } = &program.definitions[0]
+        else {
             panic!("expected an impl, got {:?}", program.definitions[0]);
         };
         assert_eq!(type_params.len(), 1);
         assert_eq!(target.to_string(), "Option<T>");
         assert_eq!(methods.len(), 2);
         assert!(methods[0].has_self);
-        assert_eq!(methods[0].params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["self", "d"]);
+        assert_eq!(
+            methods[0]
+                .params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["self", "d"]
+        );
         assert!(!methods[1].has_self);
 
         let err = |src: &str| create_parser(src).parse().unwrap_err();
-        assert_eq!(err("impl P { fn f(self: P) { } }").message, "'self' has no type annotation");
-        assert_eq!(err("fn f(self) { }").message, "'self' can't be used as a parameter name");
-        assert_eq!(err("impl P { fn f(x: int, self) { } }").message, "'self' can't be used as a parameter name");
-        assert_eq!(err("fn main() { let self = 1; }").message, "'self' can't be used as a variable name");
-        assert_eq!(err("impl P { let x = 1; }").help.as_deref(), Some("an impl can only hold functions"));
+        assert_eq!(
+            err("impl P { fn f(self: P) { } }").message,
+            "'self' has no type annotation"
+        );
+        assert_eq!(
+            err("fn f(self) { }").message,
+            "'self' can't be used as a parameter name"
+        );
+        assert_eq!(
+            err("impl P { fn f(x: int, self) { } }").message,
+            "'self' can't be used as a parameter name"
+        );
+        assert_eq!(
+            err("fn main() { let self = 1; }").message,
+            "'self' can't be used as a variable name"
+        );
+        assert_eq!(
+            err("impl P { let x = 1; }").help.as_deref(),
+            Some("an impl can only hold functions")
+        );
     }
 
     #[test]
     fn test_struct_literals_need_parens_in_conditions() {
         // `p == P` is the condition, and `{ x: 1 }` is a (malformed) body.
-        let err = create_parser("fn main() { if p == P { x: 1 } { } }").parse().unwrap_err();
+        let err = create_parser("fn main() { if p == P { x: 1 } { } }")
+            .parse()
+            .unwrap_err();
         assert!(err.help.unwrap().contains("(P { ... })"));
-        assert!(create_parser("fn main() { if p == (P { x: 1 }) { } }").parse().is_ok());
+        assert!(create_parser("fn main() { if p == (P { x: 1 }) { } }")
+            .parse()
+            .is_ok());
         // Plain variables before a block still work.
-        assert!(create_parser("fn main() { while ok { } match v { _ => 1 } }").parse().is_ok());
+        assert!(
+            create_parser("fn main() { while ok { } match v { _ => 1 } }")
+                .parse()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -473,15 +542,21 @@ mod tests {
 
     #[test]
     fn test_parse_function_types() {
-        let (ps, rt) = parse_closure("fn(f: (int, str) -> bool, g: () -> void) -> (int) -> int { f }");
+        let (ps, rt) =
+            parse_closure("fn(f: (int, str) -> bool, g: () -> void) -> (int) -> int { f }");
         let fn_t = |ps: Vec<Type>, r: Type| Type::Fn {
             param_types: ps,
             ret_type: Box::new(r),
         };
-        assert_eq!(ps[0].t, Some(fn_t(vec![Type::Int, Type::String], Type::Bool)));
+        assert_eq!(
+            ps[0].t,
+            Some(fn_t(vec![Type::Int, Type::String], Type::Bool))
+        );
         assert_eq!(ps[1].t, Some(fn_t(vec![], Type::Void)));
         assert_eq!(rt, Some(fn_t(vec![Type::Int], Type::Int)));
-        let err = create_parser("fn main() { let x: any = 1; x }").parse().unwrap_err();
+        let err = create_parser("fn main() { let x: any = 1; x }")
+            .parse()
+            .unwrap_err();
         assert!(err.help.unwrap().contains("no 'any' type"));
     }
 
@@ -492,8 +567,14 @@ mod tests {
         let e = err("fn apply(f: fn(int, str) -> bool) {}");
         assert_eq!(e.message, "function types are written without 'fn'");
         assert_eq!(e.help.as_deref(), Some("write `(int, str) -> bool`"));
-        assert_eq!(err("fn run(f: fn()) {}").help.as_deref(), Some("write `() -> void`"));
-        assert!(err("fn run(f: fn) {}").help.unwrap().contains("`(int, str) -> bool`"));
+        assert_eq!(
+            err("fn run(f: fn()) {}").help.as_deref(),
+            Some("write `() -> void`")
+        );
+        assert!(err("fn run(f: fn) {}")
+            .help
+            .unwrap()
+            .contains("`(int, str) -> bool`"));
         // The return type can't be left out.
         let e = err("fn run(f: (int)) {}");
         assert_eq!(e.message, "expected '->' and a return type, found ')'");
@@ -503,8 +584,14 @@ mod tests {
         );
         // Function types nest, and `->` groups to the right.
         let (_, rt) = parse_closure("fn() -> (int) -> (str) -> bool { f }");
-        let fn_t = |ps: Vec<Type>, r: Type| Type::Fn { param_types: ps, ret_type: Box::new(r) };
-        assert_eq!(rt, Some(fn_t(vec![Type::Int], fn_t(vec![Type::String], Type::Bool))));
+        let fn_t = |ps: Vec<Type>, r: Type| Type::Fn {
+            param_types: ps,
+            ret_type: Box::new(r),
+        };
+        assert_eq!(
+            rt,
+            Some(fn_t(vec![Type::Int], fn_t(vec![Type::String], Type::Bool)))
+        );
     }
 
     #[test]
@@ -556,7 +643,11 @@ impl std::error::Error for ParseError {}
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: {}", self.start.line, self.start.col, self.message)
+        write!(
+            f,
+            "{}:{}: {}",
+            self.start.line, self.start.col, self.message
+        )
     }
 }
 
@@ -674,7 +765,9 @@ where
         }
         let target = self.parse_type_name()?;
         if tok_matches!(self, Token::LeftParen) {
-            return Err(self.expected("'{'").help("an impl holds functions: `impl Point { fn norm(self) -> int { ... } }`"));
+            return Err(self
+                .expected("'{'")
+                .help("an impl holds functions: `impl Point { fn norm(self) -> int { ... } }`"));
         }
         self.consume(Token::LeftBrace)?;
         let mut methods = Vec::new();
@@ -683,10 +776,16 @@ where
             methods.push(self.parse_fn(true)?);
         }
         if !tok_matches!(self, Token::RightBrace) {
-            return Err(self.expected("'fn' or '}'").help("an impl can only hold functions"));
+            return Err(self
+                .expected("'fn' or '}'")
+                .help("an impl can only hold functions"));
         }
         self.next();
-        Ok(Definition::Impl { type_params, target, methods })
+        Ok(Definition::Impl {
+            type_params,
+            target,
+            methods,
+        })
     }
 
     /// The name after `struct` or `enum`.
@@ -711,14 +810,21 @@ where
             match self.peek().cloned() {
                 Some((start, Token::Ident(name), end)) => {
                     self.next();
-                    params.push(TypeParam { name, span: Span::new(start, end) });
+                    params.push(TypeParam {
+                        name,
+                        span: Span::new(start, end),
+                    });
                 }
                 Some((_, Token::GreaterThan, _)) if params.is_empty() => {
                     return Err(self
                         .expected("a type parameter name")
                         .help("leave out the '<>' if there are no type parameters"));
                 }
-                _ => return Err(self.expected("a type parameter name").help("type parameters are names, e.g. `<T>` or `<K, V>`")),
+                _ => {
+                    return Err(self
+                        .expected("a type parameter name")
+                        .help("type parameters are names, e.g. `<T>` or `<K, V>`"))
+                }
             }
             if tok_matches!(self, Token::Comma) {
                 self.next();
@@ -735,9 +841,9 @@ where
         let (name, name_span) = self.parse_type_def_name("struct")?;
         let type_params = self.parse_type_params()?;
         if tok_matches!(self, Token::LeftParen) {
-            return Err(self
-                .expected("'{'")
-                .help(format!("struct fields have names: `struct {name} {{ x: int, y: int }}`")));
+            return Err(self.expected("'{'").help(format!(
+                "struct fields have names: `struct {name} {{ x: int, y: int }}`"
+            )));
         }
         self.consume(Token::LeftBrace)?;
         let mut fields = Vec::new();
@@ -764,7 +870,12 @@ where
             return Err(self.expected("',' or '}'"));
         }
         self.consume(Token::RightBrace)?;
-        Ok(Definition::Struct { name, name_span, type_params, fields })
+        Ok(Definition::Struct {
+            name,
+            name_span,
+            type_params,
+            fields,
+        })
     }
 
     /// `enum Name { A, B(int, str), ... }`
@@ -799,7 +910,11 @@ where
                      for named fields, define a struct and hold it: `{variant}({variant}Info)`"
                 )));
             }
-            variants.push(VariantDef { name: variant, span, fields });
+            variants.push(VariantDef {
+                name: variant,
+                span,
+                fields,
+            });
             if tok_matches!(self, Token::Comma) {
                 self.next();
             } else {
@@ -810,7 +925,12 @@ where
             return Err(self.expected("',' or '}'"));
         }
         self.consume(Token::RightBrace)?;
-        Ok(Definition::Enum { name, name_span, type_params, variants })
+        Ok(Definition::Enum {
+            name,
+            name_span,
+            type_params,
+            variants,
+        })
     }
 
     /// Parse with struct literals allowed (`true`) or not, restoring the
@@ -936,12 +1056,7 @@ where
 
     /// Parse a sequence of expressions,
     /// defined by a separator, opening, and closing token
-    fn parse_expr_seq(
-        &mut self,
-        open: Token,
-        sep: Token,
-        close: Token,
-    ) -> ParseResult<Vec<Expr>> {
+    fn parse_expr_seq(&mut self, open: Token, sep: Token, close: Token) -> ParseResult<Vec<Expr>> {
         let mut xs = Vec::new();
         self.consume(open.clone())?;
         if !self.matches(vec![close.clone()]) {
@@ -978,9 +1093,9 @@ where
 
         let ttype = self.parse_type_annotation()?;
         if !tok_matches!(self, Token::Equal) {
-            return Err(self
-                .expected("'='")
-                .help(format!("variables must be initialized: `{keyword} {id} = <value>;`")));
+            return Err(self.expected("'='").help(format!(
+                "variables must be initialized: `{keyword} {id} = <value>;`"
+            )));
         }
         self.consume(Token::Equal)?;
         let e = self.parse_expr()?;
@@ -1097,8 +1212,10 @@ where
                 Expression::Field(..) => {
                     return Err(self
                         .error(equals.clone(), "cannot assign to a field".to_string())
-                        .help("struct fields can't be changed; make a new value instead, \
-                               e.g. `p = Point { x: 1, ..p }`"))
+                        .help(
+                            "struct fields can't be changed; make a new value instead, \
+                               e.g. `p = Point { x: 1, ..p }`",
+                        ))
                 }
                 _ => {
                     return Err(self
@@ -1215,7 +1332,10 @@ where
 
                 if es.len() > 255 {
                     let tok = self.prev_token.clone();
-                    return Err(self.error(tok, "a call cannot have more than 255 arguments".to_string()));
+                    return Err(self.error(
+                        tok,
+                        "a call cannot have more than 255 arguments".to_string(),
+                    ));
                 }
 
                 let span = Span::new(expr.span.start, self.last_end());
@@ -1351,9 +1471,9 @@ where
             let (field, span) = match self.peek().cloned() {
                 Some((start, Token::Ident(f), end)) => (f, Span::new(start, end)),
                 _ => {
-                    return Err(self
-                        .expected("a field name")
-                        .help(format!("struct literals name their fields: `{name} {{ x: 1, y: 2 }}`")))
+                    return Err(self.expected("a field name").help(format!(
+                        "struct literals name their fields: `{name} {{ x: 1, y: 2 }}`"
+                    )))
                 }
             };
             self.next();
@@ -1364,7 +1484,11 @@ where
                 // Shorthand: `Point { x }` means `Point { x: x }`.
                 Expr::new(Expression::Var(field.clone()), span)
             };
-            fields.push(FieldInit { name: field, span, value });
+            fields.push(FieldInit {
+                name: field,
+                span,
+                value,
+            });
             if tok_matches!(self, Token::Comma) {
                 self.next();
             } else if !tok_matches!(self, Token::RightBrace) {
@@ -1401,7 +1525,11 @@ where
             } else {
                 (Statement::Expr(self.parse_expr()?), false)
             };
-            arms.push(Arm { pattern, guard, body: Box::new(body) });
+            arms.push(Arm {
+                pattern,
+                guard,
+                body: Box::new(body),
+            });
             if tok_matches!(self, Token::Comma) {
                 self.next();
             } else if !is_block && !tok_matches!(self, Token::RightBrace) {
@@ -1484,7 +1612,11 @@ where
                             } else {
                                 // Shorthand: `Point { x }` binds the field to `x`.
                                 Pattern {
-                                    kind: PatternKind::Binding(Variable::new(field.clone(), None, span)),
+                                    kind: PatternKind::Binding(Variable::new(
+                                        field.clone(),
+                                        None,
+                                        span,
+                                    )),
                                     span,
                                 }
                             };
@@ -1501,16 +1633,25 @@ where
                         self.next();
                         PatternKind::Struct { name, fields, rest }
                     }
-                    _ => PatternKind::Binding(Variable::new(name, None, Span::new(start, name_end))),
+                    _ => {
+                        PatternKind::Binding(Variable::new(name, None, Span::new(start, name_end)))
+                    }
                 }
             }
             _ => return Err(self.expected("a pattern")),
         };
-        Ok(Pattern { kind, span: Span::new(start, self.last_end()) })
+        Ok(Pattern {
+            kind,
+            span: Span::new(start, self.last_end()),
+        })
     }
 
     /// The values of a variant pattern, after its name: `(a, b)`, or nothing.
-    fn parse_variant_pattern(&mut self, enum_name: crate::ast::Id, variant: crate::ast::Id) -> ParseResult<PatternKind> {
+    fn parse_variant_pattern(
+        &mut self,
+        enum_name: crate::ast::Id,
+        variant: crate::ast::Id,
+    ) -> ParseResult<PatternKind> {
         let mut fields = Vec::new();
         let parens = tok_matches!(self, Token::LeftParen);
         if parens {
@@ -1530,7 +1671,12 @@ where
             }
             self.consume(Token::RightParen)?;
         }
-        Ok(PatternKind::Variant { enum_name, variant, fields, parens })
+        Ok(PatternKind::Variant {
+            enum_name,
+            variant,
+            fields,
+            parens,
+        })
     }
 
     /// Reject a prelude variant's name (`None`) where a new name is
@@ -1543,7 +1689,10 @@ where
         }
         match prelude::variant_enum(name) {
             Some(e) => Err(self
-                .error(tok, format!("'{name}' is a variant of '{e}', so it can't be used as {what}"))
+                .error(
+                    tok,
+                    format!("'{name}' is a variant of '{e}', so it can't be used as {what}"),
+                )
                 .help("choose a different name")),
             None => Ok(()),
         }
@@ -1619,10 +1768,9 @@ where
                 }
                 let span = Span::new(start, self.last_end());
                 match builtin {
-                    Some(_) if !args.is_empty() => {
-                        Err(self.error(tok, format!("type '{v}' takes no type arguments"))
-                            .help(format!("write `{v}`")))
-                    }
+                    Some(_) if !args.is_empty() => Err(self
+                        .error(tok, format!("type '{v}' takes no type arguments"))
+                        .help(format!("write `{v}`"))),
                     Some(t) => Ok(t),
                     // Anything else that isn't built in names a struct, an
                     // enum, or a type parameter, which the checker looks up.
@@ -1657,7 +1805,9 @@ where
                 params.join(", ")
             )));
         }
-        let ret_type = self.parse_fn_return_type_annotation()?.unwrap_or(Type::Void);
+        let ret_type = self
+            .parse_fn_return_type_annotation()?
+            .unwrap_or(Type::Void);
         Ok(Type::Fn {
             param_types,
             ret_type: Box::new(ret_type),

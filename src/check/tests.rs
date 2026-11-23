@@ -2,7 +2,9 @@ use super::*;
 use crate::{lexer::tokenize, parse::Parser};
 
 fn check(src: &str) -> Result<(), Vec<TypeError>> {
-    let ast = Parser::new(tokenize(src).unwrap().into_iter()).parse().unwrap();
+    let ast = Parser::new(tokenize(src).unwrap().into_iter())
+        .parse()
+        .unwrap();
     check_program(&ast).map(|_| ())
 }
 
@@ -31,13 +33,18 @@ fn error(src: &str) -> (String, String) {
 
 #[track_caller]
 fn help(src: &str) -> String {
-    check(src).unwrap_err()[0].help.clone().expect("error should have help")
+    check(src).unwrap_err()[0]
+        .help
+        .clone()
+        .expect("error should have help")
 }
 
 #[test]
 fn well_typed_programs_pass() {
-    ok("fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
-        fn main() -> int { fib(10) }");
+    ok(
+        "fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+        fn main() -> int { fib(10) }",
+    );
     ok("fn main() { let x = 1; var y = x * 2; assert(y == 2); print(\"y =\", y, \"\\n\"); }");
     ok("fn main() -> bool { let a = true; a && !false || 1.5 < 2.0 }");
     ok("fn main() -> str { var s = \"a\"; s = \"b\"; s }");
@@ -59,15 +66,20 @@ fn closure_types_are_inferred_from_use() {
     // A parameter's type can come from a later call.
     ok("fn main() -> float { let add = fn(a, b) { a + b }; add(1.5, 2.0) }");
     // Closures capture and mutate their environment.
-    ok("fn counter() -> (int) -> int { var c = 0; fn(x) { c = c + x; c } }
-        fn main() -> int { let k = counter(); k(1); k(5) }");
+    ok(
+        "fn counter() -> (int) -> int { var c = 0; fn(x) { c = c + x; c } }
+        fn main() -> int { let k = counter(); k(1); k(5) }",
+    );
 }
 
 #[test]
 fn closures_are_not_polymorphic() {
     // No let-generalization: `id` gets one type, fixed by its first use.
     let (msg, at) = error("fn main() { let id = fn(x) { x }; id(1); id(true); }");
-    assert_eq!(msg, "mismatched types: argument 1 of function 'id' expects int, found bool");
+    assert_eq!(
+        msg,
+        "mismatched types: argument 1 of function 'id' expects int, found bool"
+    );
     assert_eq!(at, "true");
 }
 
@@ -89,7 +101,10 @@ fn main() -> int { apply(fn(s: str) { 1 }, 2) }",
 #[test]
 fn signatures_must_be_annotated() {
     let (msg, at) = error("fn double(n) -> int { n * 2 } fn main() -> int { double(2) }");
-    assert_eq!(msg, "parameter 'n' of function 'double' needs a type annotation");
+    assert_eq!(
+        msg,
+        "parameter 'n' of function 'double' needs a type annotation"
+    );
     assert_eq!(at, "n");
     // The suggestion uses what the body reveals.
     assert_eq!(
@@ -120,17 +135,28 @@ fn return_statements() {
     ok("fn f(b: bool) -> int { if b { return 1; } else { return 2; } } fn main() -> int { f(true) }");
     ok("fn f(b: bool) -> int { let x = if b { return 0; } else { 5 }; x } fn main() -> int { f(true) }");
     let (msg, at) = error("fn f() -> int { return \"no\"; } fn main() -> int { f() }");
-    assert_eq!(msg, "mismatched types: function 'f' is declared to return int, but this is str");
+    assert_eq!(
+        msg,
+        "mismatched types: function 'f' is declared to return int, but this is str"
+    );
     assert_eq!(at, "\"no\"");
     // A path that falls off the end of the body produces void.
-    let (msg, _) = error("fn f(b: bool) -> int { if b { return 1; } } fn main() -> int { f(true) }");
-    assert_eq!(msg, "mismatched types: function 'f' is declared to return int, but this is void");
+    let (msg, _) =
+        error("fn f(b: bool) -> int { if b { return 1; } } fn main() -> int { f(true) }");
+    assert_eq!(
+        msg,
+        "mismatched types: function 'f' is declared to return int, but this is void"
+    );
 }
 
 #[test]
 fn closure_return_types_must_agree() {
-    let (msg, at) = error("fn main() { let f = fn(b: bool) { if b { return 1; } \"s\" }; f(true); }");
-    assert_eq!(msg, "mismatched types: this closure returns int elsewhere, but this is str");
+    let (msg, at) =
+        error("fn main() { let f = fn(b: bool) { if b { return 1; } \"s\" }; f(true); }");
+    assert_eq!(
+        msg,
+        "mismatched types: this closure returns int elsewhere, but this is str"
+    );
     assert_eq!(at, "\"s\"");
 }
 
@@ -140,12 +166,27 @@ fn operator_errors() {
     assert_eq!(msg, "cannot apply '+' to int and str");
     assert_eq!(at, "a + \"s\"");
     let errors = check("fn main() { 1 + 2.0; }").unwrap_err();
-    assert_eq!(errors[0].notes, vec!["int and float are not converted automatically"]);
-    assert_eq!(error("fn main() { \"a\" < \"b\"; }").0, "cannot apply '<' to str and str");
-    assert_eq!(error("fn main() { -true; }").0, "cannot apply '-' to bool; it expects an int or float");
-    assert_eq!(error("fn main() { !1; }").0, "cannot apply '!' to int; it expects a bool");
+    assert_eq!(
+        errors[0].notes,
+        vec!["int and float are not converted automatically"]
+    );
+    assert_eq!(
+        error("fn main() { \"a\" < \"b\"; }").0,
+        "cannot apply '<' to str and str"
+    );
+    assert_eq!(
+        error("fn main() { -true; }").0,
+        "cannot apply '-' to bool; it expects an int or float"
+    );
+    assert_eq!(
+        error("fn main() { !1; }").0,
+        "cannot apply '!' to int; it expects a bool"
+    );
     let (msg, at) = error("fn main() { true && 5; }");
-    assert_eq!(msg, "'&&' expects bool operands, but the right operand is int");
+    assert_eq!(
+        msg,
+        "'&&' expects bool operands, but the right operand is int"
+    );
     assert_eq!(at, "5");
     let (msg, _) = error("fn main() { let f = fn() { 1 }; f == f; }");
     assert_eq!(msg, "cannot apply '==' to () -> int and () -> int");
@@ -155,11 +196,17 @@ fn operator_errors() {
 fn numeric_operators_constrain_inferred_types() {
     // `a + b` restricts `a` to int, float, or str, so a bool doesn't fit.
     let (msg, at) = error("fn main() { let add = fn(a, b) { a + b }; add(true, false); }");
-    assert_eq!(msg, "mismatched types: argument 1 of function 'add' expects {number or str}, found bool");
+    assert_eq!(
+        msg,
+        "mismatched types: argument 1 of function 'add' expects {number or str}, found bool"
+    );
     assert_eq!(at, "true");
     // `a - b` restricts it to int or float.
     let (msg, _) = error("fn main() { let sub = fn(a, b) { a - b }; sub(\"x\", \"y\"); }");
-    assert_eq!(msg, "mismatched types: argument 1 of function 'sub' expects {number}, found str");
+    assert_eq!(
+        msg,
+        "mismatched types: argument 1 of function 'sub' expects {number}, found str"
+    );
 }
 
 #[test]
@@ -167,7 +214,10 @@ fn conditions_must_be_bool() {
     let (msg, at) = error("fn main() { if 1 { 2 } else { 3 }; }");
     assert_eq!(msg, "'if' condition must be a bool, found int");
     assert_eq!(at, "1");
-    assert_eq!(error("fn main() { while \"x\" { } }").0, "'while' condition must be a bool, found str");
+    assert_eq!(
+        error("fn main() { while \"x\" { } }").0,
+        "'while' condition must be a bool, found str"
+    );
     let (msg, at) = error("fn main() { let x = if true { 1 } else { \"one\" }; }");
     assert_eq!(msg, "'if' and 'else' have incompatible types: int and str");
     assert_eq!(at, "\"one\"");
@@ -176,10 +226,16 @@ fn conditions_must_be_bool() {
 #[test]
 fn let_and_assignment() {
     let (msg, at) = error("fn main() { let x: str = 5; }");
-    assert_eq!(msg, "mismatched types: 'x' is declared as str but was given int");
+    assert_eq!(
+        msg,
+        "mismatched types: 'x' is declared as str but was given int"
+    );
     assert_eq!(at, "5");
     let (msg, at) = error("fn main() { var x = 1; x = \"s\"; }");
-    assert_eq!(msg, "mismatched types: cannot assign str to 'x', which has type int");
+    assert_eq!(
+        msg,
+        "mismatched types: cannot assign str to 'x', which has type int"
+    );
     assert_eq!(at, "\"s\"");
     // Shadowing introduces a new variable, which may have a new type.
     ok("fn main() -> str { let a: int = 1; let a: str = \"s\"; a }");
@@ -206,22 +262,37 @@ fn only_var_can_be_assigned() {
     ok("fn main() -> int { var x = 1; x = x + 1; x }");
     ok("fn main() -> int { var x: int = 1; let f = fn() { x = 2; }; f(); x }");
     let (msg, at) = error("fn main() { let x = 1; x = 2; }");
-    assert_eq!(msg, "cannot assign to 'x' because it was declared with 'let'");
+    assert_eq!(
+        msg,
+        "cannot assign to 'x' because it was declared with 'let'"
+    );
     assert_eq!(at, "x = 2");
-    assert_eq!(help("fn main() { let x = 1; x = 2; }"), "declare it with 'var' to make it mutable: `var x = ...;`");
+    assert_eq!(
+        help("fn main() { let x = 1; x = 2; }"),
+        "declare it with 'var' to make it mutable: `var x = ...;`"
+    );
     // Closures can't assign to a captured `let` either.
     let (msg, _) = error("fn main() { let x = 1; let f = fn() { x = 2; }; }");
-    assert_eq!(msg, "cannot assign to 'x' because it was declared with 'let'");
+    assert_eq!(
+        msg,
+        "cannot assign to 'x' because it was declared with 'let'"
+    );
     let (msg, at) = error("fn f(n: int) { n = 2; }");
     assert_eq!(msg, "cannot assign to 'n' because it is a parameter");
     assert_eq!(at, "n = 2");
-    assert_eq!(help("fn f(n: int) { n = 2; }"), "copy it into a mutable variable first: `var n = n;`");
+    assert_eq!(
+        help("fn f(n: int) { n = 2; }"),
+        "copy it into a mutable variable first: `var n = n;`"
+    );
     let (msg, _) = error("fn f(x: int) { match x { n => { n = 2; } } }");
     assert_eq!(msg, "cannot assign to 'n' because it is bound by a pattern");
     // A `var` can shadow a `let` or a parameter, and the other way round.
     ok("fn f(n: int) -> int { var n = n; n = n + 1; n }");
     let (msg, _) = error("fn main() { var x = 1; let x = x; x = 2; }");
-    assert_eq!(msg, "cannot assign to 'x' because it was declared with 'let'");
+    assert_eq!(
+        msg,
+        "cannot assign to 'x' because it was declared with 'let'"
+    );
 }
 
 #[test]
@@ -229,15 +300,24 @@ fn calls() {
     let (msg, at) = error("fn g(x: int) -> int { x } fn main() -> int { g(1, 2) }");
     assert_eq!(msg, "function 'g' takes 1 argument but 2 were given");
     assert_eq!(at, "g(1, 2)");
-    assert_eq!(error("fn main() { assert(); }").0, "function 'assert' takes 1 argument but 0 were given");
+    assert_eq!(
+        error("fn main() { assert(); }").0,
+        "function 'assert' takes 1 argument but 0 were given"
+    );
     assert_eq!(
         error("fn main() { sleep(\"long\"); }").0,
         "mismatched types: parameter 'ms' of function 'sleep' expects int, found str"
     );
     let (msg, at) = error("fn main() { let x = 1; x(2); }");
-    assert_eq!(msg, "cannot call a value of type int ('x' is not a function)");
+    assert_eq!(
+        msg,
+        "cannot call a value of type int ('x' is not a function)"
+    );
     assert_eq!(at, "x");
-    assert_eq!(error("fn main() { let p = print; }").0, "'print' can only be called directly");
+    assert_eq!(
+        error("fn main() { let p = print; }").0,
+        "'print' can only be called directly"
+    );
     ok("fn main() { println(\"n =\", 1, true); }");
 }
 
@@ -260,10 +340,16 @@ fn undefined_variables_suggest_close_names() {
 #[test]
 fn types_that_cannot_be_inferred_need_annotations() {
     let (msg, at) = error("fn main() { let f = fn(x) { x }; }");
-    assert_eq!(msg, "type annotations needed: cannot infer the type of parameter 'x'");
+    assert_eq!(
+        msg,
+        "type annotations needed: cannot infer the type of parameter 'x'"
+    );
     assert_eq!(at, "x");
     let (msg, _) = error("fn main() { let add = fn(a: int, b) { a }; }");
-    assert_eq!(msg, "type annotations needed: cannot infer the type of parameter 'b'");
+    assert_eq!(
+        msg,
+        "type annotations needed: cannot infer the type of parameter 'b'"
+    );
 }
 
 #[test]
@@ -276,7 +362,10 @@ fn one_mistake_gives_one_error() {
 #[test]
 fn infinite_types_are_rejected() {
     let (msg, at) = error("fn main() { let f = fn(g) { g(g) }; }");
-    assert_eq!(msg, "mismatched types: argument 1 of function 'g' expects _, found (_) -> _");
+    assert_eq!(
+        msg,
+        "mismatched types: argument 1 of function 'g' expects _, found (_) -> _"
+    );
     assert_eq!(at, "g");
     let errors = check("fn main() { let f = fn(g) { g(g) }; }").unwrap_err();
     assert!(errors[0].notes[0].contains("infinite type"));
@@ -296,7 +385,11 @@ fn duplicate_and_builtin_names() {
 #[test]
 fn repl_keeps_bindings_only_from_inputs_that_check() {
     let mut c = Checker::new();
-    let stmt = |src: &str| Parser::new(tokenize(src).unwrap().into_iter()).parse_stmt_only().unwrap();
+    let stmt = |src: &str| {
+        Parser::new(tokenize(src).unwrap().into_iter())
+            .parse_stmt_only()
+            .unwrap()
+    };
     assert!(c.check_repl_stmt(&stmt("let x = 1")).is_ok());
     assert!(c.check_repl_stmt(&stmt("x + 1")).is_ok());
     assert!(c.check_repl_stmt(&stmt("let y: str = x")).is_err());
@@ -346,7 +439,8 @@ fn structs_and_enums_check() {
 #[test]
 fn struct_and_enum_equality() {
     shapes_ok("fn main() -> bool { (Point { x: 1, y: 2 } == Point { x: 1, y: 2 }) && (Color::Red != Color::Blue) }");
-    let (msg, _) = error("struct F { f: () -> void } fn main() -> bool { let a = F { f: fn() { } }; a == a }");
+    let (msg, _) =
+        error("struct F { f: () -> void } fn main() -> bool { let a = F { f: fn() { } }; a == a }");
     assert_eq!(msg, "cannot apply '==' to F and F");
     // Comparable types can contain themselves.
     ok("enum L { Nil, Cons(int, L) } fn main() -> bool { L::Nil == L::Cons(1, L::Nil) }");
@@ -357,12 +451,21 @@ fn unknown_types_and_names() {
     let (msg, at) = error("fn f(p: Pont) { } struct Point { x: int } fn main() { }");
     assert_eq!(msg, "cannot find type 'Pont'");
     assert_eq!(at, "Pont");
-    assert_eq!(help("fn f(p: Pont) { } struct Point { x: int } fn main() { }"), "a type with a similar name exists: 'Point'");
+    assert_eq!(
+        help("fn f(p: Pont) { } struct Point { x: int } fn main() { }"),
+        "a type with a similar name exists: 'Point'"
+    );
     let (msg, at) = shapes_error("fn main() { let p = Pointt { x: 1, y: 2 }; }");
     assert_eq!(msg, "cannot find struct 'Pointt'");
     assert_eq!(at, "Pointt");
-    assert_eq!(shapes_error("fn main() { Shape { x: 1 }; }").0, "'Shape' is an enum, not a struct");
-    assert_eq!(shapes_error("fn main() { Point::Origin; }").0, "'Point' is a struct, not an enum");
+    assert_eq!(
+        shapes_error("fn main() { Shape { x: 1 }; }").0,
+        "'Shape' is an enum, not a struct"
+    );
+    assert_eq!(
+        shapes_error("fn main() { Point::Origin; }").0,
+        "'Point' is a struct, not an enum"
+    );
     let (msg, at) = shapes_error("fn main() { Shape::Square; }");
     assert_eq!(msg, "enum 'Shape' has no variant 'Square'");
     assert_eq!(at, "Shape::Square");
@@ -378,14 +481,26 @@ fn unknown_types_and_names() {
 
 #[test]
 fn bad_definitions() {
-    assert_eq!(error("struct A { } enum A { } fn main() { }").0, "type 'A' is defined more than once");
-    assert_eq!(error("struct int { } fn main() { }").0, "'int' is a built-in type, so it can't be redefined");
+    assert_eq!(
+        error("struct A { } enum A { } fn main() { }").0,
+        "type 'A' is defined more than once"
+    );
+    assert_eq!(
+        error("struct int { } fn main() { }").0,
+        "'int' is a built-in type, so it can't be redefined"
+    );
     assert_eq!(
         error("struct P { x: int, x: int } fn main() { }").0,
         "struct 'P' has more than one field named 'x'"
     );
-    assert_eq!(error("enum E { A, A } fn main() { }").0, "enum 'E' has more than one variant named 'A'");
-    assert_eq!(error("struct P { q: Q } fn main() { }").0, "cannot find type 'Q'");
+    assert_eq!(
+        error("enum E { A, A } fn main() { }").0,
+        "enum 'E' has more than one variant named 'A'"
+    );
+    assert_eq!(
+        error("struct P { q: Q } fn main() { }").0,
+        "cannot find type 'Q'"
+    );
 }
 
 #[test]
@@ -393,13 +508,22 @@ fn struct_literal_errors() {
     let (msg, at) = shapes_error("fn main() { Point { x: 1 }; }");
     assert_eq!(msg, "missing field 'y' in 'Point'");
     assert_eq!(at, "Point");
-    assert_eq!(shapes_error("fn main() { Point { }; }").0, "missing fields 'x' and 'y' in 'Point'");
+    assert_eq!(
+        shapes_error("fn main() { Point { }; }").0,
+        "missing fields 'x' and 'y' in 'Point'"
+    );
     let (msg, at) = shapes_error("fn main() { Point { x: 1, y: 2, z: 3 }; }");
     assert_eq!(msg, "struct 'Point' has no field 'z'");
     assert_eq!(at, "z");
-    assert_eq!(shapes_error("fn main() { Point { x: 1, x: 2, y: 3 }; }").0, "field 'x' is given more than once");
+    assert_eq!(
+        shapes_error("fn main() { Point { x: 1, x: 2, y: 3 }; }").0,
+        "field 'x' is given more than once"
+    );
     let (msg, at) = shapes_error("fn main() { Point { x: 1, y: true }; }");
-    assert_eq!(msg, "mismatched types: field 'y' of 'Point' is int, but was given bool");
+    assert_eq!(
+        msg,
+        "mismatched types: field 'y' of 'Point' is int, but was given bool"
+    );
     assert_eq!(at, "true");
     assert_eq!(
         shapes_error("fn main() { Point { x: 1, ..Color::Red }; }").0,
@@ -412,8 +536,14 @@ fn field_access_errors() {
     let (msg, at) = shapes_error("fn main() -> int { let p = Point { x: 1, y: 2 }; p.z }");
     assert_eq!(msg, "struct 'Point' has no field 'z'");
     assert_eq!(at, "z");
-    assert_eq!(shapes_error("fn main() { let s = Shape::Empty; s.x; }").0, "'Shape' is an enum, so it has no fields");
-    assert_eq!(shapes_error("fn main() { let n = 1; n.x; }").0, "int has no field 'x'");
+    assert_eq!(
+        shapes_error("fn main() { let s = Shape::Empty; s.x; }").0,
+        "'Shape' is an enum, so it has no fields"
+    );
+    assert_eq!(
+        shapes_error("fn main() { let n = 1; n.x; }").0,
+        "int has no field 'x'"
+    );
     let (msg, at) = shapes_error("fn main() { let f = fn(p) { p.x }; }");
     assert!(msg.starts_with("type annotations needed"), "{msg}");
     assert_eq!(at, "p");
@@ -424,7 +554,10 @@ fn field_access_errors() {
 #[test]
 fn variant_construction_errors() {
     let (msg, at) = shapes_error("fn main() { Shape::Circle; }");
-    assert_eq!(msg, "variant 'Shape::Circle' holds 2 values, so it must be given them");
+    assert_eq!(
+        msg,
+        "variant 'Shape::Circle' holds 2 values, so it must be given them"
+    );
     assert_eq!(at, "Shape::Circle");
     assert_eq!(
         shapes_error("fn main() { Shape::Empty(); }").0,
@@ -435,7 +568,10 @@ fn variant_construction_errors() {
         "variant 'Shape::Circle' holds 2 values but 1 was given"
     );
     let (msg, at) = shapes_error("fn main() { Shape::Circle(Point { x: 1, y: 2 }, 1.5); }");
-    assert_eq!(msg, "mismatched types: value 2 of 'Shape::Circle' is int, found float");
+    assert_eq!(
+        msg,
+        "mismatched types: value 2 of 'Shape::Circle' is int, found float"
+    );
     assert_eq!(at, "1.5");
 }
 
@@ -455,31 +591,51 @@ fn match_types() {
     shapes_ok("fn f(c: Color) -> int { let n = match c { Color::Red => { return 0; }, _ => 1 }; n } fn main() { }");
     // A match can be a statement.
     shapes_ok("fn main() { match Color::Red { Color::Red => println(1), _ => { } } }");
-    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { Color::Red => 1, _ => true } } fn main() { }");
+    let (msg, at) = shapes_error(
+        "fn f(c: Color) -> int { match c { Color::Red => 1, _ => true } } fn main() { }",
+    );
     assert_eq!(msg, "match arms have incompatible types: int and bool");
     assert_eq!(at, "true");
-    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { 1 => 1, _ => 2 } } fn main() { }");
-    assert_eq!(msg, "mismatched types: this pattern matches int, but the value is Color");
+    let (msg, at) =
+        shapes_error("fn f(c: Color) -> int { match c { 1 => 1, _ => 2 } } fn main() { }");
+    assert_eq!(
+        msg,
+        "mismatched types: this pattern matches int, but the value is Color"
+    );
     assert_eq!(at, "1");
-    let (msg, _) = shapes_error("fn f(c: Color) -> int { match c { Color::Red if 1 => 1, _ => 2 } } fn main() { }");
+    let (msg, _) = shapes_error(
+        "fn f(c: Color) -> int { match c { Color::Red if 1 => 1, _ => 2 } } fn main() { }",
+    );
     assert_eq!(msg, "a match guard must be a bool, found int");
 }
 
 #[test]
 fn pattern_errors() {
-    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { Red => 1, _ => 2 } } fn main() { }");
-    assert_eq!(msg, "this pattern binds a new variable 'Red', which matches anything");
+    let (msg, at) =
+        shapes_error("fn f(c: Color) -> int { match c { Red => 1, _ => 2 } } fn main() { }");
+    assert_eq!(
+        msg,
+        "this pattern binds a new variable 'Red', which matches anything"
+    );
     assert_eq!(at, "Red");
     assert_eq!(
-        help(&with_shapes("fn f(c: Color) -> int { match c { Red => 1, _ => 2 } } fn main() { }")),
+        help(&with_shapes(
+            "fn f(c: Color) -> int { match c { Red => 1, _ => 2 } } fn main() { }"
+        )),
         "to match the variant, write `Color::Red`"
     );
     assert_eq!(
-        shapes_error("fn f(s: Shape) -> int { match s { Shape::Circle => 1, _ => 2 } } fn main() { }").0,
+        shapes_error(
+            "fn f(s: Shape) -> int { match s { Shape::Circle => 1, _ => 2 } } fn main() { }"
+        )
+        .0,
         "variant 'Shape::Circle' holds 2 values"
     );
     assert_eq!(
-        shapes_error("fn f(s: Shape) -> int { match s { Shape::Circle(p) => 1, _ => 2 } } fn main() { }").0,
+        shapes_error(
+            "fn f(s: Shape) -> int { match s { Shape::Circle(p) => 1, _ => 2 } } fn main() { }"
+        )
+        .0,
         "this pattern has 1 field but variant 'Shape::Circle' holds 2 values"
     );
     assert_eq!(
@@ -488,14 +644,19 @@ fn pattern_errors() {
     );
     shapes_ok("fn f(p: Point) -> int { match p { Point { x, .. } => x } } fn main() { }");
     assert_eq!(
-        shapes_error("fn f(p: Point) -> int { match p { Point { x: a, y: a } => a } } fn main() { }").0,
+        shapes_error(
+            "fn f(p: Point) -> int { match p { Point { x: a, y: a } => a } } fn main() { }"
+        )
+        .0,
         "'a' is bound more than once in this pattern"
     );
 }
 
 #[test]
 fn match_must_be_exhaustive() {
-    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { Color::Red => 1, Color::Green => 2 } } fn main() { }");
+    let (msg, at) = shapes_error(
+        "fn f(c: Color) -> int { match c { Color::Red => 1, Color::Green => 2 } } fn main() { }",
+    );
     assert_eq!(msg, "non-exhaustive match: `Color::Blue` not covered");
     assert_eq!(at, "c");
     assert_eq!(
@@ -510,25 +671,36 @@ fn match_must_be_exhaustive() {
         shapes_error("fn f(s: Shape) -> int { match s { Shape::Empty => 1 } } fn main() { }").0,
         "non-exhaustive match: `Shape::Circle(_, _)` and `Shape::Rect(_, _)` not covered"
     );
-    assert_eq!(shapes_error("fn f(n: int) -> int { match n { 0 => 1 } } fn main() { }").0, "non-exhaustive match: `_` not covered");
-    assert_eq!(shapes_error("fn f(b: bool) -> int { match b { true => 1 } } fn main() { }").0, "non-exhaustive match: `false` not covered");
+    assert_eq!(
+        shapes_error("fn f(n: int) -> int { match n { 0 => 1 } } fn main() { }").0,
+        "non-exhaustive match: `_` not covered"
+    );
+    assert_eq!(
+        shapes_error("fn f(b: bool) -> int { match b { true => 1 } } fn main() { }").0,
+        "non-exhaustive match: `false` not covered"
+    );
     // Nested patterns.
     assert_eq!(
         error("enum L { Nil, Cons(int, L) } fn f(l: L) -> int { match l { L::Nil => 0, L::Cons(n, L::Nil) => n } } fn main() { }").0,
         "non-exhaustive match: `L::Cons(_, L::Cons(_, _))` not covered"
     );
     assert_eq!(
-        shapes_error("fn f(p: Point) -> int { match p { Point { x: 0, y } => y } } fn main() { }").0,
+        shapes_error("fn f(p: Point) -> int { match p { Point { x: 0, y } => y } } fn main() { }")
+            .0,
         "non-exhaustive match: `Point { .. }` not covered"
     );
     // A guarded arm doesn't count.
     let src = with_shapes("fn f(c: Color) -> int { match c { Color::Red => 1, Color::Green => 2, Color::Blue if true => 3 } } fn main() { }");
     let errors = check(&src).unwrap_err();
-    assert_eq!(errors[0].message, "non-exhaustive match: `Color::Blue` not covered");
+    assert_eq!(
+        errors[0].message,
+        "non-exhaustive match: `Color::Blue` not covered"
+    );
     assert!(errors[0].notes.iter().any(|n| n.contains("guard")));
     // Many missing cases are summarized.
     assert_eq!(
-        error("enum E { A, B, C, D, E } fn f(e: E) -> int { match e { E::A => 1 } } fn main() { }").0,
+        error("enum E { A, B, C, D, E } fn f(e: E) -> int { match e { E::A => 1 } } fn main() { }")
+            .0,
         "non-exhaustive match: `E::B`, `E::C`, `E::D` and more not covered"
     );
     // An enum with no variants needs no arms.
@@ -537,7 +709,8 @@ fn match_must_be_exhaustive() {
 
 #[test]
 fn unreachable_arms_are_errors() {
-    let (msg, at) = shapes_error("fn f(c: Color) -> int { match c { _ => 1, Color::Red => 2 } } fn main() { }");
+    let (msg, at) =
+        shapes_error("fn f(c: Color) -> int { match c { _ => 1, Color::Red => 2 } } fn main() { }");
     assert_eq!(msg, "unreachable pattern");
     assert_eq!(at, "Color::Red");
     assert_eq!(
@@ -545,7 +718,10 @@ fn unreachable_arms_are_errors() {
         "unreachable pattern"
     );
     assert_eq!(
-        shapes_error("fn f(b: bool) -> int { match b { true => 1, false => 2, _ => 3 } } fn main() { }").0,
+        shapes_error(
+            "fn f(b: bool) -> int { match b { true => 1, false => 2, _ => 3 } } fn main() { }"
+        )
+        .0,
         "unreachable pattern"
     );
     // A guarded arm doesn't make later arms unreachable.
@@ -556,9 +732,18 @@ fn unreachable_arms_are_errors() {
 fn plus_concatenates_strings() {
     ok("fn main() -> str { \"a\" + \"b\" }");
     ok("fn main() -> str { let f = fn(a, b) { a + b }; f(\"x\", \"y\") }");
-    assert_eq!(error("fn main() { \"a\" + 1; }").0, "cannot apply '+' to str and int");
-    assert_eq!(error("fn main() { \"a\" - \"b\"; }").0, "cannot apply '-' to str and str");
-    assert_eq!(error("fn main() { \"a\" < \"b\"; }").0, "cannot apply '<' to str and str");
+    assert_eq!(
+        error("fn main() { \"a\" + 1; }").0,
+        "cannot apply '+' to str and int"
+    );
+    assert_eq!(
+        error("fn main() { \"a\" - \"b\"; }").0,
+        "cannot apply '-' to str and str"
+    );
+    assert_eq!(
+        error("fn main() { \"a\" < \"b\"; }").0,
+        "cannot apply '<' to str and str"
+    );
 }
 
 // ---- Generics ------------------------------------------------------------------
@@ -602,9 +787,11 @@ fn generic_functions_work_at_every_type() {
     ok("fn keep<T>(x: T) -> T { let y: T = x; y }
         fn main() { }");
     // Generic functions can call themselves and each other.
-    ok("fn pass<T>(x: T, n: int) -> T { if n == 0 { x } else { pass(x, n - 1) } }
+    ok(
+        "fn pass<T>(x: T, n: int) -> T { if n == 0 { x } else { pass(x, n - 1) } }
         fn both<A, B>(a: A, b: B) -> A { pass(b, 1); pass(a, 2) }
-        fn main() -> int { both(1, \"b\") }");
+        fn main() -> int { both(1, \"b\") }",
+    );
     // Higher-order generic functions infer closure parameter types.
     ok("fn apply<T, U>(x: T, f: (T) -> U) -> U { f(x) }
         fn main() -> str { apply(2, fn(n) { if n > 1 { \"big\" } else { \"small\" } }) }");
@@ -612,32 +799,43 @@ fn generic_functions_work_at_every_type() {
 
 #[test]
 fn generic_types_check() {
-    generic_ok("fn main() {
+    generic_ok(
+        "fn main() {
                     let a: Option<int> = Some(1);
                     let b: Option<str> = None;
                     let p = Pair { first: 1, second: \"one\" };
                     let n: int = p.first;
                     let s: str = p.second;
                     let xs: List<int> = List::Cons(1, List::Cons(2, List::Nil));
-                }");
-    generic_ok("fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> { Pair { first: p.second, second: p.first } }
-                fn main() -> str { swap(Pair { first: 1, second: \"x\" }).first }");
-    generic_ok("fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
+                }",
+    );
+    generic_ok(
+        "fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> { Pair { first: p.second, second: p.first } }
+                fn main() -> str { swap(Pair { first: 1, second: \"x\" }).first }",
+    );
+    generic_ok(
+        "fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
                     match xs {
                         List::Nil => List::Nil,
                         List::Cons(x, rest) => List::Cons(f(x), map(rest, f)),
                     }
                 }
-                fn main() -> List<bool> { map(List::Cons(1, List::Nil), fn(n) { n > 0 }) }");
+                fn main() -> List<bool> { map(List::Cons(1, List::Nil), fn(n) { n > 0 }) }",
+    );
     // The expected type decides a type argument nothing else does.
-    generic_ok("fn none<T>() -> Option<T> { None }
-                fn main() { let o: Option<str> = none(); }");
+    generic_ok(
+        "fn none<T>() -> Option<T> { None }
+                fn main() { let o: Option<str> = none(); }",
+    );
 }
 
 #[test]
 fn type_arguments_must_match() {
     let (msg, at) = generic_error("fn main() { let a: Option<int> = Some(\"s\"); }");
-    assert_eq!(msg, "mismatched types: 'a' is declared as Option<int> but was given Option<str>");
+    assert_eq!(
+        msg,
+        "mismatched types: 'a' is declared as Option<int> but was given Option<str>"
+    );
     assert_eq!(at, "Some(\"s\")");
     assert_eq!(
         generic_error("fn f(o: Option<int>) { } fn main() { f(Some(true)); }").0,
@@ -657,23 +855,35 @@ fn type_arguments_must_match() {
 #[test]
 fn type_argument_counts() {
     let errors = check(&generic("fn f(o: Option) { } fn main() { }")).unwrap_err();
-    assert_eq!(errors[0].message, "type 'Option' takes 1 type argument but 0 were given");
+    assert_eq!(
+        errors[0].message,
+        "type 'Option' takes 1 type argument but 0 were given"
+    );
     assert_eq!(errors[0].help.as_deref(), Some("write `Option<int>`"));
     assert_eq!(errors[0].notes, vec!["'Option' is declared as `Option<T>`"]);
     let errors = check(&generic("fn f(p: Pair<str>) { } fn main() { }")).unwrap_err();
-    assert_eq!(errors[0].message, "type 'Pair' takes 2 type arguments but 1 was given");
+    assert_eq!(
+        errors[0].message,
+        "type 'Pair' takes 2 type arguments but 1 was given"
+    );
     assert_eq!(errors[0].help.as_deref(), Some("write `Pair<str, int>`"));
     assert_eq!(
         error("struct P { x: int } fn f(p: P<int>) { } fn main() { }").0,
         "type 'P' takes no type arguments"
     );
-    assert_eq!(error("fn f<T>(x: T<int>) { } fn main() { }").0, "type parameter 'T' takes no type arguments");
+    assert_eq!(
+        error("fn f<T>(x: T<int>) { } fn main() { }").0,
+        "type parameter 'T' takes no type arguments"
+    );
 }
 
 #[test]
 fn generic_bodies_work_for_every_type() {
     let (msg, at) = error("fn id<T>(x: T) -> T { 1 } fn main() { }");
-    assert_eq!(msg, "mismatched types: function 'id' is declared to return T, but this is int");
+    assert_eq!(
+        msg,
+        "mismatched types: function 'id' is declared to return T, but this is int"
+    );
     assert_eq!(at, "1");
     assert_eq!(
         check("fn id<T>(x: T) -> T { 1 } fn main() { }").unwrap_err()[0].notes,
@@ -691,7 +901,10 @@ fn generic_bodies_work_for_every_type() {
         error("fn same<T>(a: T, b: T) -> bool { a == b } fn main() { }").0,
         "cannot apply '==' to T and T"
     );
-    assert_eq!(error("fn get<T>(x: T) -> int { x.size } fn main() { }").0, "T has no field 'size'");
+    assert_eq!(
+        error("fn get<T>(x: T) -> int { x.size } fn main() { }").0,
+        "T has no field 'size'"
+    );
 }
 
 #[test]
@@ -708,24 +921,42 @@ fn bad_type_parameters() {
         error("enum E<T> { A } fn main() { }").0,
         "type parameter 'T' of enum 'E' is never used"
     );
-    assert_eq!(error("fn f<T, T>(x: T) { } fn main() { }").0, "type parameter 'T' is declared more than once");
+    assert_eq!(
+        error("fn f<T, T>(x: T) { } fn main() { }").0,
+        "type parameter 'T' is declared more than once"
+    );
     // A clash with a type's name is one error, not a cascade.
     assert_eq!(
         error("struct P { x: int } fn f<P>(x: P) { } fn main() { }").0,
         "type parameter 'P' has the same name as a type"
     );
-    assert_eq!(error("fn f<int>(x: int) { } fn main() { }").0, "'int' is a built-in type, so it can't be a type parameter");
+    assert_eq!(
+        error("fn f<int>(x: int) { } fn main() { }").0,
+        "'int' is a built-in type, so it can't be a type parameter"
+    );
     // A type parameter belongs to its own definition.
-    assert_eq!(error("fn f<T>(x: T) { } fn g(y: T) { } fn main() { }").0, "cannot find type 'T'");
+    assert_eq!(
+        error("fn f<T>(x: T) { } fn g(y: T) { } fn main() { }").0,
+        "cannot find type 'T'"
+    );
 }
 
 #[test]
 fn partly_known_types_need_annotations() {
     let src = generic("fn main() { let x = None; }");
     let errors = check(&src).unwrap_err();
-    assert_eq!(errors[0].message, "type annotations needed: cannot infer the type of variable 'x'");
-    assert_eq!(errors[0].help.as_deref(), Some("add a type, for example `x: Option<int>`"));
-    assert_eq!(errors[0].notes, vec!["its type is only partly known: Option<_>"]);
+    assert_eq!(
+        errors[0].message,
+        "type annotations needed: cannot infer the type of variable 'x'"
+    );
+    assert_eq!(
+        errors[0].help.as_deref(),
+        Some("add a type, for example `x: Option<int>`")
+    );
+    assert_eq!(
+        errors[0].notes,
+        vec!["its type is only partly known: Option<_>"]
+    );
     // Using it is enough.
     generic_ok("fn main() { let x = None; let y: Option<int> = x; }");
 }
@@ -737,7 +968,10 @@ fn generic_equality_depends_on_type_arguments() {
     // Equality on an unknown argument decides what it can be.
     generic_ok("fn main() -> bool { let n = None; n == Some(1.5) }");
     let (msg, _) = generic_error("fn main() -> bool { let a = Some(fn() { }); a == a }");
-    assert_eq!(msg, "cannot apply '==' to Option<() -> void> and Option<() -> void>");
+    assert_eq!(
+        msg,
+        "cannot apply '==' to Option<() -> void> and Option<() -> void>"
+    );
     // A definition that holds a function can't be compared, whatever its arguments.
     let (msg, _) = error("struct F<T> { f: (T) -> int } fn main() -> bool { let a = F { f: fn(x: int) { x } }; a == a }");
     assert_eq!(msg, "cannot apply '==' to F<int> and F<int>");
@@ -745,19 +979,26 @@ fn generic_equality_depends_on_type_arguments() {
 
 #[test]
 fn generic_matches_are_exhaustive() {
-    generic_ok("fn get<T>(o: Option<T>, d: T) -> T { match o { Some(x) => x, None => d } } fn main() { }");
+    generic_ok(
+        "fn get<T>(o: Option<T>, d: T) -> T { match o { Some(x) => x, None => d } } fn main() { }",
+    );
     let (msg, at) = generic_error(
         "fn depth(o: Option<Option<int>>) -> int { match o { Some(Some(_)) => 2, None => 0 } } fn main() { }",
     );
     assert_eq!(msg, "non-exhaustive match: `Some(None)` not covered");
     assert_eq!(at, "o");
     assert_eq!(
-        generic_note("fn f(o: Option<bool>) -> int { match o { Some(true) => 1, None => 0 } } fn main() { }"),
+        generic_note(
+            "fn f(o: Option<bool>) -> int { match o { Some(true) => 1, None => 0 } } fn main() { }"
+        ),
         "the value matched on has type Option<bool>"
     );
     // Patterns take their types from the value's type arguments.
     assert_eq!(
-        generic_error("fn f(o: Option<int>) -> int { match o { Some(\"s\") => 1, _ => 0 } } fn main() { }").0,
+        generic_error(
+            "fn f(o: Option<int>) -> int { match o { Some(\"s\") => 1, _ => 0 } } fn main() { }"
+        )
+        .0,
         "mismatched types: this pattern matches str, but the value is int"
     );
     generic_ok("fn f(p: Pair<int, bool>) -> int { match p { Pair { first, second: true } => first, Pair { .. } => 0 } } fn main() { }");
@@ -774,12 +1015,18 @@ fn prelude_types_are_always_available() {
     let (msg, at) = error("fn f(o: Option<int>) -> int { match o { Some(n) => n } } fn main() { }");
     assert_eq!(msg, "non-exhaustive match: `None` not covered");
     assert_eq!(at, "o");
-    assert_eq!(help("fn f(o: Option<int>) -> int { match o { Some(n) => n } } fn main() { }"), "add an arm for it: `None => ...`");
+    assert_eq!(
+        help("fn f(o: Option<int>) -> int { match o { Some(n) => n } } fn main() { }"),
+        "add an arm for it: `None => ...`"
+    );
     assert_eq!(
         error("fn main() { let x: Option<int> = Some(1, 2); }").0,
         "variant 'Some' holds 1 value but 2 were given"
     );
-    assert_eq!(error("fn main() { let x: Option<int> = None(1); }").0, "variant 'None' holds no values, so it can't be called");
+    assert_eq!(
+        error("fn main() { let x: Option<int> = None(1); }").0,
+        "variant 'None' holds no values, so it can't be called"
+    );
     assert_eq!(
         error("enum Option<T> { Yes(T) } fn main() { }").0,
         "'Option' is defined in the prelude, so it can't be redefined"
@@ -806,11 +1053,18 @@ fn question_mark_passes_on_errors() {
 #[test]
 fn question_mark_errors() {
     let src = "fn d() -> Result<int, str> { Ok(1) }";
-    let err = |body: &str| check(&format!("{src} {body} fn main() {{ }}")).unwrap_err().remove(0);
+    let err = |body: &str| {
+        check(&format!("{src} {body} fn main() {{ }}"))
+            .unwrap_err()
+            .remove(0)
+    };
 
     let e = err("fn f() -> int { d()? }");
     assert_eq!(e.message, "'?' on a Result can only be used in a function that returns a Result, but function 'f' returns int");
-    assert_eq!(e.help.as_deref(), Some("change the return type to `Result<int, str>`, or use `match`"));
+    assert_eq!(
+        e.help.as_deref(),
+        Some("change the return type to `Result<int, str>`, or use `match`")
+    );
 
     let e = err("fn f() -> Result<int, int> { Ok(d()?) }");
     assert_eq!(e.message, "mismatched types: this '?' passes on an error of type str, but function 'f' returns errors of type int");
@@ -820,14 +1074,25 @@ fn question_mark_errors() {
     assert_eq!(e.help.as_deref(), Some("use `match` to handle it here"));
 
     let e = err("fn f() -> int { let x = 5; x? }");
-    assert_eq!(e.message, "'?' can only be used on an Option or a Result, but this is int");
+    assert_eq!(
+        e.message,
+        "'?' can only be used on an Option or a Result, but this is int"
+    );
 
-    let e = check(&format!("{src} fn main() {{ d()?; }}")).unwrap_err().remove(0);
+    let e = check(&format!("{src} fn main() {{ d()?; }}"))
+        .unwrap_err()
+        .remove(0);
     assert_eq!(e.message, "'?' on a Result can only be used in a function that returns a Result, but function 'main' returns void");
-    assert_eq!(e.help.as_deref(), Some("handle the error with `match` instead"));
+    assert_eq!(
+        e.help.as_deref(),
+        Some("handle the error with `match` instead")
+    );
 
     let e = err("fn f() { let g = fn(r) { r? }; }");
-    assert_eq!(e.message, "type annotations needed: the type of this value must be known to use '?' on it");
+    assert_eq!(
+        e.message,
+        "type annotations needed: the type of this value must be known to use '?' on it"
+    );
 }
 
 // ---- Methods -------------------------------------------------------------------
@@ -846,9 +1111,13 @@ fn with_point(src: &str) -> String {
 
 #[test]
 fn methods_and_associated_functions() {
-    ok(&with_point("fn main() -> int { Point::origin().add(Point { x: 1, y: 2 }).sum() }"));
+    ok(&with_point(
+        "fn main() -> int { Point::origin().add(Point { x: 1, y: 2 }).sum() }",
+    ));
     // An associated function is a value; a method is called on one.
-    ok(&with_point("fn main() -> int { let make = Point::origin; make().sum() }"));
+    ok(&with_point(
+        "fn main() -> int { let make = Point::origin; make().sum() }",
+    ));
     // Methods can call each other, and be used before they're defined.
     ok("fn main() -> int { Num { n: 3 }.twice() }
         impl Num { fn twice(self) -> int { self.plus(self.n) } fn plus(self, k: int) -> int { self.n + k } }
@@ -872,12 +1141,20 @@ fn generic_methods() {
                     }
                 }";
     ok(&format!("{list} fn main() -> List<str> {{ List::empty().push(1).map(fn(n) {{ if n > 0 {{ \"pos\" }} else {{ \"neg\" }} }}) }}"));
-    let (msg, at) = error(&format!("{list} fn main() {{ let xs: List<int> = List::empty(); xs.push(\"s\"); }}"));
-    assert_eq!(msg, "mismatched types: parameter 'x' of method 'List::push' expects int, found str");
+    let (msg, at) = error(&format!(
+        "{list} fn main() {{ let xs: List<int> = List::empty(); xs.push(\"s\"); }}"
+    ));
+    assert_eq!(
+        msg,
+        "mismatched types: parameter 'x' of method 'List::push' expects int, found str"
+    );
     assert_eq!(at, "\"s\"");
     // The receiver's type arguments fix the impl's type parameters.
     assert_eq!(
-        error(&format!("{list} fn main() -> List<str> {{ List::Cons(1, List::Nil).map(fn(n) {{ n }}) }}")).0,
+        error(&format!(
+            "{list} fn main() -> List<str> {{ List::Cons(1, List::Nil).map(fn(n) {{ n }}) }}"
+        ))
+        .0,
         "mismatched types: function 'main' is declared to return List<str>, but this is List<int>"
     );
 }
@@ -897,20 +1174,37 @@ fn prelude_methods() {
 #[test]
 fn method_call_errors() {
     let err = |src: &str| error(&with_point(src));
-    assert_eq!(err("fn main() { Point::origin().sum(1); }").0, "method 'Point::sum' takes 0 arguments but 1 was given");
+    assert_eq!(
+        err("fn main() { Point::origin().sum(1); }").0,
+        "method 'Point::sum' takes 0 arguments but 1 was given"
+    );
     let (msg, at) = err("fn main() { Point::origin().total(); }");
     assert_eq!(msg, "struct 'Point' has no method 'total'");
     assert_eq!(at, "total");
-    assert_eq!(help(&with_point("fn main() { Point::origin().ad(Point::origin()); }")), "a method with a similar name exists: 'add'");
-    assert_eq!(help(&with_point("fn main() { Point::origin().frobnicate(); }")), "its methods are: add, origin, sum");
+    assert_eq!(
+        help(&with_point(
+            "fn main() { Point::origin().ad(Point::origin()); }"
+        )),
+        "a method with a similar name exists: 'add'"
+    );
+    assert_eq!(
+        help(&with_point("fn main() { Point::origin().frobnicate(); }")),
+        "its methods are: add, origin, sum"
+    );
     assert_eq!(
         err("fn main() { Point::origin().origin(); }").0,
         "'origin' is an associated function of 'Point', not a method, so it isn't called on a value"
     );
-    assert_eq!(err("fn main() { Point::sum(Point::origin()); }").0, "'sum' is a method of 'Point', so it is called on a value");
+    assert_eq!(
+        err("fn main() { Point::sum(Point::origin()); }").0,
+        "'sum' is a method of 'Point', so it is called on a value"
+    );
     let (msg, _) = err("fn main() { let f = Point::origin().sum; }");
     assert_eq!(msg, "'sum' is a function of 'Point', not a field");
-    assert_eq!(err("fn main() { let n = 1; n.abs(); }").0, "int has no method 'abs'");
+    assert_eq!(
+        err("fn main() { let n = 1; n.abs(); }").0,
+        "int has no method 'abs'"
+    );
     assert_eq!(
         err("fn main() { let f = fn(p) { p.sum() }; }").0,
         "type annotations needed: the type of this value must be known to call its method 'sum'"
@@ -935,10 +1229,20 @@ fn impl_errors() {
         error("impl<T> Option<T> { fn f(self) { } } fn main() { }").0,
         "methods for 'Option' can only be defined where 'Option' is defined, in the prelude"
     );
-    let errors = check("struct B<T> { v: T } impl B<int> { fn f(self) { } } fn main() { }").unwrap_err();
-    assert_eq!(errors[0].message, "an impl for 'B' must be for all of it: `impl<T> B<T>`");
-    assert_eq!(errors[0].help.as_deref(), Some("write `impl<T> B<T> { ... }`"));
-    assert_eq!(error("impl Nope { } fn main() { }").0, "cannot find type 'Nope'");
+    let errors =
+        check("struct B<T> { v: T } impl B<int> { fn f(self) { } } fn main() { }").unwrap_err();
+    assert_eq!(
+        errors[0].message,
+        "an impl for 'B' must be for all of it: `impl<T> B<T>`"
+    );
+    assert_eq!(
+        errors[0].help.as_deref(),
+        Some("write `impl<T> B<T> { ... }`")
+    );
+    assert_eq!(
+        error("impl Nope { } fn main() { }").0,
+        "cannot find type 'Nope'"
+    );
     assert_eq!(
         error("struct B<T> { v: T } impl<T> B<T> { fn f<T>(self) { } } fn main() { }").0,
         "type parameter 'T' is already declared by the impl"

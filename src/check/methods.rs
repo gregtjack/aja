@@ -60,10 +60,16 @@ impl Checker {
             .collect();
         let mut bodies = Vec::new();
         for def in &program.definitions {
-            let Definition::Impl { type_params, target, methods } = def else {
+            let Definition::Impl {
+                type_params,
+                target,
+                methods,
+            } = def
+            else {
                 continue;
             };
-            let Some((type_name, impl_params)) = self.impl_target(type_params, target, &local) else {
+            let Some((type_name, impl_params)) = self.impl_target(type_params, target, &local)
+            else {
                 continue;
             };
             for m in methods {
@@ -77,7 +83,12 @@ impl Checker {
 
     /// The type an impl is for, and the names of its type parameters, or
     /// `None` (having reported why) if it can't have one.
-    fn impl_target(&mut self, type_params: &[crate::ast::TypeParam], target: &Type, local: &HashSet<&Id>) -> Option<(Id, Vec<Id>)> {
+    fn impl_target(
+        &mut self,
+        type_params: &[crate::ast::TypeParam],
+        target: &Type,
+        local: &HashSet<&Id>,
+    ) -> Option<(Id, Vec<Id>)> {
         let Type::Named(name, args, span) = target else {
             let shown = target.to_string();
             let span = type_params.first().map_or(Self::dummy_span(), |p| p.span);
@@ -107,7 +118,10 @@ impl Checker {
         let declared = self.declare_type_params(type_params);
         let matches = args.len() == params.len()
             && declared.len() == params.len()
-            && args.iter().zip(&declared).all(|(a, p)| matches!(a, Type::Named(n, xs, _) if n == p && xs.is_empty()));
+            && args
+                .iter()
+                .zip(&declared)
+                .all(|(a, p)| matches!(a, Type::Named(n, xs, _) if n == p && xs.is_empty()));
         if !matches {
             let example = if params.is_empty() {
                 format!("impl {name}")
@@ -124,7 +138,12 @@ impl Checker {
         Some((name.clone(), declared))
     }
 
-    fn declare_method<'p>(&mut self, type_name: &Id, impl_params: &[Id], m: &'p Method) -> Option<MethodBody<'p>> {
+    fn declare_method<'p>(
+        &mut self,
+        type_name: &Id,
+        impl_params: &[Id],
+        m: &'p Method,
+    ) -> Option<MethodBody<'p>> {
         let global: Id = format!("{type_name}::{}", m.name).into();
         let clash = match (self.structs.get(type_name), self.enums.get(type_name)) {
             (Some(s), _) if s.fields.iter().any(|(f, _)| *f == m.name) => {
@@ -151,8 +170,11 @@ impl Checker {
                 if dup {
                     let span = m.type_params.iter().find(|t| t.name == *p).unwrap().span;
                     self.error(
-                        TypeError::new(format!("type parameter '{p}' is already declared by the impl"), span)
-                            .help("use the impl's, or choose a different name"),
+                        TypeError::new(
+                            format!("type parameter '{p}' is already declared by the impl"),
+                            span,
+                        )
+                        .help("use the impl's, or choose a different name"),
                     );
                 }
                 !dup
@@ -160,7 +182,10 @@ impl Checker {
             .collect();
         let generics: Vec<Id> = impl_params.iter().chain(&own).cloned().collect();
         self.type_params = generics.clone();
-        let this = Ty::Named(type_name.clone(), impl_params.iter().map(|p| Ty::Param(p.clone())).collect());
+        let this = Ty::Named(
+            type_name.clone(),
+            impl_params.iter().map(|p| Ty::Param(p.clone())).collect(),
+        );
         let params: Vec<Ty> = m
             .params
             .iter()
@@ -191,8 +216,17 @@ impl Checker {
             has_self: m.has_self,
             param_names: m.params.iter().map(|p| p.name.clone()).collect(),
         };
-        self.methods.entry(type_name.clone()).or_default().insert(m.name.clone(), info);
-        Some(MethodBody { method: m, global, params, ret, generics })
+        self.methods
+            .entry(type_name.clone())
+            .or_default()
+            .insert(m.name.clone(), info);
+        Some(MethodBody {
+            method: m,
+            global,
+            params,
+            ret,
+            generics,
+        })
     }
 
     /// Check the bodies of methods declared by [`Checker::declare_impls`].
@@ -218,7 +252,10 @@ impl Checker {
 
     /// The names of a type's methods, sorted, for messages.
     fn method_names(&self, type_name: &Id) -> Vec<Id> {
-        let mut names: Vec<Id> = self.methods.get(type_name).map_or(Vec::new(), |ms| ms.keys().cloned().collect());
+        let mut names: Vec<Id> = self
+            .methods
+            .get(type_name)
+            .map_or(Vec::new(), |ms| ms.keys().cloned().collect());
         names.sort();
         names
     }
@@ -240,20 +277,37 @@ impl Checker {
                 if let Some(info) = self.method(&n, name).cloned() {
                     return Ok(self.call_method(&n, name, info, &targs, callee, args, span));
                 }
-                let is_field = self.structs.get(&n).is_some_and(|s| s.fields.iter().any(|(f, _)| f == name));
+                let is_field = self
+                    .structs
+                    .get(&n)
+                    .is_some_and(|s| s.fields.iter().any(|(f, _)| f == name));
                 if is_field {
                     return Err(self.field_on(&t, obj.span, name, name_span, callee.span));
                 }
-                let kind = if self.structs.contains_key(&n) { "struct" } else { "enum" };
-                let methods = self.method_names(&n);
-                let fields: Vec<Id> = self.structs.get(&n).map_or(Vec::new(), |s| s.fields.iter().map(|(f, _)| f.clone()).collect());
-                let help = match closest_match(name, methods.iter().chain(&fields).map(|m| m.as_str())) {
-                    Some(s) if methods.iter().any(|m| m == s) => format!("a method with a similar name exists: '{s}'"),
-                    Some(s) => format!("a field with a similar name exists: '{s}'"),
-                    None if methods.is_empty() => format!("'{n}' has no methods; define them in an `impl {n} {{ ... }}` block"),
-                    None => format!("its methods are: {}", methods.join(", ")),
+                let kind = if self.structs.contains_key(&n) {
+                    "struct"
+                } else {
+                    "enum"
                 };
-                self.error(TypeError::new(format!("{kind} '{n}' has no method '{name}'"), name_span).help(help));
+                let methods = self.method_names(&n);
+                let fields: Vec<Id> = self.structs.get(&n).map_or(Vec::new(), |s| {
+                    s.fields.iter().map(|(f, _)| f.clone()).collect()
+                });
+                let help =
+                    match closest_match(name, methods.iter().chain(&fields).map(|m| m.as_str())) {
+                        Some(s) if methods.iter().any(|m| m == s) => {
+                            format!("a method with a similar name exists: '{s}'")
+                        }
+                        Some(s) => format!("a field with a similar name exists: '{s}'"),
+                        None if methods.is_empty() => format!(
+                            "'{n}' has no methods; define them in an `impl {n} {{ ... }}` block"
+                        ),
+                        None => format!("its methods are: {}", methods.join(", ")),
+                    };
+                self.error(
+                    TypeError::new(format!("{kind} '{n}' has no method '{name}'"), name_span)
+                        .help(help),
+                );
             }
             Ty::Error | Ty::Never => {}
             Ty::Var(_) => {
@@ -281,7 +335,16 @@ impl Checker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn call_method(&mut self, type_name: &Id, name: &Id, info: MethodInfo, targs: &[Ty], callee: &Expr, args: &[Expr], span: Span) -> Ty {
+    fn call_method(
+        &mut self,
+        type_name: &Id,
+        name: &Id,
+        info: MethodInfo,
+        targs: &[Ty],
+        callee: &Expr,
+        args: &[Expr],
+        span: Span,
+    ) -> Ty {
         if !info.has_self {
             self.error(
                 TypeError::new(
@@ -299,9 +362,20 @@ impl Checker {
             .generics
             .iter()
             .enumerate()
-            .map(|(i, g)| (g.clone(), if i < info.impl_params { targs[i].clone() } else { self.fresh(Class::Any) }))
+            .map(|(i, g)| {
+                (
+                    g.clone(),
+                    if i < info.impl_params {
+                        targs[i].clone()
+                    } else {
+                        self.fresh(Class::Any)
+                    },
+                )
+            })
             .collect();
-        let Ty::Fn(params, ret) = Self::subst(&info.ty, &map) else { unreachable!() };
+        let Ty::Fn(params, ret) = Self::subst(&info.ty, &map) else {
+            unreachable!()
+        };
         let (params, names) = (&params[1..], &info.param_names[1..]);
         let what = format!("method '{}'", info.global);
         if params.len() != args.len() {
@@ -335,8 +409,11 @@ impl Checker {
         let info = self.method(type_name, name)?.clone();
         if info.has_self {
             self.error(
-                TypeError::new(format!("'{name}' is a method of '{type_name}', so it is called on a value"), span)
-                    .help(format!("call it as `value.{name}(...)`, on a {type_name}")),
+                TypeError::new(
+                    format!("'{name}' is a method of '{type_name}', so it is called on a value"),
+                    span,
+                )
+                .help(format!("call it as `value.{name}(...)`, on a {type_name}")),
             );
             return Some(Ty::Error);
         }
