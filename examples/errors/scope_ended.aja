@@ -1,0 +1,20 @@
+// A scope's tasks all finish before its `scope` call returns, so once it
+// has returned, nothing can be started in it any more. Keeping a `Scope`
+// past that point is allowed, but spawning on it stops the program.
+//
+// expect: cannot spawn a task in a scope that has ended: a Scope can only be used inside the `task::scope` call that made it
+
+import std::task;
+
+fn main() {
+    var kept: Option<task::Scope> = None;
+    task::scope(fn(s) {
+        kept = Some(s);
+    });
+    match kept {
+        Some(s) => {
+            s.spawn(fn() { println("too late") });
+        }
+        None => {}
+    }
+}

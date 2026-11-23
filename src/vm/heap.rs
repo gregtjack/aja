@@ -22,6 +22,7 @@ use std::rc::Rc;
 use super::{
     bytecode::{Layout, Proto},
     list::List,
+    scheduler::TaskId,
     value::Value,
 };
 
@@ -53,6 +54,31 @@ enum Obj {
     /// A list. It never changes after it is made, but shares parts with
     /// the lists made from it.
     List(List),
+    /// A `std::task::Scope`.
+    Scope(ScopeState),
+    /// A `std::task::Task`.
+    Task(TaskState),
+}
+
+/// What a `std::task::Scope` keeps track of.
+#[derive(Debug, Default)]
+pub struct ScopeState {
+    /// How many of the tasks spawned in it haven't finished.
+    pub live: usize,
+    /// Whether its `scope` call has ended, so no more tasks can be spawned
+    /// in it.
+    pub ended: bool,
+    /// The task waiting for the scope's tasks to finish, so it can end it.
+    pub closer: Option<TaskId>,
+}
+
+/// What a `std::task::Task` keeps track of.
+#[derive(Debug, Default)]
+pub struct TaskState {
+    /// What the task returned, once it has finished.
+    pub result: Option<Value>,
+    /// The tasks waiting for it to finish.
+    pub joiners: Vec<TaskId>,
 }
 
 impl Obj {
@@ -66,6 +92,8 @@ impl Obj {
                 Obj::Str(s) => s.len(),
                 // Parts shared with other lists are counted for each.
                 Obj::List(l) => l.len() * size_of::<Value>(),
+                Obj::Scope(_) => 0,
+                Obj::Task(t) => t.joiners.len() * size_of::<TaskId>(),
             }
     }
 }
@@ -146,6 +174,14 @@ impl Heap {
         self.alloc(Obj::List(list))
     }
 
+    pub fn alloc_scope(&mut self) -> Gc {
+        self.alloc(Obj::Scope(ScopeState::default()))
+    }
+
+    pub fn alloc_task(&mut self) -> Gc {
+        self.alloc(Obj::Task(TaskState::default()))
+    }
+
     fn alloc(&mut self, obj: Obj) -> Gc {
         self.live += 1;
         self.bytes += obj.size();
@@ -206,6 +242,27 @@ impl Heap {
         }
     }
 
+    fn get_mut(&mut self, gc: Gc) -> &mut Obj {
+        match &mut self.objects[gc.0 as usize] {
+            Some(obj) => obj,
+            None => panic!("internal error: object {gc} was used after being freed"),
+        }
+    }
+
+    pub fn scope(&mut self, gc: Gc) -> &mut ScopeState {
+        match self.get_mut(gc) {
+            Obj::Scope(s) => s,
+            _ => panic!("internal error: object {gc} is not a scope"),
+        }
+    }
+
+    pub fn task(&mut self, gc: Gc) -> &mut TaskState {
+        match self.get_mut(gc) {
+            Obj::Task(t) => t,
+            _ => panic!("internal error: object {gc} is not a task"),
+        }
+    }
+
     /// Whether two values of the same type are equal, comparing structs and
     /// enums field by field. Iterative, so long lists can't overflow the stack.
     pub fn equal(&self, a: &Value, b: &Value) -> bool {
@@ -235,6 +292,8 @@ impl Heap {
                     true
                 }
                 (Value::Void, Value::Void) => true,
+                // A scope or task is equal only to itself.
+                (Value::Scope(x), Value::Scope(y)) | (Value::Task(x), Value::Task(y)) => x == y,
                 // The type checker only allows `==` on types made of the above.
                 _ => panic!("internal error: comparing {a:?} with {b:?}"),
             };
@@ -274,7 +333,12 @@ impl Heap {
         work.extend(extra);
         while let Some(gc) = work.pop() {
             let i = gc.0 as usize;
-            if self.marks[i] {
+            // A register in a frame's window that the frame hasn't written
+            // yet may still hold a handle an earlier call left there, to an
+            // object freed since. The frame never reads it, so it is no
+            // reason to keep anything; if its slot has been reused, keeping
+            // that object a while longer does no harm.
+            if self.marks[i] || self.objects[i].is_none() {
                 continue;
             }
             self.marks[i] = true;
@@ -282,8 +346,9 @@ impl Heap {
                 Obj::Closure(c) => work.extend(c.upvalues.iter().filter_map(Value::handle)),
                 Obj::Cell(v) => work.extend(v.handle()),
                 Obj::Data(_, fields) => work.extend(fields.iter().filter_map(Value::handle)),
-                Obj::Str(_) => {}
+                Obj::Str(_) | Obj::Scope(_) => {}
                 Obj::List(l) => l.for_each(|v| work.extend(v.handle())),
+                Obj::Task(t) => work.extend(t.result.as_ref().and_then(Value::handle)),
             }
         }
 
@@ -390,6 +455,9 @@ impl Heap {
                     }
                     Value::Fn(gc) => format!("<fn {}>", self.closure(*gc).proto.signature),
                     Value::Native(name, _) => format!("<native fn: {name}>"),
+                    Value::Runtime(f) => format!("<native fn: {}>", f.name()),
+                    Value::Scope(_) => "<scope>".to_string(),
+                    Value::Task(_) => "<task>".to_string(),
                 },
             };
             out.push_str(&value);

@@ -1,0 +1,50 @@
+// Tasks run at the same time: three jobs that each wait a while, done one
+// after another and then all at once.
+//
+// `sleep(ms)` pauses only the task that calls it; the others carry on. So
+// one after another, the jobs take as long as all their waits added up, and
+// at the same time only as long as the longest one. `clock()` is the time
+// in milliseconds, to show how long each way took.
+
+import std::task;
+
+struct Job {
+    name: str,
+    ms: int,
+}
+
+// Waiting for something slow (a download, say), then saying it's done.
+fn run(job: Job, start: int) -> str {
+    sleep(job.ms);
+    println("  {job.name} done at {clock() - start} ms");
+    job.name
+}
+
+fn main() {
+    let jobs = [
+        Job { name: "boil the kettle", ms: 1000 },
+        Job { name: "toast the bread", ms: 1000 },
+        Job { name: "fetch the paper", ms: 1000 },
+    ];
+
+    println("one after another:");
+    let start = clock();
+    for job in jobs {
+        run(job, start);
+    }
+    let one_by_one = clock() - start;
+
+    // Each job is a task, and `scope` returns once they all have.
+    println("at the same time:");
+    let start = clock();
+    let done = task::scope(fn(s) {
+        let tasks = jobs.map(fn(job) { s.spawn(fn() { run(job, start) }) });
+        tasks.map(fn(t) { t.join() })
+    });
+    let together = clock() - start;
+
+    // The tasks finished shortest first, but `join` gives each its own
+    // result, so `done` is in the order the jobs were listed.
+    println("done: {", ".join(done)}");
+    println("one after another took {one_by_one} ms, at the same time {together} ms");
+}

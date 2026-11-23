@@ -19,6 +19,8 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |
 | [iterators.aja](iterators.aja) | `for` loops, ranges, `break` / `continue`, lazy `Iter` methods, an endless iterator, and a tree you can loop over |
 | [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |
+| [tasks.aja](tasks.aja) | `std::task`: spawning and joining tasks in a scope, a scope waiting for tasks nobody joins, a generic `par_map`, divide and conquer with nested scopes, errors as values from tasks, and two long loops taking turns |
+| [sleep.aja](sleep.aja) | Tasks running at the same time: three jobs that wait, done one after another and then at once, timed with `clock()` |
 | [fs/notes.aja](fs/notes.aja) | `std::fs`: appending to a file, checking it exists, its size, and reading its lines. Run `echo "buy milk" \| cargo run -- examples/fs/notes.aja` (it writes `notes.txt` in the working directory) |
 | [io/greet.aja](io/greet.aja) | `std::io`: a prompt, reading lines until the input ends, standard error, and `main` returning a `Result`. Run `printf 'Ada\nfirst\nsecond\n' \| cargo run -- examples/io/greet.aja` |
 | [modules/](modules) | A program in several files: `import`, `pub`, and a struct whose private field keeps an invariant. Run `cargo run -- examples/modules/main.aja` |
@@ -39,6 +41,8 @@ there.
 | [call_trace.aja](errors/call_trace.aja) | Division by zero, with the call trace (recursion collapsed) |
 | [overflow.aja](errors/overflow.aja) | Integer overflow, which is an error rather than a wraparound |
 | [assert.aja](errors/assert.aja) | A failed `assert` |
+| [task_failure.aja](errors/task_failure.aja) | An error inside a task, which stops the program |
+| [scope_ended.aja](errors/scope_ended.aja) | Spawning on a `Scope` kept after its `scope` call returned |
 | [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
 | [generic_body.aja](errors/generic_body.aja) | Generic code assuming things about a type parameter, and mismatched type arguments |
 | [question_mark.aja](errors/question_mark.aja) | `?` in a function that doesn't return a `Result`, and with a different error type |

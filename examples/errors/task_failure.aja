@@ -1,0 +1,20 @@
+// An error in a task stops the program, like an error anywhere else, and
+// points at the expression in the task that failed. A panic is a bug, so
+// it isn't something for the task's scope to catch and carry on from.
+//
+// expect: index 3 is out of range for a list of length 3
+
+import std::task;
+
+fn third_letter(word: str) -> str {
+    word.chars()[3]
+}
+
+fn main() {
+    let letters = task::scope(fn(s) {
+        let a = s.spawn(fn() { third_letter("tasks") });
+        let b = s.spawn(fn() { third_letter("ok!") });
+        [a.join(), b.join()]
+    });
+    println(", ".join(letters));
+}

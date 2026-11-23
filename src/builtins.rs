@@ -51,7 +51,7 @@ pub static BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "sleep",
-        description: "Sleeps for the given number of milliseconds",
+        description: "Sleeps for the given number of milliseconds, while other tasks run",
         params: Params::Fixed(&[("ms", Type::Int)]),
         returns: Type::Void,
     },

@@ -17,7 +17,7 @@ should get in its way.
 | A child's panic | **Cancels the scope and propagates.** The panicking task's siblings are cancelled, and once they have stopped the scope panics in its parent, so the panic reaches `main` and the program fails. The diagnostic shows the child's trace and where it was spawned. |
 | Cancellation | **A silent stop.** At its next safepoint, a cancelled task's frames are dropped and none of its code runs again. Nothing needs to unwind, because Aja has no destructors or `defer`. |
 | Blocking intrinsics | **Run on worker threads.** The task that called one is parked, and the others keep running. A kqueue/epoll poller comes with `std::net`. |
-| Primitives | **Bounded channels only.** `select`, `sleep`, and timeouts come later. |
+| Primitives | **Bounded channels, and `sleep`.** The built-in `sleep(ms)` sleeps only its task (added after step 2). `select` and timeouts come later. |
 
 ## The surface
 
@@ -252,7 +252,26 @@ Each step lands on its own with tests, in order:
 2. **`std::task`.** `Scope`, `Task<T>`, `scope`, `spawn`, and `join`, with
    the scheduler intrinsics, new heap objects, and GC roots. Waiting for the
    children at the end of a scope, and a panic on spawning into an ended
-   scope.
+   scope. ✅ `scope` is written in Aja
+   ([src/stdlib/task.aja](../src/stdlib/task.aja)) over two private
+   intrinsics, `open_scope` and `close_scope`, so the VM never calls a
+   closure from inside an intrinsic. An intrinsic that must wait (`join`,
+   `close_scope`) leaves the task's `ip` on its call, which runs again when
+   the task is woken. A finished task's result moves into its `Task` on the
+   heap, so the collector decides how long it lives, and its slot in the
+   scheduler is reused. Deadlock is reported, briefly; step 3 lists the
+   waiting tasks. GC stress found a bug older than tasks: a frame's window
+   can cover registers that earlier calls left stale handles in, which may
+   point at freed objects. Marking now skips those.
+
+   Added after step 2: the built-in `sleep(ms)`, which used to block the
+   VM's thread, sleeps only its task. The scheduler keeps timers by
+   deadline, wakes the tasks that are due whenever it picks the next task
+   (so a sleeper wakes on time even while others compute), and when no
+   task can run it sleeps the thread until the next deadline. A sleeping
+   task isn't a deadlock. `sleep` runs again when its task wakes, as the
+   other waiting intrinsics do, and a flag on the task makes that call
+   return. [examples/sleep.aja](../examples/sleep.aja) shows tasks overlap.
 3. **Panics and cancellation.** Cancelling a scope, propagating a panic with
    the combined trace, silent stops at safepoints, and deadlock detection.
 4. **The `var` rule.** The checker's capture analysis and diagnostic, and
@@ -262,7 +281,11 @@ Each step lands on its own with tests, in order:
    roots.
 6. **Blocking intrinsics off-thread.** Worker pool, `blocking` flags, per-task
    status, and waiting for an in-flight call when its task is cancelled.
-7. **Documentation.** `examples/concurrency.aja`, DESIGN updates (the M:1
+7. **Documentation.** Examples grow with each step: so far
+   [examples/tasks.aja](../examples/tasks.aja) and, in `examples/errors/`,
+   `task_failure.aja` and `scope_ended.aja`, which a test also runs with
+   switching and collection stress. Channels (step 5) get an example of
+   their own, and step 3 adds a deadlock example to `errors/`. DESIGN updates (the M:1
    note in "Concurrency runtime", the scheduler intrinsics as part of a
    backend's set), and doc comments for both modules.
 
@@ -283,7 +306,7 @@ Each step lands on its own with tests, in order:
 
 ## Not in this milestone
 
-M:N, `select`, `sleep` and timeouts (and with them `std::time`), unbounded
+M:N, `select`, timeouts, a `Duration` for `sleep` (with `std::time`), unbounded
 channels, a kqueue/epoll poller, supervision or restarting tasks, and the
 `Share` trait.
 

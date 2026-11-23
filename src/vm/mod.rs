@@ -33,13 +33,13 @@ mod tests;
 use bytecode::{Capture, Layout, Literals, Op, Proto};
 pub use compile::{Compiled, Compiler, ReplInput};
 use heap::{Closure, Gc, Heap, MAX_STR_LEN};
-use scheduler::Scheduler;
+use scheduler::{Intrinsic, Next, Outcome, Scheduler};
 use value::Value;
 
 /// Whether the VM implements the native function `name`.
 #[cfg(test)]
 pub fn native_implemented(name: &str) -> bool {
-    native::implementation(name).is_some()
+    native::implementation(name).is_some() || Intrinsic::named(name).is_some()
 }
 
 /// How much memory the call stack (frames and their registers) may use
@@ -153,6 +153,9 @@ impl Vm {
         let globals = BUILTINS
             .iter()
             .map(|b| {
+                if let Some(f) = Intrinsic::named(b.name) {
+                    return Value::Runtime(f);
+                }
                 let (name, f) = native::implementation(b.name).unwrap_or_else(|| {
                     panic!("built-in '{}' has no implementation in the VM", b.name)
                 });
@@ -244,6 +247,10 @@ impl Vm {
     /// Define native functions in their global slots.
     fn load_natives(&mut self, natives: &[(u32, Id)]) {
         for (slot, name) in natives {
+            if let Some(f) = Intrinsic::named(name) {
+                self.set_global(*slot, Value::Runtime(f));
+                continue;
+            }
             let (name, f) = native::implementation(name).unwrap_or_else(|| {
                 panic!("native function '{name}' has no implementation in the VM")
             });
@@ -324,10 +331,14 @@ impl Vm {
     /// Collect, keeping `extra` and everything it reaches alive too.
     fn collect_garbage_with(&mut self, extra: Vec<Gc>) {
         // Every task's registers and frames, the running one's included.
+        // Registers above every frame's window hold only dead values; inside
+        // one, a register not yet written may hold a stale handle (see
+        // `Heap::collect`).
         let stacks =
             std::iter::once((&self.regs[..], &self.frames[..])).chain(self.scheduler.stacks());
         let mut regs: Vec<&Value> = Vec::new();
         let mut roots = extra;
+        roots.extend(self.scheduler.held());
         for (task_regs, frames) in stacks {
             regs.extend(&task_regs[..live_regs(task_regs, frames)]);
             roots.extend(frames.iter().map(|f| f.closure));
@@ -362,7 +373,7 @@ impl Vm {
         self.scheduler.clear();
         for &closure in closures {
             let proto = self.heap.closure(closure).proto.clone();
-            self.scheduler.spawn(closure, proto);
+            self.scheduler.spawn(closure, proto, None, None);
         }
         self.scheduler.start(&mut self.regs, &mut self.frames);
         let result = self.execute();
@@ -469,14 +480,39 @@ impl Vm {
                 let v = $v;
                 let done = self.frames.pop().unwrap();
                 if self.frames.is_empty() {
-                    if !self.scheduler.finish(v, &mut self.regs, &mut self.frames) {
-                        return Ok(());
+                    let next =
+                        self.scheduler
+                            .finish(v, &mut self.heap, &mut self.regs, &mut self.frames);
+                    match next {
+                        Next::Switched => {
+                            load!();
+                            budget = self.scheduler.slice();
+                        }
+                        Next::Finished => return Ok(()),
+                        Next::Deadlock => return Err(deadlock(None)),
                     }
-                    load!();
-                    budget = self.scheduler.slice();
                 } else {
                     load!();
                     self.regs[done.ret] = v;
+                }
+            }};
+        }
+        // Make the running task wait. The call it is making, the
+        // instruction before `ip`, runs again once the task is woken.
+        macro_rules! wait {
+            () => {{
+                self.frames.last_mut().unwrap().ip = ip - 1;
+                match self.scheduler.wait(&mut self.regs, &mut self.frames) {
+                    Next::Switched => {
+                        load!();
+                        budget = self.scheduler.slice();
+                    }
+                    Next::Finished | Next::Deadlock => {
+                        self.frames.last_mut().unwrap().ip = ip;
+                        let mut err = self.error(String::new());
+                        err.message = deadlock(None).message;
+                        return Err(err);
+                    }
                 }
             }};
         }
@@ -704,6 +740,11 @@ impl Vm {
                         }
                         safepoint!();
                     }
+                    Value::Runtime(f) => match self.intrinsic(f, base + callee as usize + 1) {
+                        Outcome::Value(v) => reg!(dst) = v,
+                        Outcome::Wait => wait!(),
+                        Outcome::Error(msg) => throw!(msg),
+                    },
                     v => internal_error("Fn", &v),
                 },
                 Op::TailCall { callee, argc } => match reg!(callee).clone() {
@@ -733,10 +774,96 @@ impl Vm {
                             Err(msg) => throw!(msg),
                         }
                     }
+                    Value::Runtime(f) => match self.intrinsic(f, base + callee as usize + 1) {
+                        Outcome::Value(v) => ret!(v),
+                        Outcome::Wait => wait!(),
+                        Outcome::Error(msg) => throw!(msg),
+                    },
                     v => internal_error("Fn", &v),
                 },
                 Op::Return { src } => ret!(reg!(src).clone()),
                 Op::NoMatch => throw!("internal error: no arm of this match matched".to_string()),
+            }
+        }
+    }
+
+    /// Call the intrinsic `f`, whose arguments are in the registers from
+    /// `args`.
+    fn intrinsic(&mut self, f: Intrinsic, args: usize) -> Outcome {
+        let arg = |vm: &Self, i: usize| vm.regs[args + i].clone();
+        match f {
+            Intrinsic::OpenScope => {
+                if self.heap.wants_collection(0) {
+                    self.collect_garbage_with(Vec::new());
+                }
+                Outcome::Value(Value::Scope(self.heap.alloc_scope()))
+            }
+            Intrinsic::CloseScope => {
+                let Value::Scope(s) = arg(self, 0) else {
+                    internal_error("Scope", &arg(self, 0));
+                };
+                let current = self.scheduler.current();
+                let scope = self.heap.scope(s);
+                if scope.live == 0 {
+                    scope.ended = true;
+                    Outcome::Value(Value::Void)
+                } else {
+                    scope.closer = Some(current);
+                    Outcome::Wait
+                }
+            }
+            Intrinsic::Spawn => {
+                let (Value::Scope(s), Value::Fn(f)) = (arg(self, 0), arg(self, 1)) else {
+                    internal_error("Scope and Fn", &arg(self, 1));
+                };
+                if self.heap.scope(s).ended {
+                    return Outcome::Error(
+                        "cannot spawn a task in a scope that has ended: a Scope can only be \
+                         used inside the `task::scope` call that made it"
+                            .to_string(),
+                    );
+                }
+                // The scope and the function are still in their registers,
+                // so a collection here keeps them.
+                if self.heap.wants_collection(0) {
+                    self.collect_garbage_with(Vec::new());
+                }
+                let handle = self.heap.alloc_task();
+                self.heap.scope(s).live += 1;
+                let proto = self.heap.closure(f).proto.clone();
+                self.scheduler.spawn(f, proto, Some(handle), Some(s));
+                Outcome::Value(Value::Task(handle))
+            }
+            Intrinsic::Sleep => {
+                let Value::Int(ms) = arg(self, 0) else {
+                    internal_error("Int", &arg(self, 0));
+                };
+                if ms < 0 {
+                    return Outcome::Error(format!(
+                        "cannot sleep for {ms} milliseconds: the time must be 0 or more"
+                    ));
+                }
+                // The call runs again when the task wakes, and then returns.
+                if self.scheduler.take_slept() || ms == 0 {
+                    return Outcome::Value(Value::Void);
+                }
+                self.scheduler
+                    .set_timer(std::time::Duration::from_millis(ms as u64));
+                Outcome::Wait
+            }
+            Intrinsic::Join => {
+                let Value::Task(t) = arg(self, 0) else {
+                    internal_error("Task", &arg(self, 0));
+                };
+                let current = self.scheduler.current();
+                let task = self.heap.task(t);
+                match &task.result {
+                    Some(v) => Outcome::Value(v.clone()),
+                    None => {
+                        task.joiners.push(current);
+                        Outcome::Wait
+                    }
+                }
             }
         }
     }
@@ -792,6 +919,16 @@ impl Vm {
             span: Some(span),
             trace,
         }
+    }
+}
+
+/// The error when every task is waiting for another, so none can go on.
+/// `span` is the call the running task is waiting in, if it is waiting.
+fn deadlock(span: Option<Span>) -> RuntimeError {
+    RuntimeError {
+        message: "deadlock: every task is waiting for another task, so none can go on".to_string(),
+        span,
+        trace: Vec::new(),
     }
 }
 

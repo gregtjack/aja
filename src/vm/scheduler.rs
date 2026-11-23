@@ -14,16 +14,87 @@
 //! task's turn lasts [`SLICE`] safepoints, as Erlang counts reductions.
 //! Tasks take turns in the order they became ready, so a run goes the same
 //! way every time.
+//!
+//! A task can also wait: for another task to finish (`Task::join`), or for
+//! the tasks of a scope to (the end of `task::scope`). The intrinsic that
+//! waits leaves the task's `ip` on its call, so once the task is woken the
+//! call runs again and finds what it was waiting for.
+//!
+//! Or a task can sleep (the built-in `sleep`) until a time. The scheduler wakes
+//! the tasks whose time has come whenever it picks the next task to run,
+//! and when none can run it puts the VM's thread to sleep until the next
+//! one is due.
 
-use std::{collections::VecDeque, rc::Rc};
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, VecDeque},
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use super::{bytecode::Proto, heap::Gc, native, value::Value, Frame};
+use super::{
+    bytecode::Proto,
+    heap::{Gc, Heap},
+    native,
+    value::Value,
+    Frame,
+};
 
 /// How many safepoints a task's turn lasts.
 pub const SLICE: u32 = 2000;
 
 /// A task's place in [`Scheduler::tasks`].
 pub type TaskId = usize;
+
+/// The functions of `std::task` that the runtime implements itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intrinsic {
+    OpenScope,
+    CloseScope,
+    Spawn,
+    Join,
+    Sleep,
+}
+
+impl Intrinsic {
+    const ALL: [(Intrinsic, &'static str); 5] = [
+        (Intrinsic::OpenScope, "std::task::open_scope"),
+        (Intrinsic::CloseScope, "std::task::close_scope"),
+        (Intrinsic::Spawn, "std::task::Scope::spawn"),
+        (Intrinsic::Join, "std::task::Task::join"),
+        // The built-in, which sleeps only the task that calls it.
+        (Intrinsic::Sleep, "sleep"),
+    ];
+
+    /// The intrinsic declared as the native function `name`, if it is one.
+    pub fn named(name: &str) -> Option<Intrinsic> {
+        Self::ALL.iter().find(|(_, n)| *n == name).map(|(i, _)| *i)
+    }
+
+    pub fn name(self) -> &'static str {
+        Self::ALL.iter().find(|(i, _)| *i == self).unwrap().1
+    }
+}
+
+/// How a call of an [`Intrinsic`] went.
+pub enum Outcome {
+    /// It returned this value.
+    Value(Value),
+    /// The task must wait; the call runs again once it is woken.
+    Wait,
+    /// It stopped the program with this message.
+    Error(String),
+}
+
+/// Whether there is a task to run after the running one stopped.
+pub enum Next {
+    /// The next task is running now.
+    Switched,
+    /// Every task has finished.
+    Finished,
+    /// Some tasks are waiting, but none can run, so none ever will.
+    Deadlock,
+}
 
 struct Task {
     /// Its registers and frames, while it isn't running.
@@ -33,13 +104,25 @@ struct Task {
     /// How its last intrinsic that can fail went (see
     /// `std::native::status`), while it isn't running.
     status: (i64, String),
+    /// The `Task` that a spawned task's result goes in, and the scope it
+    /// was spawned in. `None` for the tasks a run starts with.
+    handle: Option<Gc>,
+    scope: Option<Gc>,
+    /// Set when the task's sleep has ended, so its call of `sleep`, which
+    /// runs again, returns.
+    slept: bool,
 }
 
 enum State {
-    /// Running, or waiting in the run queue for its turn.
+    /// Running, or in the run queue for its turn.
     Runnable,
-    /// Finished, with the value its function returned.
+    /// Waiting to be woken.
+    Waiting,
+    /// Finished, with the value its function returned. A spawned task's
+    /// value goes in its `Task` instead, and its slot is freed.
     Done(Value),
+    /// A slot that a new task can use.
+    Free,
 }
 
 pub struct Scheduler {
@@ -49,6 +132,13 @@ pub struct Scheduler {
     current: TaskId,
     /// The tasks waiting for a turn, in the order they get one.
     run_queue: VecDeque<TaskId>,
+    /// The slots of finished spawned tasks, to use for new ones.
+    free: Vec<TaskId>,
+    /// The sleeping tasks, by when each wakes; earliest first, and those
+    /// due at the same time in the order they went to sleep.
+    timers: BinaryHeap<Reverse<(Instant, u64, TaskId)>>,
+    /// How many timers have been set, to order those due at the same time.
+    timers_set: u64,
     /// End every turn at its first safepoint, to flush out code that
     /// depends on when switches happen. Used by tests.
     pub stress: bool,
@@ -63,6 +153,9 @@ impl Scheduler {
             tasks: Vec::new(),
             current: 0,
             run_queue: VecDeque::new(),
+            free: Vec::new(),
+            timers: BinaryHeap::new(),
+            timers_set: 0,
             stress: false,
             #[cfg(test)]
             switches: Vec::new(),
@@ -73,11 +166,69 @@ impl Scheduler {
     pub fn clear(&mut self) {
         self.tasks.clear();
         self.run_queue.clear();
+        self.free.clear();
+        self.timers.clear();
+    }
+
+    /// Wake the running task once `after` has passed. It still has to
+    /// [`wait`](Self::wait).
+    pub fn set_timer(&mut self, after: Duration) {
+        let at = Instant::now() + after;
+        self.timers_set += 1;
+        self.timers
+            .push(Reverse((at, self.timers_set, self.current)));
+    }
+
+    /// Whether the running task has just woken from a sleep, which then
+    /// counts as over.
+    pub fn take_slept(&mut self) -> bool {
+        std::mem::take(&mut self.tasks[self.current].slept)
+    }
+
+    /// Wake the sleeping tasks whose time has come.
+    fn wake_sleepers(&mut self) {
+        if self.timers.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        while let Some(&Reverse((at, _, id))) = self.timers.peek() {
+            if at > now {
+                break;
+            }
+            self.timers.pop();
+            self.tasks[id].slept = true;
+            self.wake(id);
+        }
+    }
+
+    /// The next task to run, waiting for a sleeping one to wake if none
+    /// can run now. `None` if no task can ever run.
+    fn next_task(&mut self) -> Option<TaskId> {
+        loop {
+            self.wake_sleepers();
+            if let Some(next) = self.run_queue.pop_front() {
+                return Some(next);
+            }
+            let &Reverse((at, _, _)) = self.timers.peek()?;
+            std::thread::sleep(at.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    /// The running task.
+    pub fn current(&self) -> TaskId {
+        self.current
     }
 
     /// A new task that calls `closure`, whose code is `proto` and which
-    /// takes no arguments, in the queue to run.
-    pub fn spawn(&mut self, closure: Gc, proto: Rc<Proto>) -> TaskId {
+    /// takes no arguments, in the queue to run. A spawned task has a
+    /// `handle` for its result and the `scope` it belongs to.
+    pub fn spawn(
+        &mut self,
+        closure: Gc,
+        proto: Rc<Proto>,
+        handle: Option<Gc>,
+        scope: Option<Gc>,
+    ) -> TaskId {
         let regs = vec![Value::Void; proto.num_regs as usize];
         let frames = vec![Frame {
             closure,
@@ -87,13 +238,25 @@ impl Scheduler {
             ret: 0,
             tail_call: None,
         }];
-        self.tasks.push(Task {
+        let task = Task {
             regs,
             frames,
             state: State::Runnable,
             status: (0, String::new()),
-        });
-        let id = self.tasks.len() - 1;
+            handle,
+            scope,
+            slept: false,
+        };
+        let id = match self.free.pop() {
+            Some(id) => {
+                self.tasks[id] = task;
+                id
+            }
+            None => {
+                self.tasks.push(task);
+                self.tasks.len() - 1
+            }
+        };
         self.run_queue.push_back(id);
         id
     }
@@ -120,6 +283,9 @@ impl Scheduler {
     /// stack goes in `regs` and `frames`. Every frame's `ip` must be up to
     /// date. Returns whether it switched.
     pub fn end_turn(&mut self, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) -> bool {
+        // Wake the sleepers whose time has come, so they get a turn soon
+        // even while other tasks compute without waiting.
+        self.wake_sleepers();
         let Some(next) = self.run_queue.pop_front() else {
             return false;
         };
@@ -128,27 +294,81 @@ impl Scheduler {
         true
     }
 
-    /// The running task has returned `value` from its outermost frame, so
-    /// it is done; run the next task. Returns false if there is none.
-    pub fn finish(&mut self, value: Value, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) -> bool {
-        self.tasks[self.current].state = State::Done(value);
-        regs.clear();
-        let Some(next) = self.run_queue.pop_front() else {
-            return false;
-        };
-        self.switch(next, regs, frames);
-        true
+    /// Put waiting task `id` back in the run queue.
+    pub fn wake(&mut self, id: TaskId) {
+        debug_assert!(matches!(self.tasks[id].state, State::Waiting));
+        self.tasks[id].state = State::Runnable;
+        self.run_queue.push_back(id);
     }
 
-    /// What each task returned, once every one has finished, and forget
-    /// them.
+    /// Make the running task wait until it is woken, and run the next
+    /// task. Every frame's `ip` must be up to date.
+    pub fn wait(&mut self, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) -> Next {
+        self.tasks[self.current].state = State::Waiting;
+        match self.next_task() {
+            Some(next) => {
+                self.switch(next, regs, frames);
+                Next::Switched
+            }
+            None => Next::Deadlock,
+        }
+    }
+
+    /// The running task has returned `value` from its outermost frame, so
+    /// it is done: a spawned task's value goes in its `Task`, which wakes
+    /// the tasks joining it, and the last task of a scope wakes the task
+    /// waiting to end it. Then the next task runs.
+    pub fn finish(
+        &mut self,
+        value: Value,
+        heap: &mut Heap,
+        regs: &mut Vec<Value>,
+        frames: &mut Vec<Frame>,
+    ) -> Next {
+        regs.clear();
+        frames.clear();
+        let task = &mut self.tasks[self.current];
+        match task.handle.take() {
+            None => task.state = State::Done(value),
+            Some(handle) => {
+                task.state = State::Free;
+                let scope = task.scope.take().expect("a spawned task has a scope");
+                self.free.push(self.current);
+                let state = heap.task(handle);
+                state.result = Some(value);
+                for joiner in std::mem::take(&mut state.joiners) {
+                    self.wake(joiner);
+                }
+                let scope = heap.scope(scope);
+                scope.live -= 1;
+                if scope.live == 0 {
+                    if let Some(closer) = scope.closer.take() {
+                        self.wake(closer);
+                    }
+                }
+            }
+        }
+        match self.next_task() {
+            Some(next) => {
+                self.switch(next, regs, frames);
+                Next::Switched
+            }
+            None if self.tasks.iter().any(|t| matches!(t.state, State::Waiting)) => Next::Deadlock,
+            None => Next::Finished,
+        }
+    }
+
+    /// What each task the run started with returned, once every task has
+    /// finished, and forget them.
     pub fn take_results(&mut self) -> Vec<Value> {
         self.run_queue.clear();
+        self.free.clear();
         std::mem::take(&mut self.tasks)
             .into_iter()
-            .map(|t| match t.state {
-                State::Done(v) => v,
-                State::Runnable => unreachable!("every task has finished"),
+            .filter_map(|t| match t.state {
+                State::Done(v) => Some(v),
+                State::Free => None,
+                State::Runnable | State::Waiting => unreachable!("every task has finished"),
             })
             .collect()
     }
@@ -163,8 +383,16 @@ impl Scheduler {
     pub fn results(&self) -> impl Iterator<Item = &Value> {
         self.tasks.iter().filter_map(|t| match &t.state {
             State::Done(v) => Some(v),
-            State::Runnable => None,
+            _ => None,
         })
+    }
+
+    /// The `Task` and `Scope` of each spawned task that hasn't finished,
+    /// which the collector keeps.
+    pub fn held(&self) -> impl Iterator<Item = Gc> + '_ {
+        self.tasks
+            .iter()
+            .flat_map(|t| t.handle.into_iter().chain(t.scope))
     }
 
     /// Move the running task's stack (from `regs` and `frames`) and status

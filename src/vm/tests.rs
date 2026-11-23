@@ -1040,6 +1040,24 @@ fn examples_run() {
 }
 
 #[test]
+fn task_examples_run_under_stress() {
+    // Switching tasks at every safepoint and collecting at every
+    // allocation mustn't change whether an example works.
+    let mut ran = 0;
+    for path in aja_files("examples") {
+        let src = std::fs::read_to_string(&path).unwrap();
+        if !src.contains("import std::task;") {
+            continue;
+        }
+        if let Err(e) = run_std(&src, true).1 {
+            panic!("{} failed under stress: {}", path.display(), e.message);
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "no example uses std::task");
+}
+
+#[test]
 fn error_examples_fail_as_described() {
     // Each file lists the errors it should produce in `// expect:` lines.
     for path in aja_files("examples/errors") {
@@ -2167,4 +2185,309 @@ fn a_task_that_fails_stops_the_run() {
         .run_as_tasks(&program.unwrap(), &["a", "b"])
         .unwrap_err();
     assert_eq!(err.message, "division by zero");
+}
+
+/// Run a program that may import the standard library, switching tasks at
+/// every safepoint and collecting at every allocation if `stress`.
+fn run_std(src: &str, stress: bool) -> (Vm, Result<Value, RuntimeError>) {
+    let root: std::collections::HashMap<String, String> =
+        [("main.aja".to_string(), src.to_string())].into();
+    let (_, program) = crate::module::build(&root, "main.aja");
+    let program = program.unwrap_or_else(|es| {
+        let msgs: Vec<String> = es.into_iter().map(|e| e.message).collect();
+        panic!("test program has errors: {msgs:#?}")
+    });
+    let mut vm = Vm::new();
+    vm.heap.stress = stress;
+    vm.scheduler.stress = stress;
+    let result = vm.run_program(&program);
+    (vm, result)
+}
+
+/// `main`'s value, shown, both normally and under stress, which must agree.
+#[track_caller]
+fn std_value(src: &str) -> String {
+    let shown = [false, true].map(|stress| match run_std(src, stress) {
+        (vm, Ok(v)) => vm.heap.repr(&v),
+        (_, Err(e)) => panic!("program failed (stress: {stress}): {}", e.message),
+    });
+    assert_eq!(shown[0], shown[1], "stress changed the result");
+    shown[0].clone()
+}
+
+#[test]
+fn scopes_spawn_and_join_tasks() {
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+             fn main() -> int {
+                 task::scope(fn(s) {
+                     let a = s.spawn(fn() { fib(15) });
+                     let b = s.spawn(fn() { fib(16) });
+                     a.join() + b.join()
+                 })
+             }"
+        ),
+        "1597"
+    );
+    // Joining again gives the same value, and so does joining a task from
+    // another task, or after it has finished.
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> (int, int, str) {
+                 task::scope(fn(s) {
+                     let a = s.spawn(fn() { \"a\" + \"b\" });
+                     let b = s.spawn(fn() { a.join() + \"c\" });
+                     let first = b.join();
+                     (first.len(), b.join().len(), a.join())
+                 })
+             }"
+        ),
+        "(3, 3, \"ab\")"
+    );
+}
+
+#[test]
+fn a_scope_waits_for_its_tasks() {
+    // Nothing joins the tasks, but `scope` doesn't return until they are
+    // done, and what each makes is in the list it returns.
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> List<int> {
+                 let tasks = task::scope(fn(s) {
+                     [1, 2, 3].map(fn(x) { s.spawn(fn() { x * 10 }) })
+                 });
+                 tasks.map(fn(t) { t.join() })
+             }"
+        ),
+        "[10, 20, 30]"
+    );
+    // A task that returns nothing, and scopes inside tasks.
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> int {
+                 task::scope(fn(outer) {
+                     let quiet = outer.spawn(fn() { assert(true); });
+                     let t = outer.spawn(fn() {
+                         task::scope(fn(inner) {
+                             let ts = [1, 2, 3].map(fn(x) { inner.spawn(fn() { x * x }) });
+                             ts.fold(0, fn(sum, t) { sum + t.join() })
+                         })
+                     });
+                     quiet.join();
+                     t.join()
+                 })
+             }"
+        ),
+        "14"
+    );
+}
+
+#[test]
+fn many_tasks_reuse_their_slots() {
+    let src = "import std::task;
+               fn main() -> int {
+                   var total = 0;
+                   for i in 0..20000 {
+                       total = total + task::scope(fn(s) { s.spawn(fn() { i % 3 }).join() });
+                   }
+                   total
+               }";
+    let (vm, result) = run_std(src, false);
+    assert_eq!(show(&vm, &result.unwrap()), "Int(19999)");
+    // One task ran at a time, so only two slots were ever needed: `main`'s
+    // and the one each new task took over.
+    assert!(vm.scheduler.switches.iter().all(|&id| id < 2));
+}
+
+#[test]
+fn a_task_holds_its_values_while_it_waits() {
+    // Every safepoint switches and every allocation collects: the tasks'
+    // results live only in their `Task`s, and a waiting task's values only
+    // in its parked registers.
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn word(i: int) -> str { \"w{i}\" }
+             fn main() -> str {
+                 task::scope(fn(s) {
+                     let ts = [0, 1, 2, 3].map(fn(i) {
+                         s.spawn(fn() { [word(i), word(i + 1)] })
+                     });
+                     let joined = ts.map(fn(t) { \"-\".join(t.join()) });
+                     \",\".join(joined)
+                 })
+             }"
+        ),
+        "\"w0-w1,w1-w2,w2-w3,w3-w4\""
+    );
+}
+
+#[test]
+fn a_scope_cannot_be_used_after_it_ends() {
+    let (_, result) = run_std(
+        "import std::task;
+         fn main() {
+             var kept: Option<task::Scope> = None;
+             task::scope(fn(s) { kept = Some(s); });
+             match kept {
+                 Some(s) => { s.spawn(fn() { 1 }); }
+                 None => {}
+             }
+         }",
+        false,
+    );
+    assert!(result
+        .unwrap_err()
+        .message
+        .starts_with("cannot spawn a task in a scope that has ended"));
+}
+
+#[test]
+fn a_task_waiting_for_itself_is_a_deadlock() {
+    let (_, result) = run_std(
+        "import std::task;
+         fn main() {
+             var me: Option<task::Task<int>> = None;
+             task::scope(fn(s) {
+                 let t = s.spawn(fn() {
+                     match me { Some(t) => t.join(), None => 0 }
+                 });
+                 me = Some(t);
+             });
+         }",
+        false,
+    );
+    assert!(result.unwrap_err().message.starts_with("deadlock"));
+}
+
+#[test]
+fn an_error_in_a_task_stops_the_program() {
+    let (_, result) = run_std(
+        "import std::task;
+         fn main() -> int {
+             task::scope(fn(s) {
+                 let a = s.spawn(fn() { 1 / 0 });
+                 a.join()
+             })
+         }",
+        false,
+    );
+    assert_eq!(result.unwrap_err().message, "division by zero");
+}
+
+#[test]
+fn tasks_are_equal_only_to_themselves() {
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> (bool, bool) {
+                 task::scope(fn(s) {
+                     let a = s.spawn(fn() { 1 });
+                     let b = s.spawn(fn() { 1 });
+                     (a == a, a == b)
+                 })
+             }"
+        ),
+        "(true, false)"
+    );
+}
+
+#[test]
+fn stale_registers_in_a_wider_frame_are_not_roots() {
+    // `scope`'s frame leaves its scope in registers that `List::map`'s
+    // larger frame, which starts at the same place, covers before writing
+    // them. The scope has been freed by then, which must not matter.
+    let src = "import std::task;
+               fn main() -> List<int> {
+                   task::scope(fn(s) { s.spawn(fn() { 10 }); 1 });
+                   [1].map(fn(t) { 5 })
+               }";
+    let (vm, result) = run_std(src, true);
+    assert_eq!(vm.heap.repr(&result.unwrap()), "[5]");
+}
+
+#[test]
+fn a_task_nobody_joins_keeps_its_task_and_scope() {
+    // The handle `spawn` returns is dropped, so only the scheduler knows it
+    // while the task runs, and the task allocates (and so collects) before
+    // it finishes and puts its result there.
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> int {
+                 task::scope(fn(s) {
+                     s.spawn(fn() { let x = \"a\" + \"b\"; [x, x].len() });
+                     1
+                 })
+             }"
+        ),
+        "1"
+    );
+}
+
+#[test]
+fn sleeping_tasks_sleep_at_the_same_time() {
+    // Three 100 ms sleeps one after another would take 300 ms; at the same
+    // time they take a little over 100.
+    let src = "import std::task;
+               fn main() -> int {
+                   let start = clock();
+                   task::scope(fn(s) {
+                       for _ in 0..3 { s.spawn(fn() { sleep(100); }); }
+                   });
+                   clock() - start
+               }";
+    for stress in [false, true] {
+        let (vm, result) = run_std(src, stress);
+        let elapsed: i64 = vm.heap.repr(&result.unwrap()).parse().unwrap();
+        assert!((100..250).contains(&elapsed), "took {elapsed} ms");
+    }
+}
+
+#[test]
+fn sleepers_wake_in_order_of_their_times() {
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> bool {
+                 let woke = task::scope(fn(s) {
+                     [60, 20, 40].map(fn(ms) { s.spawn(fn() { sleep(ms); clock() }) })
+                 }).map(fn(t) { t.join() });
+                 woke[1] <= woke[2] && woke[2] <= woke[0]
+             }"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn a_sleeper_wakes_while_another_task_computes() {
+    // The busy task never waits, but it gives way at safepoints, and then
+    // the sleeper, whose time has come, gets a turn.
+    let src = "import std::task;
+               fn main() -> int {
+                   let start = clock();
+                   task::scope(fn(s) {
+                       s.spawn(fn() { var n = 0; while clock() - start < 400 { n = n + 1; } n });
+                       let sleeper = s.spawn(fn() { sleep(50); clock() - start });
+                       sleeper.join()
+                   })
+               }";
+    let (vm, result) = run_std(src, false);
+    let woke: i64 = vm.heap.repr(&result.unwrap()).parse().unwrap();
+    assert!((50..300).contains(&woke), "woke after {woke} ms");
+}
+
+#[test]
+fn sleep_needs_a_time_of_zero_or_more() {
+    assert_eq!(main_value("int", "sleep(0); 1"), "Int(1)");
+    assert_eq!(
+        failure("fn main() { sleep(-5); }"),
+        "cannot sleep for -5 milliseconds: the time must be 0 or more"
+    );
 }

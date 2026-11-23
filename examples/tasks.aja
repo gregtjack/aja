@@ -1,0 +1,103 @@
+// Tasks: functions that run at the same time, in scopes.
+//
+// `task::scope` gives a function a scope to start tasks in, and doesn't
+// return until every one of them has finished. `spawn` starts a task and
+// returns at once, with a `Task` to `join` later for its result. Any
+// function can wait, and none is written differently because it does.
+//
+// For now every task runs on one OS thread, taking turns: a task that
+// computes for a long time is paused now and then to let the others go on.
+
+import std::task;
+
+fn fib(n: int) -> int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+// `f` applied to each value, each in a task of its own. Generic, like any
+// other function: tasks need nothing special from the values they return.
+fn par_map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
+    task::scope(fn(s) {
+        let tasks = xs.map(fn(x) { s.spawn(fn() { f(x) }) });
+        tasks.map(fn(t) { t.join() })
+    })
+}
+
+// The sum of `xs[start..end]`, splitting the work in half until the halves
+// are small. Each half is a task with a scope of its own.
+fn sum(xs: List<int>, start: int, end: int) -> int {
+    if end - start <= 4 {
+        var total = 0;
+        for i in start..end {
+            total = total + xs[i];
+        }
+        return total;
+    }
+    let mid = (start + end) / 2;
+    task::scope(fn(s) {
+        let left = s.spawn(fn() { sum(xs, start, mid) });
+        let right = s.spawn(fn() { sum(xs, mid, end) });
+        left.join() + right.join()
+    })
+}
+
+fn parse_all(words: List<str>) -> List<Result<int, str>> {
+    par_map(words, fn(w) {
+        match w.parse_int() {
+            Some(n) => Ok(n),
+            None => Err("'{w}' is not a number"),
+        }
+    })
+}
+
+// Counting to `n`, saying how far it has got every 100,000.
+fn count(name: str, n: int) -> int {
+    for i in 0..n {
+        if i % 100000 == 0 {
+            println("  {name} is at {i}");
+        }
+    }
+    n
+}
+
+fn main() {
+    // Start two tasks, then wait for both.
+    let (a, b) = task::scope(fn(s) {
+        let a = s.spawn(fn() { fib(20) });
+        let b = s.spawn(fn() { fib(21) });
+        (a.join(), b.join())
+    });
+    println("fib(20) + fib(21) = {a + b}, which is fib(22): {fib(22)}");
+
+    // Nothing joins these tasks, but `scope` waits for them anyway, so
+    // "all greeted" comes last.
+    task::scope(fn(s) {
+        for name in ["Ada", "Grace", "Alan"] {
+            s.spawn(fn() { println("hello, {name}") });
+        }
+        println("all started");
+    });
+    println("all greeted");
+
+    let squares = par_map([1, 2, 3, 4, 5], fn(x) { x * x });
+    println("squares: {squares.len()} of them, the last {squares[4]}");
+
+    let xs = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4];
+    println("sum: {sum(xs, 0, xs.len())}");
+
+    // An error is a value like any other: a task returns it, and `join`
+    // hands it back.
+    for r in parse_all(["12", "x7", "30"]) {
+        match r {
+            Ok(n) => println("parsed {n}"),
+            Err(e) => println("error: {e}"),
+        }
+    }
+
+    // Neither task waits for anything, but they take turns all the same.
+    println("two long counts:");
+    task::scope(fn(s) {
+        s.spawn(fn() { count("a", 300000) });
+        s.spawn(fn() { count("b", 300000) });
+    });
+}

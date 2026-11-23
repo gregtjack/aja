@@ -1,0 +1,61 @@
+// Tasks: running functions at the same time.
+//
+//     import std::task;
+//
+//     fn main() {
+//         let total = task::scope(fn(s) {
+//             let a = s.spawn(fn() { fib(30) });
+//             let b = s.spawn(fn() { fib(31) });
+//             a.join() + b.join()
+//         });
+//         println("{total}");
+//     }
+//
+// A task is a function running alongside the others: a green thread, which
+// the runtime switches to and from on its own, so a task that computes for a
+// long time doesn't hold the others up. Tasks are cheap, and any function can
+// wait (on `join`, for instance) without being written differently.
+//
+// Every task belongs to a scope, and a scope doesn't end until all of its
+// tasks have: `scope` returns only once every task spawned in it has
+// finished. So a task never outlives the code that started it, and a value
+// a task returns is never lost.
+//
+// For now every task runs on one OS thread, so tasks take turns rather than
+// running in parallel. Waiting overlaps all the same: while one task waits
+// (in `join`, or in the built-in `sleep(ms)`), the others run.
+
+// The tasks started inside one call of `scope`.
+pub native struct Scope;
+
+// A task that will give a value of type `T` when it finishes.
+pub native struct Task<T>;
+
+// Run `body` with a new scope, then wait for every task spawned in it to
+// finish. Returns what `body` returned.
+pub fn scope<T>(body: (Scope) -> T) -> T {
+    let s = open_scope();
+    let result = body(s);
+    close_scope(s);
+    result
+}
+
+impl Scope {
+    // Start running `f` as a new task in this scope; the caller carries on.
+    // Stops the program if the scope has ended, which can only happen if
+    // `self` was kept after its `scope` returned.
+    pub native fn spawn<T>(self, f: () -> T) -> Task<T>;
+}
+
+impl<T> Task<T> {
+    // Wait for the task to finish, and give what it returned. Joining a task
+    // again gives the same value.
+    pub native fn join(self) -> T;
+}
+
+// A new scope, with no tasks yet.
+native fn open_scope() -> Scope;
+
+// Wait until every task in `s` has finished, then end it, so no more can be
+// spawned in it.
+native fn close_scope(s: Scope);

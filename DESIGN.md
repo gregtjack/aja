@@ -290,7 +290,9 @@ by a number with a fractional part.
    its scope and propagates to the parent. A cancelled task stops silently
    at its next safepoint (a call or a loop's back edge). Blocking
    intrinsics run on worker threads so that they block only their task.
-   Several OS threads, `select`, and timers come after.
+   Several OS threads, `select`, and timeouts come after. Started: tasks
+   in the VM ✅, `std::task` (scopes, `spawn`, `join`) ✅, and a `sleep`
+   that sleeps only its task ✅.
 10. **Cranelift AoT backend** producing native binaries, with the same runtime
     semantics as the VM.
 

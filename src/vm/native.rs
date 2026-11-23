@@ -1,12 +1,12 @@
 //! The VM's implementations of the built-in functions declared in
-//! `crate::builtins`.
+//! `crate::builtins`, except `sleep`, which the scheduler implements (see
+//! `scheduler::Intrinsic`).
 
 use std::{
     cell::RefCell,
     fs,
     io::{self, BufRead, Read, Write},
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::{heap::Heap, value::Value};
@@ -335,13 +335,6 @@ static NATIVES: &[(&str, NativeFn)] = &[
             .unwrap()
             .as_millis();
         Ok(Value::Int(ms as i64))
-    }),
-    ("sleep", |_, args| {
-        let [Value::Int(ms)] = args else {
-            return Err(bad_args("sleep", args));
-        };
-        thread::sleep(Duration::from_millis((*ms).max(0) as u64));
-        Ok(Value::Void)
     }),
     ("assert", |_, args| match args {
         [Value::Bool(true)] => Ok(Value::Void),
@@ -765,7 +758,8 @@ mod tests {
     fn every_builtin_is_implemented() {
         for b in BUILTINS {
             assert!(
-                implementation(b.name).is_some(),
+                implementation(b.name).is_some()
+                    || super::super::scheduler::Intrinsic::named(b.name).is_some(),
                 "built-in '{}' has no implementation",
                 b.name
             );
