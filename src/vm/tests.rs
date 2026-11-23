@@ -2058,3 +2058,113 @@ fn repl_let_patterns_define_globals() {
     assert_eq!(eval("let (a, b) = (2, 3)"), "Void");
     assert_eq!(eval("a * b"), "Int(6)");
 }
+
+/// Run the functions `names` of a program (which may import the standard
+/// library) as tasks, returning the VM and what each task returned, shown.
+fn run_tasks(src: &str, names: &[&str], stress: bool) -> (Vm, Vec<String>) {
+    let root: std::collections::HashMap<String, String> =
+        [("main.aja".to_string(), format!("{src}\nfn main() {{}}"))].into();
+    let (_, program) = crate::module::build(&root, "main.aja");
+    let program = program.unwrap_or_else(|es| {
+        let msgs: Vec<String> = es.into_iter().map(|e| e.message).collect();
+        panic!("test program has errors: {msgs:#?}")
+    });
+    let mut vm = Vm::new();
+    vm.heap.stress = stress;
+    vm.scheduler.stress = stress;
+    let results = match vm.run_as_tasks(&program, names) {
+        Ok(results) => results,
+        Err(e) => panic!("program failed: {}", e.message),
+    };
+    let shown = results.iter().map(|v| show(&vm, v)).collect();
+    (vm, shown)
+}
+
+#[test]
+fn tasks_take_turns() {
+    let src =
+        "fn count(n: int) -> int { var total = 0; for i in 0..n { total = total + i; } total }
+               fn a() -> int { count(10000) }
+               fn b() -> int { count(20000) }";
+    let (vm, results) = run_tasks(src, &["a", "b"], false);
+    assert_eq!(results, ["Int(49995000)", "Int(199990000)"]);
+    // Neither loop blocks, but each gives way after a slice of safepoints:
+    // `a` runs first, and the two alternate until `a` is done.
+    let switches = &vm.scheduler.switches;
+    assert!(switches.len() > 10, "only switched {switches:?}");
+    assert_eq!(switches[..4], [0, 1, 0, 1]);
+    assert_eq!(*switches.last().unwrap(), 1);
+}
+
+#[test]
+fn recursion_is_a_safepoint() {
+    // No loops: only calls give way.
+    let src = "fn fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+               fn a() -> int { fib(20) }
+               fn b() -> int { fib(21) }";
+    let (vm, results) = run_tasks(src, &["a", "b"], false);
+    assert_eq!(results, ["Int(6765)", "Int(10946)"]);
+    assert!(vm.scheduler.switches.len() > 10);
+}
+
+#[test]
+fn tasks_switched_at_every_safepoint_keep_their_values() {
+    // Every safepoint switches and every allocation collects, so a value
+    // a parked task holds is freed (and its use panics) unless it is a root.
+    let src = "struct Box { items: List<str> }
+               fn build(prefix: str, n: int) -> str {
+                   var b = Box { items: [] };
+                   for i in 0..n {
+                       let keep = fn() -> str { \"{prefix}{i}\" };
+                       b = Box { items: b.items.push(keep()) };
+                   }
+                   \",\".join(b.items)
+               }
+               fn a() -> str { build(\"a\", 4) }
+               fn b() -> str { build(\"b\", 3) }
+               fn c() -> (str, int) { (build(\"c\", 2), 7) }";
+    let (vm, results) = run_tasks(src, &["a", "b", "c"], true);
+    assert_eq!(results[..2], ["Str(\"a0,a1,a2,a3\")", "Str(\"b0,b1,b2\")"]);
+    assert!(vm.scheduler.switches.len() > 30);
+}
+
+#[test]
+fn each_task_has_its_own_intrinsic_status() {
+    // `fs::read_to_string` calls an intrinsic and then reads its status,
+    // and a switch can come between the two. Another task's successful
+    // intrinsic mustn't make the failed read look like it succeeded.
+    let src = "import std::fs;
+               fn fails() -> int {
+                   var failed = 0;
+                   for _ in 0..50 {
+                       match fs::read_to_string(\"/no/such/aja/file\") {
+                           Err(_) => { failed = failed + 1; }
+                           Ok(_) => {}
+                       }
+                   }
+                   failed
+               }
+               fn succeeds() -> int {
+                   var ok = 0;
+                   for _ in 0..200 {
+                       if fs::read_dir(\".\").is_ok() { ok = ok + 1; }
+                   }
+                   ok
+               }";
+    let (_, results) = run_tasks(src, &["fails", "succeeds"], true);
+    assert_eq!(results, ["Int(50)", "Int(200)"]);
+}
+
+#[test]
+fn a_task_that_fails_stops_the_run() {
+    let src = "fn a() -> int { var n = 0; for i in 0..100000 { n = n + i; } n }
+               fn b() -> int { 1 / 0 }
+               fn main() {}";
+    let root: std::collections::HashMap<String, String> =
+        [("main.aja".to_string(), src.to_string())].into();
+    let (_, program) = crate::module::build(&root, "main.aja");
+    let err = Vm::new()
+        .run_as_tasks(&program.unwrap(), &["a", "b"])
+        .unwrap_err();
+    assert_eq!(err.message, "division by zero");
+}

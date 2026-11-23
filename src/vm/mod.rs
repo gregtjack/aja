@@ -6,6 +6,10 @@
 //! until it uses [`DEFAULT_STACK_LIMIT`] bytes. Tail calls reuse their frame,
 //! so tail recursion runs in constant space. Closures, captured variables,
 //! struct and enum values, and strings live on a garbage-collected [`heap`].
+//!
+//! The VM runs tasks, green threads that take turns on the VM's thread (see
+//! [`scheduler`]). Each has its own frames and registers, and so its own
+//! stack limit.
 
 use std::{mem::size_of, rc::Rc};
 
@@ -20,6 +24,7 @@ pub mod compile;
 pub mod heap;
 pub mod list;
 mod native;
+mod scheduler;
 pub mod value;
 
 #[cfg(test)]
@@ -28,6 +33,7 @@ mod tests;
 use bytecode::{Capture, Layout, Literals, Op, Proto};
 pub use compile::{Compiled, Compiler, ReplInput};
 use heap::{Closure, Gc, Heap, MAX_STR_LEN};
+use scheduler::Scheduler;
 use value::Value;
 
 /// Whether the VM implements the native function `name`.
@@ -131,10 +137,13 @@ pub struct Vm {
     globals: Vec<Value>,
     /// The string literals, by number; see [`Literals`]. They are roots.
     literals: Vec<Value>,
-    /// Every call's registers, one window after another.
+    /// The running task's registers, every call's one window after another.
     regs: Vec<Value>,
+    /// The running task's calls in progress.
     frames: Vec<Frame>,
-    /// The most memory, in bytes, the call stack may use.
+    /// The other tasks, and which runs next.
+    scheduler: Scheduler,
+    /// The most memory, in bytes, each task's call stack may use.
     pub stack_limit: usize,
 }
 
@@ -156,6 +165,7 @@ impl Vm {
             literals: Vec::new(),
             regs: Vec::new(),
             frames: Vec::new(),
+            scheduler: Scheduler::new(),
             stack_limit: DEFAULT_STACK_LIMIT,
         }
     }
@@ -182,6 +192,36 @@ impl Vm {
             }
         }
         Ok(value)
+    }
+
+    /// Run the functions of `program` named `names`, which take no
+    /// arguments, as tasks, the first one first, until all have finished;
+    /// return what each returned. Programs can't start tasks themselves yet,
+    /// so this is how tests exercise the scheduler.
+    #[cfg(test)]
+    pub fn run_as_tasks(
+        &mut self,
+        program: &Compiled,
+        names: &[&str],
+    ) -> Result<Vec<Value>, RuntimeError> {
+        self.load_literals(&program.literals);
+        self.load_functions(&program.functions);
+        self.load_natives(&program.natives);
+        let closures: Vec<Gc> = names
+            .iter()
+            .map(|name| {
+                let (slot, _) = program
+                    .functions
+                    .iter()
+                    .find(|(_, p)| p.name.as_ref().is_some_and(|n| n == name))
+                    .unwrap_or_else(|| panic!("no function '{name}'"));
+                let Value::Fn(f) = self.globals[*slot as usize] else {
+                    unreachable!("'{name}' is a function");
+                };
+                f
+            })
+            .collect();
+        self.run_tasks(&closures)
     }
 
     /// Run a compiled REPL input and return its value.
@@ -283,18 +323,18 @@ impl Vm {
 
     /// Collect, keeping `extra` and everything it reaches alive too.
     fn collect_garbage_with(&mut self, extra: Vec<Gc>) {
-        // Registers above every frame's window hold only dead values.
-        let live_regs = self
-            .frames
-            .iter()
-            .map(|f| f.base + f.proto.num_regs as usize)
-            .max()
-            .unwrap_or(0)
-            .min(self.regs.len());
-        let roots: Vec<Gc> = self.frames.iter().map(|f| f.closure).chain(extra).collect();
+        // Every task's registers and frames, the running one's included.
+        let stacks =
+            std::iter::once((&self.regs[..], &self.frames[..])).chain(self.scheduler.stacks());
+        let mut regs: Vec<&Value> = Vec::new();
+        let mut roots = extra;
+        for (task_regs, frames) in stacks {
+            regs.extend(&task_regs[..live_regs(task_regs, frames)]);
+            roots.extend(frames.iter().map(|f| f.closure));
+        }
         self.heap.collect(
-            self.regs[..live_regs]
-                .iter()
+            regs.into_iter()
+                .chain(self.scheduler.results())
                 .chain(&self.globals)
                 .chain(&self.literals),
             roots,
@@ -311,31 +351,66 @@ impl Vm {
 
     /// Call `closure`, which takes no arguments.
     fn run(&mut self, closure: Gc) -> Result<Value, RuntimeError> {
-        let proto = self.heap.closure(closure).proto.clone();
-        self.frames.clear();
-        self.regs.clear();
-        self.regs.resize(proto.num_regs as usize, Value::Void);
-        self.frames.push(Frame {
-            closure,
-            proto,
-            ip: 0,
-            base: 0,
-            ret: 0,
-            tail_call: None,
-        });
+        self.run_tasks(&[closure])
+            .map(|mut results| results.swap_remove(0))
+    }
+
+    /// Run each of `closures`, which take no arguments, as a task, until
+    /// every task has finished; return what each returned. The first task
+    /// runs first.
+    fn run_tasks(&mut self, closures: &[Gc]) -> Result<Vec<Value>, RuntimeError> {
+        self.scheduler.clear();
+        for &closure in closures {
+            let proto = self.heap.closure(closure).proto.clone();
+            self.scheduler.spawn(closure, proto);
+        }
+        self.scheduler.start(&mut self.regs, &mut self.frames);
         let result = self.execute();
         self.frames.clear();
         self.regs.clear();
-        result
+        match result {
+            Ok(()) => Ok(self.scheduler.take_results()),
+            Err(e) => {
+                self.scheduler.clear();
+                Err(e)
+            }
+        }
     }
 
-    /// Run until the outermost frame returns.
-    fn execute(&mut self) -> Result<Value, RuntimeError> {
+    /// Run the running task, and then the others in turn, until every
+    /// task has finished or one fails.
+    fn execute(&mut self) -> Result<(), RuntimeError> {
         let frame = self.frames.last().unwrap();
         let mut closure = frame.closure;
         let mut proto = frame.proto.clone();
         let mut base = frame.base;
         let mut ip = frame.ip;
+        let mut budget = self.scheduler.slice();
+
+        // Pick up where the innermost frame is, after a switch.
+        macro_rules! load {
+            () => {{
+                let frame = self.frames.last().unwrap();
+                closure = frame.closure;
+                proto = frame.proto.clone();
+                base = frame.base;
+                ip = frame.ip;
+            }};
+        }
+        // Count a safepoint, and end the task's turn once its budget runs
+        // out. `ip` must be where this task goes on.
+        macro_rules! safepoint {
+            () => {{
+                budget -= 1;
+                if budget == 0 {
+                    budget = self.scheduler.slice();
+                    self.frames.last_mut().unwrap().ip = ip;
+                    if self.scheduler.end_turn(&mut self.regs, &mut self.frames) {
+                        load!();
+                    }
+                }
+            }};
+        }
 
         macro_rules! reg {
             ($r:expr) => {
@@ -387,19 +462,22 @@ impl Vm {
                 }
             }};
         }
-        // Return `v` from the innermost frame.
+        // Return `v` from the innermost frame. If it is the task's last,
+        // the task is done, and the next one runs.
         macro_rules! ret {
             ($v:expr) => {{
                 let v = $v;
                 let done = self.frames.pop().unwrap();
-                let Some(caller) = self.frames.last() else {
-                    return Ok(v);
-                };
-                closure = caller.closure;
-                proto = caller.proto.clone();
-                base = caller.base;
-                ip = caller.ip;
-                self.regs[done.ret] = v;
+                if self.frames.is_empty() {
+                    if !self.scheduler.finish(v, &mut self.regs, &mut self.frames) {
+                        return Ok(());
+                    }
+                    load!();
+                    budget = self.scheduler.slice();
+                } else {
+                    load!();
+                    self.regs[done.ret] = v;
+                }
             }};
         }
         macro_rules! compare {
@@ -576,7 +654,14 @@ impl Vm {
                 }
                 Op::Not { dst, src } => reg!(dst) = Value::Bool(!get!(Bool, src)),
 
-                Op::Jump { target } => ip = target as usize,
+                Op::Jump { target } => {
+                    let back = (target as usize) < ip;
+                    ip = target as usize;
+                    // Every loop jumps back to its start.
+                    if back {
+                        safepoint!();
+                    }
+                }
                 Op::JumpIfFalse { cond, target } => {
                     if !get!(Bool, cond) {
                         ip = target as usize;
@@ -609,6 +694,7 @@ impl Vm {
                         proto = callee_proto;
                         base = new_base;
                         ip = 0;
+                        safepoint!();
                     }
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
@@ -616,6 +702,7 @@ impl Vm {
                             Ok(v) => reg!(dst) = v,
                             Err(msg) => throw!(msg),
                         }
+                        safepoint!();
                     }
                     v => internal_error("Fn", &v),
                 },
@@ -637,6 +724,7 @@ impl Vm {
                         closure = f;
                         proto = callee_proto;
                         ip = 0;
+                        safepoint!();
                     }
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
@@ -705,6 +793,17 @@ impl Vm {
             trace,
         }
     }
+}
+
+/// How many of a task's registers can hold live values: those in some
+/// frame's window. The rest hold only dead ones.
+fn live_regs(regs: &[Value], frames: &[Frame]) -> usize {
+    frames
+        .iter()
+        .map(|f| f.base + f.proto.num_regs as usize)
+        .max()
+        .unwrap_or(0)
+        .min(regs.len())
 }
 
 /// A register held the wrong kind of value. The type checker rules this

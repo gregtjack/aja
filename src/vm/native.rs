@@ -44,6 +44,18 @@ fn set_status(code: i64, message: String) {
     STATUS.with(|s| *s.borrow_mut() = (code, message));
 }
 
+/// The status, for a task that is being switched out, which takes it with
+/// it. Each task has its own: another task's intrinsics mustn't change what
+/// `status` says straight after a call.
+pub(super) fn take_status() -> (i64, String) {
+    STATUS.with(|s| std::mem::replace(&mut *s.borrow_mut(), (OK, String::new())))
+}
+
+/// Put back the status of a task that is being switched in.
+pub(super) fn restore_status(status: (i64, String)) {
+    STATUS.with(|s| *s.borrow_mut() = status);
+}
+
 /// Record how an I/O operation went, giving its value if it succeeded.
 fn record<T: Default>(result: io::Result<T>) -> T {
     record_as(result, |e| e)

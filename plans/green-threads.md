@@ -240,7 +240,15 @@ Each step lands on its own with tests, in order:
 
 1. **Task-shaped VM.** Move `regs`, `frames`, and the status into `Task`.
    Add the run queue, switching, the reduction budget, and stress mode.
-   Spawn only through a test-only hook. All existing tests pass unchanged.
+   Spawn only through a test-only hook. All existing tests pass unchanged. ✅
+   A `Scheduler` ([src/vm/scheduler.rs](../src/vm/scheduler.rs)) owns the
+   tasks, the run queue, and switching; the `Vm` keeps the running task's
+   stack, which the interpreter loop reads directly, and lends it to the
+   scheduler to switch. Blocking, scopes, and cancellation go there too. The
+   status stays in its `thread_local`, saved into the task when it is
+   switched out and restored when it is switched back in. Safepoints come
+   after a call or backward jump has run, so a task resumes at the next
+   instruction. On a single task they cost nothing measurable.
 2. **`std::task`.** `Scope`, `Task<T>`, `scope`, `spawn`, and `join`, with
    the scheduler intrinsics, new heap objects, and GC roots. Waiting for the
    children at the end of a scope, and a panic on spawning into an ended

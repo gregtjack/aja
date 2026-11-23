@@ -192,8 +192,8 @@ errors as values.
   `List`s of those, so a backend implements them without knowing how Aja
   lays out structs and enums. One that can fail records a status and message, which the library
   reads straight after the call (`std::native::status`) and turns into a
-  `Result`. That status is per thread today and must be per task once green
-  threads arrive. The prelude declares its own `native fn`s (the methods of
+  `Result`. Each task has its own status, so another task's intrinsics
+  can't change it between the call and the read. The prelude declares its own `native fn`s (the methods of
   `List`) and `native struct`s (`List`), whose values a backend represents
   however it likes; programs can declare neither.
 - **One package.** The library's modules can use each other's private
