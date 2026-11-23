@@ -82,8 +82,14 @@ pub fn build(root: &dyn Root, main: &str) -> (Files, Result<Compiled, Vec<Diagno
     if !errors.is_empty() {
         return (loaded.files, Err(errors));
     }
+    let std_sources = loaded
+        .modules
+        .iter()
+        .filter(|m| m.is_std())
+        .map(|m| m.source)
+        .collect();
     let (program, mut errors) = resolve(loaded.modules);
-    let types = check::check_program(&program);
+    let types = check::check_modules(&program, std_sources);
     if let Err(type_errors) = &types {
         errors.extend(type_errors.iter().map(|e| e.to_diagnostic()));
     }

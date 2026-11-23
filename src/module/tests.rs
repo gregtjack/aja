@@ -467,7 +467,7 @@ fn main() -> Result<void, io::Error> {
 fn std_modules_must_exist() {
     let fs = [("main.aja", "import std::nope; fn main() {}")];
     assert_eq!(errors(&fs), ["no module named 'std::nope'"]);
-    assert!(rendered(&fs).contains("the standard library's modules are: std::io"));
+    assert!(rendered(&fs).contains("the standard library's modules are: std::fs, std::io"));
 }
 
 #[test]
@@ -481,6 +481,33 @@ fn intrinsics_are_only_for_the_standard_library() {
             ["module 'std::native' is internal to the standard library"]
         );
     }
+}
+
+#[test]
+fn std_fs_can_be_imported() {
+    let main = "
+import std::fs;
+import std::io;
+
+fn main() -> Result<bool, io::Error> {
+    Ok(fs::is_dir(\".\") && !fs::is_file(\".\") && !fs::exists(\"no/such/path\"))
+}";
+    assert_eq!(value(&[("main.aja", main)]), "Ok(true)");
+}
+
+#[test]
+fn std_modules_share_private_items_only_with_each_other() {
+    // `std::fs` uses `std::io`'s private `checked`; a program can't.
+    let main = "import std::io; fn main() { io::checked(1); }";
+    assert_eq!(
+        errors(&[("main.aja", main)]),
+        ["'checked' is private to module 'std::io'"]
+    );
+    let main = "import std::io::{checked}; fn main() { checked(1); }";
+    assert_eq!(
+        errors(&[("main.aja", main)]),
+        ["'checked' is private to module 'std::io'"]
+    );
 }
 
 #[test]

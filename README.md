@@ -368,7 +368,9 @@ fn main() {
   fields are visible only inside their file unless marked `pub`. A struct
   with private fields can't be built outside its module (provide a function
   that makes one), and a pattern for it there must end in `..`. An enum's
-  variants are as visible as the enum.
+  variants are as visible as the enum. The standard library is the one
+  exception: it is written as one package, so its modules can use each
+  other's private items (programs still can't).
 - **No import cycles.** A cycle is an error that names every module in it.
   The file being run can't be imported (that would always be a cycle).
 - **Methods live with their type**: an `impl` must be in the module that
@@ -478,7 +480,10 @@ implementation fails the tests and stops the VM at startup. Built-ins named
 
 The standard library is written in Aja (`src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
-it has one module, `std::io`:
+it has `std::io` and `std::fs`.
+
+#### `std::io`
+
 
 ```rust
 import std::io;
@@ -501,7 +506,7 @@ fn main() -> Result<void, io::Error> {
 | `reader.read_to_string()`          | `Result<str, Error>`: everything left |
 | `writer.write(text)`, `writer.write_line(text)` | `Result<void, Error>` |
 | `writer.flush()`                   | Write out buffered output now |
-| `Error { kind, message }`, `ErrorKind` | Why an operation failed: `NotFound`, `PermissionDenied`, `InvalidData`, `BrokenPipe`, `AlreadyExists`, or `Other` |
+| `Error { kind, message }`, `ErrorKind` | Why an operation failed: `NotFound`, `PermissionDenied`, `InvalidData`, `BrokenPipe`, `AlreadyExists`, `NotADirectory`, `IsADirectory`, `DirectoryNotEmpty`, or `Other` |
 
 - Everything that can fail returns a `Result`. **`main` can return a
   `Result`**, so `?` works there: if it returns an `Err`, the program prints
@@ -511,11 +516,47 @@ fn main() -> Result<void, io::Error> {
   prompt written without a newline shows before the program waits.
 - I/O blocks. There will be no separate asynchronous API; concurrency is to
   come from green threads.
+
+#### `std::fs`
+
+```rust
+import std::fs;
+import std::io;
+
+fn main() -> Result<void, io::Error> {
+    fs::write("notes.txt", "one\ntwo\n")?;
+    for line in fs::read_lines("notes.txt")? {
+        println(line);
+    }
+    fs::remove_file("notes.txt")
+}
+```
+
+| `std::fs`                                  | Does |
+|--------------------------------------------|------|
+| `read_to_string(path)`                     | `Result<str, io::Error>`: the whole file, which must be UTF-8 |
+| `read_lines(path)`                         | `Result<List<str>, io::Error>`: its lines, without `\n` or `\r\n` |
+| `write(path, text)`, `append(path, text)`  | Replace or add to a file's text, creating it if needed |
+| `copy(from, to)`, `rename(from, to)`       | Copy a file; move a file or directory |
+| `remove_file(path)`                        | Delete a file |
+| `read_dir(path)`                           | `Result<List<str>, io::Error>`: the names in a directory, sorted |
+| `create_dir(path)`, `create_dir_all(path)` | Make a directory (and, with `_all`, its missing parents) |
+| `remove_dir(path)`, `remove_dir_all(path)` | Delete an empty directory, or one and everything in it |
+| `exists(path)`, `is_file(path)`, `is_dir(path)` | `bool`, never failing |
+| `size(path)`                               | `Result<int, io::Error>`: a file's size in bytes |
+
+- Paths are `str`s, relative to the working directory. Errors are
+  `io::Error`s whose message names the path: `could not read 'notes.txt':
+  no such file or directory`.
+- Each function opens and closes the file itself, so there are no file
+  handles to close. Reading a file a piece at a time can come with
+  handles once there's a way to be sure they get closed.
 - Underneath, the library calls a few **intrinsics** in the module
   `std::native` (`read_line`, `write`, `flush`, ...), in
   `src/stdlib/native.aja`. Only the standard library can import it.
-  Intrinsics take and return only `int`, `float`, `bool`, `str`, and
-  `void`, so a backend implements them without knowing Aja's types; one
+  Intrinsics take and return only `int`, `float`, `bool`, `str`, `void`,
+  and lists of those, so a backend implements them without knowing Aja's
+  types; one
   that can fail records a status, which the library turns into a `Result`.
 - **Native code is declared in Aja.** The prelude and standard library can
   declare `native fn len(self) -> int;` (a function with no body, which each
@@ -546,7 +587,7 @@ files ──► Loader ──► Lexer ──► Parser ──► Resolver ─�
 | `src/module/`         | Modules: the loader reads the file being run and every module it imports, rejecting cycles; `resolve.rs` gives each definition a module-qualified name (`geo::shapes::area`), rewrites every use to it, and checks that items used across modules are `pub`. The result is one program for the checker and backends |
 | `src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness, and `methods.rs` checks `impl` blocks and method calls |
 | `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends, including the standard library's intrinsics (`std::native`) |
-| `src/stdlib/`         | The standard library, written in Aja and built into the binary (`io.aja` is `std::io`) |
+| `src/stdlib/`         | The standard library, written in Aja and built into the binary (`io.aja` is `std::io`, `fs.aja` is `std::fs`) |
 | `src/prelude.aja`, `src/prelude.rs` | The prelude (`Option`, `Result`, and their methods), written in Aja and built into the binary. Locations in it are marked as the prelude's, so errors in code it calls point at the right file |
 | `src/vm/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
 | `src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
@@ -604,7 +645,7 @@ the VM forgets to keep reachable is caught.
 with indexing;
 structs, enums with data, and exhaustive `match`; generic functions, structs, and enums; `Option` and `Result` in the prelude, and `?`; methods and associated functions in `impl` blocks;
 modules, with `import` and `pub`; the start of the standard library
-(`std::io`); static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
+(`std::io`, `std::fs`); static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 
 **Reserved or partially present, not yet usable:**

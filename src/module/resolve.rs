@@ -207,6 +207,14 @@ impl<'a> Resolver<'a> {
         self.errors.push(error(message, span, help));
     }
 
+    /// Whether this module can use what is private to `module`: it is this
+    /// one, or both are in the standard library, which is written as one
+    /// package.
+    fn sees_private(&self, module: usize) -> bool {
+        let is_std = |path: &[Id]| path.len() > 1 && path[0] == "std";
+        module == self.this || (is_std(&self.paths[self.this]) && is_std(&self.paths[module]))
+    }
+
     fn module_name(&self, module: usize) -> String {
         super::path_name(&self.paths[module])
     }
@@ -307,7 +315,7 @@ impl<'a> Resolver<'a> {
         let mut reported = false;
         for (is_value, item) in found {
             // Reported, but imported anyway, so its uses are checked.
-            if !item.public && !reported {
+            if !item.public && !reported && !self.sees_private(target) {
                 self.private(target, name, span);
                 reported = true;
             }
@@ -394,7 +402,7 @@ impl<'a> Resolver<'a> {
                 self.no_item(module, name, span);
                 None
             }
-            Some(item) if !item.public && module != self.this => {
+            Some(item) if !item.public && !self.sees_private(module) => {
                 self.private(module, name, span);
                 Some(item.global.clone())
             }

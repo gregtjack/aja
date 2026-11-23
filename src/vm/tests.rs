@@ -89,10 +89,7 @@ fn comparisons() {
     );
     assert_eq!(main_value("bool", "1.5 < 2.5 && 2.5 > 1.5"), "Bool(true)");
     assert_eq!(main_value("bool", "1 == 1 && 1 != 2"), "Bool(true)");
-    assert_eq!(
-        main_value("bool", "1.5 == 1.5 && 1.5 != 2.5"),
-        "Bool(true)"
-    );
+    assert_eq!(main_value("bool", "1.5 == 1.5 && 1.5 != 2.5"), "Bool(true)");
     assert_eq!(
         main_value("bool", "true == true && true != false"),
         "Bool(true)"
@@ -1279,10 +1276,7 @@ fn question_mark_returns_early() {
     assert_eq!(main("str", "show(sum(\"x\", \"y\"))"), "Str(\"bad: x\")");
     assert_eq!(main("str", "show(sum(\"1\", \"y\"))"), "Str(\"bad: y\")");
     assert_eq!(
-        main(
-            "bool",
-            "first(Some(4)) == Some(40) && first(None) == None"
-        ),
+        main("bool", "first(Some(4)) == Some(40) && first(None) == None"),
         "Bool(true)"
     );
     // In a closure, `?` returns from the closure.
@@ -1611,7 +1605,10 @@ fn logical_operators_combine_comparisons() {
     assert_eq!(main_value("bool", "false && false == false"), "Bool(false)");
     assert_eq!(main_value("bool", "true || 1 == 2"), "Bool(true)");
     assert_eq!(
-        main_value("int", "var n = 0; for i in 0..20 { if i % 2 == 0 && i % 3 == 0 || i == 7 { n = n + 1; } } n"),
+        main_value(
+            "int",
+            "var n = 0; for i in 0..20 { if i % 2 == 0 && i % 3 == 0 || i == 7 { n = n + 1; } } n"
+        ),
         "Int(5)"
     );
 }

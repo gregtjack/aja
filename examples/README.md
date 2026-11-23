@@ -18,6 +18,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |
 | [iterators.aja](iterators.aja) | `for` loops, ranges, `break` / `continue`, lazy `Iter` methods, an endless iterator, and a tree you can loop over |
 | [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |
+| [fs/notes.aja](fs/notes.aja) | `std::fs`: appending to a file, checking it exists, its size, and reading its lines. Run `echo "buy milk" \| cargo run -- examples/fs/notes.aja` (it writes `notes.txt` in the working directory) |
 | [io/greet.aja](io/greet.aja) | `std::io`: a prompt, reading lines until the input ends, standard error, and `main` returning a `Result`. Run `printf 'Ada\nfirst\nsecond\n' \| cargo run -- examples/io/greet.aja` |
 | [modules/](modules) | A program in several files: `import`, `pub`, and a struct whose private field keeps an invariant. Run `cargo run -- examples/modules/main.aja` |
 

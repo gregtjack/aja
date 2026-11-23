@@ -224,9 +224,20 @@ impl Types {
     }
 }
 
-/// Type-check a whole program.
+/// Type-check a program that has no standard library modules in it.
+#[cfg(test)]
 pub fn check_program(program: &Program) -> Result<Types, Vec<TypeError>> {
+    check_modules(program, HashSet::new())
+}
+
+/// Type-check a program put together from modules, where `std_sources` are
+/// the files of the standard library's.
+pub fn check_modules(
+    program: &Program,
+    std_sources: HashSet<Source>,
+) -> Result<Types, Vec<TypeError>> {
     let mut checker = Checker::new();
+    checker.std_sources = std_sources;
     checker.program(program);
     checker.finish()
 }
@@ -331,6 +342,9 @@ pub struct Checker {
     loop_depth: usize,
     /// The `iter` method each `for` loop calls, if it calls one.
     for_iters: HashMap<SpanKey, Id>,
+    /// The files of the standard library's modules, which can use each
+    /// other's private items.
+    std_sources: HashSet<Source>,
 }
 
 impl Checker {
@@ -370,6 +384,7 @@ impl Checker {
             type_params: Vec::new(),
             loop_depth: 0,
             for_iters: HashMap::new(),
+            std_sources: HashSet::new(),
         };
         for builtin in BUILTINS {
             let binding = match &builtin.params {

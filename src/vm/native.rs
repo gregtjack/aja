@@ -3,6 +3,7 @@
 
 use std::{
     cell::RefCell,
+    fs,
     io::{self, BufRead, Read, Write},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -15,9 +16,9 @@ use super::{heap::Heap, value::Value};
 /// arguments refer to, and to put a string a built-in returns on. An error
 /// message stops the program.
 ///
-/// A native function may allocate only what it returns, as the last thing
-/// it does: allocating directly on the heap never collects, so the
-/// arguments stay valid while it runs.
+/// Allocating directly on the heap never collects, so the arguments stay
+/// valid while a native function runs, and it can allocate what it returns
+/// in several parts (a list of strings).
 pub type NativeFn = fn(&mut Heap, &[Value]) -> Result<Value, String>;
 
 // How the last intrinsic that can fail went, for `std::native::status`. The
@@ -30,6 +31,9 @@ const INVALID_DATA: i64 = 4;
 const BROKEN_PIPE: i64 = 5;
 const ALREADY_EXISTS: i64 = 6;
 const OTHER: i64 = 7;
+const NOT_A_DIRECTORY: i64 = 8;
+const IS_A_DIRECTORY: i64 = 9;
+const DIRECTORY_NOT_EMPTY: i64 = 10;
 
 thread_local! {
     /// The status of the last intrinsic that can fail, and its message.
@@ -42,6 +46,12 @@ fn set_status(code: i64, message: String) {
 
 /// Record how an I/O operation went, giving its value if it succeeded.
 fn record<T: Default>(result: io::Result<T>) -> T {
+    record_as(result, |e| e)
+}
+
+/// Like [`record`], with the message of an error made by `message` from
+/// the error's own description.
+fn record_as<T: Default>(result: io::Result<T>, message: impl FnOnce(String) -> String) -> T {
     match result {
         Ok(v) => {
             set_status(OK, String::new());
@@ -54,11 +64,113 @@ fn record<T: Default>(result: io::Result<T>) -> T {
                 io::ErrorKind::InvalidData => INVALID_DATA,
                 io::ErrorKind::BrokenPipe => BROKEN_PIPE,
                 io::ErrorKind::AlreadyExists => ALREADY_EXISTS,
+                io::ErrorKind::NotADirectory => NOT_A_DIRECTORY,
+                io::ErrorKind::IsADirectory => IS_A_DIRECTORY,
+                io::ErrorKind::DirectoryNotEmpty => DIRECTORY_NOT_EMPTY,
                 _ => OTHER,
             };
-            set_status(code, e.to_string());
+            set_status(code, message(describe(&e)));
             T::default()
         }
+    }
+}
+
+/// An error's description, as Aja's messages are written: "no such file or
+/// directory", not "No such file or directory (os error 2)".
+fn describe(e: &io::Error) -> String {
+    let text = e.to_string();
+    let text = match text.rfind(" (os error ") {
+        Some(i) if text.ends_with(')') => &text[..i],
+        _ => &text,
+    };
+    let mut chars = text.chars();
+    match chars.next() {
+        // Lowercase a capital only when the next letter isn't one too
+        // (so not "UTF-8").
+        Some(c) if c.is_uppercase() && !chars.clone().next().is_some_and(char::is_uppercase) => {
+            c.to_lowercase().chain(chars).collect()
+        }
+        _ => text.to_string(),
+    }
+}
+
+/// Record how a file system operation on `path` went, with a message that
+/// says what was being done: "could not read 'notes.txt': ...".
+fn record_fs<T: Default>(result: io::Result<T>, doing: &str, path: &str) -> T {
+    record_as(result, |e| format!("could not {doing} '{path}': {e}"))
+}
+
+// ---- The file system (`std::fs`) ---------------------------------------------
+
+/// What `std::native::path_kind` says a path is.
+const NO_PATH: i64 = 0;
+const FILE: i64 = 1;
+const DIRECTORY: i64 = 2;
+const OTHER_KIND: i64 = 3;
+
+fn path_kind(path: &str) -> i64 {
+    match fs::metadata(path) {
+        Err(_) => NO_PATH,
+        Ok(m) if m.is_file() => FILE,
+        Ok(m) if m.is_dir() => DIRECTORY,
+        Ok(_) => OTHER_KIND,
+    }
+}
+
+fn write_file(path: &str, text: &str, append: bool) -> io::Result<()> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)?
+        .write_all(text.as_bytes())
+}
+
+/// The names of the entries in directory `path`, sorted, so a program
+/// sees them in the same order on every system.
+fn read_dir(path: &str) -> io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let name = entry?.file_name();
+        match name.into_string() {
+            Ok(name) => names.push(name),
+            Err(name) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("the name {name:?} isn't valid UTF-8"),
+                ))
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// The lines of `text`, without their line endings (`\n` or `\r\n`).
+fn lines(text: &str) -> Vec<String> {
+    text.lines().map(str::to_string).collect()
+}
+
+/// A list of strings for a native function to return.
+fn str_list(heap: &mut Heap, items: Vec<String>) -> Value {
+    let list: super::list::List = items.into_iter().map(|s| str_value(heap, s)).collect();
+    Value::List(heap.alloc_list(list))
+}
+
+/// The arguments of a file system intrinsic that takes one path.
+fn path_arg<'h>(heap: &'h Heap, name: &str, args: &[Value]) -> Result<&'h str, String> {
+    match args {
+        [Value::Str(p)] => Ok(heap.str(*p)),
+        _ => Err(bad_args(name, args)),
+    }
+}
+
+/// The arguments of a file system intrinsic that takes two paths.
+fn two_paths<'h>(heap: &'h Heap, name: &str, args: &[Value]) -> Result<(&'h str, &'h str), String> {
+    match args {
+        [Value::Str(a), Value::Str(b)] => Ok((heap.str(*a), heap.str(*b))),
+        _ => Err(bad_args(name, args)),
     }
 }
 
@@ -187,6 +299,84 @@ static NATIVES: &[(&str, NativeFn)] = &[
             return Err(bad_args("flush", args));
         };
         record(flush(*fd));
+        Ok(Value::Void)
+    }),
+    // ---- The file system (`std::fs`) --------------------------------------
+    ("std::native::path_kind", |heap, args| {
+        let path = path_arg(heap, "path_kind", args)?;
+        Ok(Value::Int(path_kind(path)))
+    }),
+    ("std::native::file_size", |heap, args| {
+        let path = path_arg(heap, "file_size", args)?;
+        let size = record_fs(
+            fs::metadata(path).map(|m| m.len()),
+            "read the size of",
+            path,
+        );
+        Ok(Value::Int(size as i64))
+    }),
+    ("std::native::read_file", |heap, args| {
+        let path = path_arg(heap, "read_file", args)?;
+        let text = record_fs(fs::read_to_string(path), "read", path);
+        Ok(str_value(heap, text))
+    }),
+    ("std::native::read_file_lines", |heap, args| {
+        let path = path_arg(heap, "read_file_lines", args)?;
+        let text = record_fs(fs::read_to_string(path), "read", path);
+        Ok(str_list(heap, lines(&text)))
+    }),
+    ("std::native::write_file", |heap, args| {
+        let [Value::Str(path), Value::Str(text), Value::Bool(append)] = args else {
+            return Err(bad_args("write_file", args));
+        };
+        let path = heap.str(*path);
+        record_fs(write_file(path, heap.str(*text), *append), "write to", path);
+        Ok(Value::Void)
+    }),
+    ("std::native::read_dir", |heap, args| {
+        let path = path_arg(heap, "read_dir", args)?;
+        let names = record_fs(read_dir(path), "read the directory", path);
+        Ok(str_list(heap, names))
+    }),
+    ("std::native::create_dir", |heap, args| {
+        let [Value::Str(path), Value::Bool(all)] = args else {
+            return Err(bad_args("create_dir", args));
+        };
+        let path = heap.str(*path);
+        let result = if *all {
+            fs::create_dir_all(path)
+        } else {
+            fs::create_dir(path)
+        };
+        record_fs(result, "create the directory", path);
+        Ok(Value::Void)
+    }),
+    ("std::native::remove_file", |heap, args| {
+        let path = path_arg(heap, "remove_file", args)?;
+        record_fs(fs::remove_file(path), "remove", path);
+        Ok(Value::Void)
+    }),
+    ("std::native::remove_dir", |heap, args| {
+        let [Value::Str(path), Value::Bool(all)] = args else {
+            return Err(bad_args("remove_dir", args));
+        };
+        let path = heap.str(*path);
+        let result = if *all {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_dir(path)
+        };
+        record_fs(result, "remove the directory", path);
+        Ok(Value::Void)
+    }),
+    ("std::native::rename", |heap, args| {
+        let (from, to) = two_paths(heap, "rename", args)?;
+        record_fs(fs::rename(from, to), &format!("rename '{from}' to"), to);
+        Ok(Value::Void)
+    }),
+    ("std::native::copy_file", |heap, args| {
+        let (from, to) = two_paths(heap, "copy_file", args)?;
+        record_fs(fs::copy(from, to), &format!("copy '{from}' to"), to);
         Ok(Value::Void)
     }),
     // ---- Lists (`List` in the prelude) ------------------------------------

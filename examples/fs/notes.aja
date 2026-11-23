@@ -1,0 +1,25 @@
+// Keep notes in a file. Each run reads a line from standard input, adds it
+// to `notes.txt` in the working directory, then shows every note so far:
+//
+//     echo "buy milk" | aja examples/fs/notes.aja
+
+import std::fs;
+import std::io;
+
+fn main() -> Result<void, io::Error> {
+    let path = "notes.txt";
+    let out = io::stdout();
+    out.write("New note: ")?;
+    match io::stdin().read_line()? {
+        Some(note) => fs::append(path, note + "\n")?,
+        None => {}
+    }
+    if !fs::exists(path) {
+        return out.write_line("No notes yet.");
+    }
+    println("Notes (" + path + ",", fs::size(path)?, "bytes):");
+    for note in fs::read_lines(path)? {
+        println("-", note);
+    }
+    out.flush()
+}

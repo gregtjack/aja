@@ -2,14 +2,14 @@
 // Aja, which each backend implements. Only the standard library can import
 // this module.
 //
-// An intrinsic takes and returns only `int`, `float`, `bool`, `str`, and
-// `void`, so a backend can implement it without knowing how Aja's structs
-// and enums are laid out; the library builds those. One that can fail
+// An intrinsic takes and returns only `int`, `float`, `bool`, `str`, `void`,
+// and lists of those, so a backend can implement it without knowing how
+// Aja's structs and enums are laid out; the library builds those. One that can fail
 // records how it went, which `status` (and `error_message`) give straight
 // after the call.
 
 // How the last intrinsic that can fail went: 0 if it succeeded, 1 at the end
-// of input, or an error code (see `std::io::ErrorKind`).
+// of input, or an error code (see `error` in `std::io`).
 pub native fn status() -> int;
 
 // What went wrong in the last intrinsic that failed.
@@ -25,3 +25,42 @@ pub native fn write(fd: int, text: str);
 
 // Write out anything buffered for `fd`.
 pub native fn flush(fd: int);
+
+// ---- The file system --------------------------------------------------------
+//
+// Paths are relative to the program's working directory.
+
+// What is at `path`: 0 if nothing is (or it can't be seen), 1 a file, 2 a
+// directory, 3 something else. Symbolic links are followed. Never fails.
+pub native fn path_kind(path: str) -> int;
+
+// The size of the file at `path`, in bytes.
+pub native fn file_size(path: str) -> int;
+
+pub native fn read_file(path: str) -> str;
+
+// The lines of the file at `path`, without their line endings.
+pub native fn read_file_lines(path: str) -> List<str>;
+
+// Write `text` to the file at `path`, creating it if it doesn't exist, and
+// either replacing what it had or, if `append`, adding to the end.
+pub native fn write_file(path: str, text: str, append: bool);
+
+// The names of the entries in the directory at `path`, sorted.
+pub native fn read_dir(path: str) -> List<str>;
+
+// Create the directory at `path`, and, if `all`, any parents it is missing
+// (in which case it is fine if it exists already).
+pub native fn create_dir(path: str, all: bool);
+
+pub native fn remove_file(path: str);
+
+// Remove the directory at `path`, which must be empty unless `all`, in
+// which case everything in it is removed too.
+pub native fn remove_dir(path: str, all: bool);
+
+// Move `from` to `to`, replacing a file there.
+pub native fn rename(from: str, to: str);
+
+// Copy the file at `from` to `to`, replacing a file there.
+pub native fn copy_file(from: str, to: str);

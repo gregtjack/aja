@@ -28,6 +28,12 @@ pub enum ErrorKind {
     // The other end of a pipe was closed.
     BrokenPipe,
     AlreadyExists,
+    // A directory was needed, and something else was found.
+    NotADirectory,
+    // Something other than a directory was needed, and a directory was found.
+    IsADirectory,
+    // A directory to remove still had something in it.
+    DirectoryNotEmpty,
     Other,
 }
 
@@ -127,7 +133,7 @@ impl Writer {
 
 // `value`, the result of an intrinsic, or the error it recorded. The
 // intrinsic has run by the time this is called, since arguments are
-// evaluated first.
+// evaluated first. The rest of the standard library uses this too.
 fn checked<T>(value: T) -> Result<T, Error> {
     match native::status() {
         0 => Ok(value),
@@ -143,6 +149,9 @@ fn error(code: int) -> Error {
         4 => ErrorKind::InvalidData,
         5 => ErrorKind::BrokenPipe,
         6 => ErrorKind::AlreadyExists,
+        8 => ErrorKind::NotADirectory,
+        9 => ErrorKind::IsADirectory,
+        10 => ErrorKind::DirectoryNotEmpty,
         _ => ErrorKind::Other,
     };
     Error { kind, message: native::error_message() }

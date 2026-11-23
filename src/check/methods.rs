@@ -43,8 +43,8 @@ pub(super) struct MethodInfo {
 
 impl MethodInfo {
     /// Whether code at `at` can call it.
-    fn visible(&self, at: Span) -> bool {
-        self.public || at.start.source == self.source
+    fn visible(&self, at: Span, std: &HashSet<Source>) -> bool {
+        self.public || super::data::same_package(std, at.start.source, self.source)
     }
 }
 
@@ -374,7 +374,7 @@ impl Checker {
             }
             return Ty::Error;
         }
-        if !info.visible(callee.span) {
+        if !info.visible(callee.span, &self.std_sources) {
             self.private_method(type_name, name, &info, callee.span);
         }
         let map: HashMap<Id, Ty> = info
@@ -436,7 +436,7 @@ impl Checker {
             );
             return Some(Ty::Error);
         }
-        if !info.visible(span) {
+        if !info.visible(span, &self.std_sources) {
             self.private_method(type_name, name, &info, span);
         }
         self.functions.insert(key(span), info.global.clone());
@@ -494,7 +494,7 @@ impl Checker {
                 };
                 match self.resolve(&ret) {
                     Ty::Named(r, item) if r == "Iter" && info.has_self && params.len() == 1 => {
-                        if !info.visible(span) {
+                        if !info.visible(span, &self.std_sources) {
                             self.private_method(&n, &Id::from("iter"), &info, span);
                         }
                         self.for_iters.insert(key(span), info.global.clone());

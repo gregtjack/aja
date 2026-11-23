@@ -37,7 +37,8 @@ pub(super) struct StructInfo {
     pub params: Vec<Id>,
     pub fields: Vec<(Id, Ty)>,
     /// The fields not marked `pub`, which only code in the struct's own
-    /// file can use.
+    /// file (or, for the standard library's, in the standard library) can
+    /// use.
     pub private: HashSet<Id>,
     /// The file the struct is defined in.
     pub source: Source,
@@ -47,15 +48,22 @@ pub(super) struct StructInfo {
 
 impl StructInfo {
     /// Whether code at `at` can use the field `name`.
-    pub fn field_visible(&self, name: &Id, at: Span) -> bool {
-        !self.private.contains(name) || at.start.source == self.source
+    pub fn field_visible(&self, name: &Id, at: Span, std: &HashSet<Source>) -> bool {
+        !self.private.contains(name) || same_package(std, at.start.source, self.source)
     }
 
     /// Whether the struct has fields that code at `at` can't use, so it
     /// can't build one or match one without `..`.
-    pub fn hides_fields(&self, at: Span) -> bool {
-        !self.private.is_empty() && at.start.source != self.source
+    pub fn hides_fields(&self, at: Span, std: &HashSet<Source>) -> bool {
+        !self.private.is_empty() && !same_package(std, at.start.source, self.source)
     }
+}
+
+/// Whether code in `a` can use what is private to `b`: they are the same
+/// file, or both in the standard library (whose files are in `std`), which
+/// is written as one package.
+pub(super) fn same_package(std: &HashSet<Source>, a: Source, b: Source) -> bool {
+    a == b || (std.contains(&a) && std.contains(&b))
 }
 
 /// Where something defined in `source` with the global name `name` is, for
@@ -474,7 +482,7 @@ impl Checker {
                 let info = &self.structs[&n];
                 match info.fields.iter().position(|(f, _)| f == name) {
                     Some(i) => {
-                        let visible = info.field_visible(name, name_span);
+                        let visible = info.field_visible(name, name_span, &self.std_sources);
                         let map = info.params.iter().cloned().zip(args).collect();
                         let t = Self::subst(&info.fields[i].1, &map);
                         self.fields.insert(key(span), i as u16);
@@ -596,7 +604,7 @@ impl Checker {
             self.native_struct(name, name_span);
             return Ty::Error;
         }
-        if info.hides_fields(name_span) {
+        if info.hides_fields(name_span, &self.std_sources) {
             let private: Vec<String> = info
                 .fields
                 .iter()
@@ -984,7 +992,7 @@ impl Checker {
                             self.bind_unchecked(std::iter::once(sub), names);
                         }
                         Some(i) => {
-                            if !info.field_visible(field, *span) {
+                            if !info.field_visible(field, *span, &self.std_sources) {
                                 self.private_field(name, field, *span);
                             }
                             if !seen.insert(i) {
@@ -1000,12 +1008,14 @@ impl Checker {
                         }
                     }
                 }
-                let hidden = info.hides_fields(*name_span);
+                let hidden = info.hides_fields(*name_span, &self.std_sources);
                 let missing: Vec<String> = info
                     .fields
                     .iter()
                     .enumerate()
-                    .filter(|(i, (n, _))| !seen.contains(i) && info.field_visible(n, *name_span))
+                    .filter(|(i, (n, _))| {
+                        !seen.contains(i) && info.field_visible(n, *name_span, &self.std_sources)
+                    })
                     .map(|(_, (n, _))| format!("'{n}'"))
                     .collect();
                 if !rest && missing.is_empty() && hidden {

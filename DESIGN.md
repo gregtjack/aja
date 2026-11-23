@@ -188,14 +188,18 @@ errors as values.
   step, and makes the library the largest test of the language.
   The intrinsics are declared in Aja, as `native fn`s with no body, in the
   module `std::native`, which only the standard library can import.
-  They take and return only `int`, `float`, `bool`, `str`, and `void`, so a
-  backend implements them without knowing how Aja lays out structs and
-  enums. One that can fail records a status and message, which the library
+  They take and return only `int`, `float`, `bool`, `str`, `void`, and
+  `List`s of those, so a backend implements them without knowing how Aja
+  lays out structs and enums. One that can fail records a status and message, which the library
   reads straight after the call (`std::native::status`) and turns into a
   `Result`. That status is per thread today and must be per task once green
   threads arrive. The prelude declares its own `native fn`s (the methods of
   `List`) and `native struct`s (`List`), whose values a backend represents
   however it likes; programs can declare neither.
+- **One package.** The library's modules can use each other's private
+  items, as the files of one Rust crate can with `pub(crate)`, so shared
+  helpers (such as turning an intrinsic's status into an `io::Error`) need
+  not be `pub` for programs to see.
 - **Embedded in the compiler.** The library is built into the `aja` binary and
   versioned with it, so it works with nothing to install.
 - **Fallible functions return `Result`.** Functions that panic on bad input are
@@ -273,7 +277,8 @@ by a number with a fractional part.
    can replace that without changing the language.
 7. **Standard library**, layer by layer, starting with the prelude and core.
    Started: the library is embedded and imported as `std::...` ✅, the
-   intrinsics layer ✅, and `std::io` (standard input, output, and error) ✅.
+   intrinsics layer ✅, `std::io` (standard input, output, and error) ✅,
+   and `std::fs` (whole-file reads and writes, directories) ✅.
 8. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.
 9. **Green threads and structured concurrency** in the VM.

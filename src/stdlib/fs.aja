@@ -1,0 +1,123 @@
+// Files and directories.
+//
+//     import std::fs;
+//     import std::io;
+//
+//     fn main() -> Result<void, io::Error> {
+//         fs::write("notes.txt", "one\ntwo\n")?;
+//         for line in fs::read_lines("notes.txt")? {
+//             println(line);
+//         }
+//         fs::remove_file("notes.txt")
+//     }
+//
+// A path is a `str`, relative to the program's working directory unless it
+// starts with `/`. Every operation that can fail returns a `Result` whose
+// error is a `std::io::Error`, with a message that names the path:
+// "could not read 'notes.txt': no such file or directory".
+//
+// Each function does its whole job in one call, opening and closing the
+// file itself, so there is nothing to close afterwards.
+
+import std::io;
+import std::native;
+
+// ---- Reading ------------------------------------------------------------------
+
+// The whole text of the file at `path`, which must be UTF-8.
+pub fn read_to_string(path: str) -> Result<str, io::Error> {
+    io::checked(native::read_file(path))
+}
+
+// The lines of the file at `path`, without their line endings (`\n` or
+// `\r\n`). A newline at the very end doesn't start another, empty line.
+pub fn read_lines(path: str) -> Result<List<str>, io::Error> {
+    io::checked(native::read_file_lines(path))
+}
+
+// ---- Writing ------------------------------------------------------------------
+
+// Make the file at `path` hold `text`, creating it if it doesn't exist and
+// replacing what it had if it does.
+pub fn write(path: str, text: str) -> Result<void, io::Error> {
+    io::checked(native::write_file(path, text, false))
+}
+
+// Add `text` to the end of the file at `path`, creating it if it doesn't
+// exist.
+pub fn append(path: str, text: str) -> Result<void, io::Error> {
+    io::checked(native::write_file(path, text, true))
+}
+
+// Copy the file at `from` to `to`, replacing any file already there.
+pub fn copy(from: str, to: str) -> Result<void, io::Error> {
+    io::checked(native::copy_file(from, to))
+}
+
+// Move (or rename) the file or directory at `from` to `to`, replacing any
+// file already there.
+pub fn rename(from: str, to: str) -> Result<void, io::Error> {
+    io::checked(native::rename(from, to))
+}
+
+// Remove the file at `path`.
+pub fn remove_file(path: str) -> Result<void, io::Error> {
+    io::checked(native::remove_file(path))
+}
+
+// ---- Directories ----------------------------------------------------------------
+
+// The names of the files and directories in the directory at `path`, in
+// sorted order. They are names, not paths: join one to `path` to use it.
+//
+//     for name in fs::read_dir("src")? {
+//         if fs::is_dir("src/" + name) { ... }
+//     }
+pub fn read_dir(path: str) -> Result<List<str>, io::Error> {
+    io::checked(native::read_dir(path))
+}
+
+// Create the directory at `path`. Its parent must exist, and it must not.
+pub fn create_dir(path: str) -> Result<void, io::Error> {
+    io::checked(native::create_dir(path, false))
+}
+
+// Create the directory at `path`, and any of its parents that don't exist.
+// It's fine if it exists already.
+pub fn create_dir_all(path: str) -> Result<void, io::Error> {
+    io::checked(native::create_dir(path, true))
+}
+
+// Remove the directory at `path`, which must be empty.
+pub fn remove_dir(path: str) -> Result<void, io::Error> {
+    io::checked(native::remove_dir(path, false))
+}
+
+// Remove the directory at `path` and everything in it. Be careful: this
+// can't be undone.
+pub fn remove_dir_all(path: str) -> Result<void, io::Error> {
+    io::checked(native::remove_dir(path, true))
+}
+
+// ---- Information ----------------------------------------------------------------
+
+// Whether there is a file, a directory, or anything else at `path`. A path
+// the program isn't allowed to look at counts as not existing.
+pub fn exists(path: str) -> bool {
+    native::path_kind(path) != 0
+}
+
+// Whether there is a file at `path`, following symbolic links.
+pub fn is_file(path: str) -> bool {
+    native::path_kind(path) == 1
+}
+
+// Whether there is a directory at `path`, following symbolic links.
+pub fn is_dir(path: str) -> bool {
+    native::path_kind(path) == 2
+}
+
+// The size of the file at `path`, in bytes.
+pub fn size(path: str) -> Result<int, io::Error> {
+    io::checked(native::file_size(path))
+}
