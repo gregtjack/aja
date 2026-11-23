@@ -920,10 +920,16 @@ impl Checker {
                     (_, Ty::Never) => t1,
                     _ => {
                         let at = Self::tail_span(otherwise).unwrap_or(span);
-                        self.expect(&t1, &t2, at, |e, f| {
+                        let same = self.expect(&t1, &t2, at, |e, f| {
                             format!("'if' and 'else' have incompatible types: {e} and {f}")
                         });
-                        t1
+                        // Once reported, the mismatch mustn't be reported
+                        // again by an `if` this one is the `else if` of.
+                        if same {
+                            t1
+                        } else {
+                            Ty::Error
+                        }
                     }
                 }
             }

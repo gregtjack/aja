@@ -1882,3 +1882,49 @@ fn main() -> str {
         "Str(\"Ada is 37, 3.0, true, at (1, -2); in ADA << {x}\")"
     );
 }
+
+#[test]
+fn else_if_and_or_patterns() {
+    let src = "
+enum Shape { Circle(int), Square(int), Rect(int, int), Empty }
+
+fn size(s: Shape) -> int {
+    match s {
+        Shape::Circle(n) | Shape::Square(n) | Shape::Rect(n, _) => n,
+        Shape::Empty => 0,
+    }
+}
+
+fn days(m: int) -> int {
+    match m {
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn sign(n: int) -> str {
+    if n < 0 { \"-\" } else if n == 0 { \"0\" } else { \"+\" }
+}
+
+fn main() -> str {
+    let total = size(Shape::Circle(1)) + size(Shape::Square(20)) + size(Shape::Rect(300, 9)) + size(Shape::Empty);
+    // An or-pattern inside a variant, and a closure capturing its name.
+    let get = match Some(Some(5)) {
+        Some(Some(0) | None) | None => fn() -> int { 0 },
+        Some(Some(n)) => fn() -> int { n },
+    };
+    var steps = \"\";
+    for n in 0..4 {
+        if n == 0 {
+            steps = steps + \"a\";
+        } else if n == 1 {
+            steps = steps + \"b\";
+        } else if n == 2 {
+            steps = steps + \"c\";
+        }
+    }
+    \"{total} {days(2)} {days(9)} {days(10)} {sign(-3)}{sign(0)}{sign(3)} {get()} {steps}\"
+}";
+    assert_eq!(value(src), "Str(\"321 28 30 31 -0+ 5 abc\")");
+}

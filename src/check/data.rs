@@ -92,6 +92,8 @@ pub(super) struct EnumInfo {
 enum Pat {
     Wild,
     Ctor(Ctor, Vec<Pat>),
+    /// Matches what any of these does.
+    Or(Vec<Pat>),
 }
 
 /// What a pattern requires a value to be built from. Which type it belongs to
@@ -878,6 +880,7 @@ impl Checker {
     fn pattern(&mut self, p: &Pattern, expected: &Ty, names: &mut HashSet<Id>) -> Pat {
         match &p.kind {
             PatternKind::Wildcard => Pat::Wild,
+            PatternKind::Or(alternatives) => self.or_pattern(alternatives, expected, names),
             PatternKind::Error(subs) => {
                 self.bind_unchecked(subs.iter(), names);
                 Pat::Wild
@@ -1051,6 +1054,65 @@ impl Checker {
 
     /// Define the bindings in patterns that couldn't be checked, so their
     /// uses don't cause more errors.
+    /// `a | b | c`. The first alternative's names are the pattern's; each
+    /// other alternative must bind the same ones, to values of the same
+    /// types, since the arm's body uses them whichever one matched.
+    fn or_pattern(
+        &mut self,
+        alternatives: &[Pattern],
+        expected: &Ty,
+        names: &mut HashSet<Id>,
+    ) -> Pat {
+        const HELP: &str = "each alternative of a pattern with '|' must bind the same names";
+        let outer = names.clone();
+        let mut first_names = outer.clone();
+        let mut pats = vec![self.pattern(&alternatives[0], expected, &mut first_names)];
+        let mut bound: Vec<Id> = first_names.difference(&outer).cloned().collect();
+        bound.sort();
+        let binding_ty = |c: &Self, n: &Id| c.scopes.last().unwrap()[n].ty.clone();
+        let first_tys: Vec<Ty> = bound.iter().map(|n| binding_ty(self, n)).collect();
+        for alt in &alternatives[1..] {
+            let mut alt_names = outer.clone();
+            pats.push(self.pattern(alt, expected, &mut alt_names));
+            let mut alt_bound: Vec<Id> = alt_names.difference(&outer).cloned().collect();
+            alt_bound.sort();
+            for n in bound.iter().filter(|n| !alt_bound.contains(n)) {
+                self.error(
+                    TypeError::new(
+                        format!("'{n}' isn't bound in this alternative of the pattern"),
+                        alt.span,
+                    )
+                    .help(HELP)
+                    .note(format!("the first alternative binds '{n}'")),
+                );
+            }
+            for n in alt_bound.iter().filter(|n| !bound.contains(n)) {
+                self.error(
+                    TypeError::new(
+                        format!(
+                            "'{n}' is bound in this alternative of the pattern, but not the first"
+                        ),
+                        alt.span,
+                    )
+                    .help(HELP),
+                );
+            }
+            for (n, t) in bound.iter().zip(&first_tys) {
+                if alt_bound.contains(n) {
+                    let found = binding_ty(self, n);
+                    self.expect(t, &found, alt.span, |e, f| {
+                        format!("mismatched types: '{n}' is {e} in the first alternative of this pattern, but {f} in this one")
+                    });
+                }
+                // Put back the first alternative's binding, which this one
+                // replaced.
+                self.define(n.clone(), t.clone(), BindingKind::Pattern);
+            }
+        }
+        *names = first_names;
+        Pat::Or(pats)
+    }
+
     fn bind_unchecked<'p>(
         &mut self,
         patterns: impl Iterator<Item = &'p Pattern>,
@@ -1143,7 +1205,23 @@ impl Checker {
             return rows.is_empty().then(Vec::new);
         };
         let ty = &tys[0];
+        // A row starting with `a | b` is a row starting with `a` and one
+        // starting with `b`.
+        let expanded;
+        let rows = if rows.iter().any(|r| matches!(r.first(), Some(Pat::Or(_)))) {
+            expanded = expand_or(rows);
+            &expanded[..]
+        } else {
+            rows
+        };
         match head {
+            // `a | b` is useful if either alternative is.
+            Pat::Or(alternatives) => alternatives.iter().find_map(|a| {
+                let q: Vec<Pat> = std::iter::once(a.clone())
+                    .chain(rest.iter().cloned())
+                    .collect();
+                self.useful(rows, &q, tys)
+            }),
             Pat::Ctor(c, args) => {
                 let fields = self.ctor_fields(ty, c);
                 let q: Vec<Pat> = args.iter().chain(rest).cloned().collect();
@@ -1159,7 +1237,7 @@ impl Checker {
                     .iter()
                     .filter_map(|r| match &r[0] {
                         Pat::Ctor(c, _) => Some(c),
-                        Pat::Wild => None,
+                        Pat::Wild | Pat::Or(_) => None,
                     })
                     .collect();
                 let all = self.ctors(ty);
@@ -1285,6 +1363,29 @@ impl Checker {
     }
 }
 
+/// `rows`, with each row that starts with an or-pattern replaced by one
+/// row for each of its alternatives.
+fn expand_or(rows: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
+    let mut out = Vec::new();
+    for r in rows {
+        match r.first() {
+            Some(Pat::Or(alternatives)) => {
+                let split: Vec<Vec<Pat>> = alternatives
+                    .iter()
+                    .map(|a| {
+                        std::iter::once(a.clone())
+                            .chain(r[1..].iter().cloned())
+                            .collect()
+                    })
+                    .collect();
+                out.extend(expand_or(&split));
+            }
+            _ => out.push(r.clone()),
+        }
+    }
+    out
+}
+
 /// The rows of `rows` that a value built with `c` (holding `arity` values)
 /// could match, with their first pattern replaced by the patterns for those
 /// values.
@@ -1295,6 +1396,7 @@ fn specialize(rows: &[Vec<Pat>], c: &Ctor, arity: usize) -> Vec<Vec<Pat>> {
                 Pat::Ctor(c2, args) if c2 == c => args.clone(),
                 Pat::Ctor(..) => return None,
                 Pat::Wild => vec![Pat::Wild; arity],
+                Pat::Or(_) => unreachable!("rows are expanded before they're specialized"),
             };
             Some(head.into_iter().chain(r[1..].iter().cloned()).collect())
         })

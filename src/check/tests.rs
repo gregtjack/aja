@@ -1462,3 +1462,45 @@ fn template_strings_take_values_with_to_str() {
         "mismatched types: function 'main' is declared to return int, but this is str"
     );
 }
+
+#[test]
+fn or_patterns() {
+    ok("enum S { A(int), B(int, str), C }
+        fn f(s: S, o: Option<bool>) -> int {
+            let n = match s { S::A(n) | S::B(n, _) => n, S::C => 0 };
+            match o { Some(true) | None => n, Some(false) => 0 }
+        }
+        fn main() {}");
+    assert_eq!(
+        error("fn f(o: Option<int>) -> int { match o { Some(x) | None => x } } fn main() {}").0,
+        "'x' isn't bound in this alternative of the pattern"
+    );
+    assert_eq!(
+        error("fn f(o: Option<int>) -> int { match o { None | Some(x) => 1 } } fn main() {}").0,
+        "'x' is bound in this alternative of the pattern, but not the first"
+    );
+    assert_eq!(
+        error("enum E { A(int), B(str) } fn f(e: E) -> int { match e { E::A(x) | E::B(x) => 1 } } fn main() {}").0,
+        "mismatched types: 'x' is int in the first alternative of this pattern, but str in this one"
+    );
+    assert_eq!(
+        error("fn f(o: Option<bool>) -> int { match o { Some(true) | None => 1 } } fn main() {}").0,
+        "non-exhaustive match: `Some(false)` not covered"
+    );
+    let (msg, text) =
+        error("fn f(n: int) -> int { match n { 1 | 2 => 1, 2 | 1 => 2, _ => 3 } } fn main() {}");
+    assert_eq!(
+        (msg.as_str(), text.as_str()),
+        ("unreachable pattern", "2 | 1")
+    );
+}
+
+#[test]
+fn else_if_chains_have_one_type() {
+    ok("fn f(n: int) -> str { if n < 0 { \"neg\" } else if n == 0 { \"zero\" } else { \"pos\" } } fn main() {}");
+    ok("fn main() { let n = 1; if n == 0 { println(0); } else if n == 1 { println(1); } }");
+    assert_eq!(
+        error("fn f(n: int) -> int { if n < 0 { 1 } else if n == 0 { \"zero\" } else { 2 } } fn main() {}").0,
+        "'if' and 'else' have incompatible types: str and int"
+    );
+}

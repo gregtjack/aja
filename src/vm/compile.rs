@@ -1516,6 +1516,7 @@ impl FnCompiler<'_> {
     fn pattern(&mut self, p: &Pattern, value: Reg, fails: &mut Vec<usize>) {
         match &p.kind {
             PatternKind::Wildcard => {}
+            PatternKind::Or(alternatives) => self.or_pattern(alternatives, value, fails),
             PatternKind::Error(_) => {
                 unreachable!("the checker reports errors before anything is compiled")
             }
@@ -1602,6 +1603,51 @@ impl FnCompiler<'_> {
                     self.sub_pattern(sub, value, i, fails);
                 }
             }
+        }
+    }
+
+    /// `a | b | c`: try each alternative in turn. Each binds the same names,
+    /// so every name gets one register, and whichever alternative matches
+    /// moves its values there.
+    fn or_pattern(&mut self, alternatives: &[Pattern], value: Reg, fails: &mut Vec<usize>) {
+        let mut names = Vec::new();
+        pattern_bindings(&alternatives[0], &mut names);
+        let slots: Vec<(Id, Reg)> = names.into_iter().map(|(n, _)| (n, self.alloc())).collect();
+        let mut matched = Vec::new();
+        for (i, alt) in alternatives.iter().enumerate() {
+            let mark = self.mark();
+            self.cur().scopes.push(Vec::new());
+            let mut alt_fails = Vec::new();
+            self.pattern(alt, value, &mut alt_fails);
+            let locals = self.cur().scopes.pop().expect("the alternative's scope");
+            for (name, slot) in &slots {
+                let local = locals
+                    .iter()
+                    .find(|l| l.name == *name)
+                    .expect("the checker makes every alternative bind the same names");
+                self.emit(
+                    Op::Move {
+                        dst: *slot,
+                        src: local.reg,
+                    },
+                    alt.span,
+                );
+            }
+            self.release(mark);
+            if i + 1 == alternatives.len() {
+                fails.extend(alt_fails);
+            } else {
+                matched.push(self.emit(Op::Jump { target: 0 }, alt.span));
+                for f in alt_fails {
+                    self.patch(f);
+                }
+            }
+        }
+        for m in matched {
+            self.patch(m);
+        }
+        for (name, slot) in slots {
+            self.declare(name, slot, false);
         }
     }
 
@@ -1881,6 +1927,8 @@ fn pattern_bindings(p: &Pattern, out: &mut Vec<(Id, DeclKey)>) {
             fields.iter().for_each(|(_, _, f)| pattern_bindings(f, out))
         }
         PatternKind::Error(subs) => subs.iter().for_each(|f| pattern_bindings(f, out)),
+        // Every alternative binds the same names; the first's stand for them.
+        PatternKind::Or(alternatives) => pattern_bindings(&alternatives[0], out),
         PatternKind::Wildcard
         | PatternKind::Int(_)
         | PatternKind::Str(_)

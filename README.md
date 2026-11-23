@@ -169,6 +169,10 @@ fn area(s: Shape) -> int {
   `_`, a name (which binds the value), int, bool, and string literals, variant
   patterns `Shape::Circle(center, r)`, and struct patterns
   `Point { x: 0, y }` (end with `..` to skip the other fields). They nest.
+  **`a | b`** matches what either does: `4 | 6 | 9 | 11 => 30`, or
+  `Shape::Circle(r) | Shape::Square(r) => r`, where each alternative must
+  bind the same names to values of the same type. `|` works inside other
+  patterns too: `Some(0 | 1)`.
   A `match` is an expression, and its arms are tail positions.
 - **`match` is exhaustive.** Leaving a case out is a compile error that names
   the missing cases (`Shape::Empty` not covered), so adding a variant
@@ -494,7 +498,9 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 - **Blocks are expressions:** the final expression without a trailing `;` is
   the block's value. `return expr;` exits a function early.
 - **`if`:** `if cond { ... } else { ... }` is an expression; `if` without
-  `else` is a statement.
+  `else` is a statement. Chain conditions with `else if`:
+  `if n < 0 { "negative" } else if n == 0 { "zero" } else { "positive" }`.
+  An `if` used as a value needs a final `else`.
 - **`while`:** `while cond { ... }`.
 - **`for`:** `for x in values { ... }` (see [Loops and iterators](#loops-and-iterators)).
   `break` leaves the innermost `while` or `for` loop, and `continue` starts

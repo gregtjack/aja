@@ -932,7 +932,7 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
-            PatternKind::Error(subs) => {
+            PatternKind::Error(subs) | PatternKind::Or(subs) => {
                 for f in subs {
                     self.pattern(f);
                 }

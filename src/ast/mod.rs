@@ -296,6 +296,9 @@ pub enum PatternKind {
         fields: Vec<(Id, Span, Pattern)>,
         rest: bool,
     },
+    /// `a | b | c`: matches a value any of the alternatives does. Each
+    /// binds the same names, to values of the same types.
+    Or(Vec<Pattern>),
     /// A pattern whose error has already been reported (by the module
     /// resolver), holding the patterns inside it, whose names it binds.
     /// It is treated like `_`.

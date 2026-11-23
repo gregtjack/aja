@@ -549,6 +549,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_else_if_and_or_patterns() {
+        // `else if` is `else { if ... }`.
+        let e = create_parser("if a { 1 } else if b { 2 } else { 3 }")
+            .parse_expr_only()
+            .unwrap();
+        let Expression::If(_, _, otherwise) = e.kind else {
+            panic!("expected an if");
+        };
+        let Statement::Block(stmts, Some(inner)) = *otherwise else {
+            panic!("expected a block holding the inner if");
+        };
+        assert!(stmts.is_empty());
+        assert!(matches!(inner.kind, Expression::If(..)));
+
+        let err = create_parser("if a { 1 } else if b { 2 }")
+            .parse_expr_only()
+            .unwrap_err();
+        assert_eq!(err.message, "expected 'else', found end of file");
+
+        let e = create_parser("match n { 1 | 2 | 3 => 0, Some(0) | None => 1 }")
+            .parse_expr_only()
+            .unwrap();
+        let Expression::Match(_, arms) = e.kind else {
+            panic!("expected a match");
+        };
+        let counts: Vec<usize> = arms
+            .iter()
+            .map(|a| match &a.pattern.kind {
+                PatternKind::Or(alts) => alts.len(),
+                _ => 1,
+            })
+            .collect();
+        assert_eq!(counts, [3, 2]);
+    }
+
+    #[test]
     fn test_parse_template_strings() {
         let src = r#""{a} + {b} = {a + b}!""#;
         let Expression::Template(parts) = create_parser(src).parse_expr_only().unwrap().kind else {
@@ -1545,7 +1581,7 @@ where
 
         if tok_matches!(self, Token::Else) {
             self.consume(Token::Else)?;
-            let s2 = self.parse_block()?;
+            let s2 = self.parse_else(false)?;
             let span = Span::new(start, self.last_end());
             return Ok(Statement::Expr(Expr::new(
                 Expression::If(Box::new(e), Box::new(s1), Box::new(s2)),
@@ -1554,6 +1590,24 @@ where
         }
 
         Ok(Statement::If(e, Box::new(s1)))
+    }
+
+    /// What follows `else`: a block, or another `if`, as in
+    /// `if a { ... } else if b { ... } else { ... }`. The `if` becomes a
+    /// block holding only it, so later passes see `else { if b ... }`. An
+    /// `if` used for its value (`value`) needs a final `else`, as any does.
+    fn parse_else(&mut self, value: bool) -> ParseResult<Statement> {
+        if !tok_matches!(self, Token::If) {
+            return self.parse_block();
+        }
+        if value {
+            let e = self.parse_if_expr()?;
+            return Ok(Statement::Block(Vec::new(), Some(e)));
+        }
+        match self.parse_if_stmt()? {
+            Statement::Expr(e) => Ok(Statement::Block(Vec::new(), Some(e))),
+            s => Ok(Statement::Block(vec![s], None)),
+        }
     }
 
     fn parse_while(&mut self) -> ParseResult<Statement> {
@@ -1604,8 +1658,13 @@ where
         let (start, _, _) = self.consume(Token::If)?;
         let e1 = self.parse_head()?;
         let e2 = self.parse_body()?;
+        if !tok_matches!(self, Token::Else) {
+            return Err(self
+                .expected("'else'")
+                .help("an `if` used as a value needs an `else`, so there is a value either way"));
+        }
         self.consume(Token::Else)?;
-        let e3 = self.parse_block()?;
+        let e3 = self.parse_else(true)?;
 
         Ok(Expr::new(
             Expression::If(Box::new(e1), Box::new(e2), Box::new(e3)),
@@ -2031,7 +2090,27 @@ where
         Ok(arms)
     }
 
+    /// A pattern, or several separated by `|`, which matches a value any of
+    /// them does: `4 | 6 | 9 | 11`, `Some(0) | None`.
     fn parse_pattern(&mut self) -> ParseResult<Pattern> {
+        let first = self.parse_single_pattern()?;
+        if !tok_matches!(self, Token::Pipe) {
+            return Ok(first);
+        }
+        let start = first.span.start;
+        let mut alternatives = vec![first];
+        while tok_matches!(self, Token::Pipe) {
+            self.next();
+            alternatives.push(self.parse_single_pattern()?);
+        }
+        let span = Span::new(start, self.last_end());
+        Ok(Pattern {
+            kind: PatternKind::Or(alternatives),
+            span,
+        })
+    }
+
+    fn parse_single_pattern(&mut self) -> ParseResult<Pattern> {
         let Some((start, tok, _)) = self.peek().cloned() else {
             return Err(self.expected("a pattern"));
         };
