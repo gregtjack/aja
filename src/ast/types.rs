@@ -15,6 +15,8 @@ pub enum Type {
         ret_type: Box<Type>,
     },
     Void,
+    /// `(int, str)`: two or more values of the given types, in order.
+    Tuple(Vec<Type>),
     /// A struct or enum, or a type parameter, by name, with its type
     /// arguments (`Option<int>`) and where it is written.
     Named(Id, Vec<Type>, Span),
@@ -38,6 +40,10 @@ impl Display for Type {
                 write!(f, "({}) -> {}", params.join(", "), ret_type)
             }
             Type::Void => write!(f, "void"),
+            Type::Tuple(items) => {
+                let items: Vec<String> = items.iter().map(|t| t.to_string()).collect();
+                write!(f, "({})", items.join(", "))
+            }
             Type::Error => write!(f, "_"),
             Type::Named(name, args, _) if args.is_empty() => write!(f, "{name}"),
             Type::Named(name, args, _) => {

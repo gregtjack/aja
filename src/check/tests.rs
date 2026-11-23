@@ -1504,3 +1504,92 @@ fn else_if_chains_have_one_type() {
         "'if' and 'else' have incompatible types: str and int"
     );
 }
+
+#[test]
+fn tuples() {
+    ok("fn f(p: (int, str)) -> (str, int) { (p.1, p.0) }
+        fn main() { let (s, n) = f((1, \"a\")); let t: ((int, int), bool) = ((n, 2), s == \"a\"); }");
+    ok("struct S { pair: (int, Option<str>) } fn main() { let s = S { pair: (1, None) }; }");
+    ok("fn main() { let f: ((int, int)) -> int = fn(t) { t.0 }; }");
+    assert_eq!(
+        error("fn main() { let t = (1, 2); let x: str = t.1; }").0,
+        "mismatched types: 'x' is declared as str but was given int"
+    );
+    assert_eq!(
+        error("fn main() { let t = (1, 2); t.2; }"),
+        ("(int, int) has no field '2'".to_string(), "2".to_string())
+    );
+    assert_eq!(
+        help("fn main() { let t = (1, 2); t.2; }"),
+        "its values are `.0` to `.1`"
+    );
+    assert_eq!(
+        error("fn main() { let t = (1, 2); t.x; }").0,
+        "(int, int) has no field 'x'"
+    );
+    assert_eq!(
+        error("fn main() { let p = (1, \"a\"); p == (1, 2); }").0,
+        "cannot apply '==' to (int, str) and (int, int)"
+    );
+    assert!(
+        error("fn main() { let t = (1, fn() -> int { 1 }); t == t; }")
+            .0
+            .starts_with("cannot apply '=='")
+    );
+}
+
+#[test]
+fn tuple_patterns() {
+    ok("fn main() -> int { match (1, true) { (0, _) => 0, (n, true) => n, (_, false) => 2 } }");
+    let (msg, _) = error("fn main() -> int { match (1, true) { (0, _) => 0, (_, true) => 1 } }");
+    assert_eq!(msg, "non-exhaustive match: `(_, false)` not covered");
+    assert_eq!(
+        error("fn main() { match (1, 2) { (a, b, c) => 0 }; }").0,
+        "mismatched types: this pattern matches (_, _, _), but the value is (int, int)"
+    );
+    assert_eq!(
+        error("fn main() { let (a, a) = (1, 2); }").0,
+        "'a' is bound more than once in this pattern"
+    );
+}
+
+#[test]
+fn let_and_for_patterns_must_match_every_value() {
+    ok("struct P { x: int, y: int } fn main() { let P { x, .. } = P { x: 1, y: 2 }; let _ = x; }");
+    ok("fn main() { for (i, s) in [(1, \"a\")] { let n: int = i; } }");
+    assert_eq!(
+        error("fn main() { let Some(x) = Some(1); }"),
+        (
+            "this pattern doesn't match every value: `None` isn't covered".to_string(),
+            "Some(x)".to_string()
+        )
+    );
+    assert_eq!(
+        help("fn main() { let Some(x) = Some(1); }"),
+        "use `match` to handle the values it doesn't match"
+    );
+    assert_eq!(
+        error("fn main() { let (0, x) = (1, 2); }").0,
+        "this pattern doesn't match every value"
+    );
+    assert_eq!(
+        error("fn main() { for (a, true) in [(1, false)] { } }").0,
+        "this pattern doesn't match every value: `(_, false)` isn't covered"
+    );
+    assert_eq!(
+        error("fn main() { let (a, b) = (1, 2); a = 3; }").0,
+        "cannot assign to 'a' because it is bound by a pattern"
+    );
+    assert_eq!(
+        error("fn main() { let (a, b) = (None, 1); }").0,
+        "type annotations needed: cannot infer the type of the value of this pattern"
+    );
+    assert_eq!(
+        help("fn main() { let (a, b) = (None, 1); }"),
+        "add a type, for example `(a, b): (Option<int>, int)`"
+    );
+    assert_eq!(
+        error("fn main() { let (a, b): (int, str) = (1, 2); }").0,
+        "mismatched types: this pattern is declared as (int, str) but was given (int, int)"
+    );
+}

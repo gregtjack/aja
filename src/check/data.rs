@@ -103,6 +103,7 @@ enum Ctor {
     /// The variant with this index.
     Variant(usize),
     Struct,
+    Tuple,
     Bool(bool),
     Int(i64),
     Str(EcoString),
@@ -427,6 +428,7 @@ impl Checker {
                 self.comparable(n, visiting)
                     && args.iter().all(|a| self.comparable_field(a, visiting))
             }
+            Ty::Tuple(items) => items.iter().all(|t| self.comparable_field(t, visiting)),
             // Checked against the type argument wherever the type is used.
             Ty::Param(_) => true,
             t => Class::Eq.admits(t),
@@ -500,6 +502,26 @@ impl Checker {
                     }
                 }
             }
+            Ty::Tuple(items) => match name.parse::<usize>() {
+                Ok(i) if i < items.len() && name.as_str() == i.to_string() => {
+                    self.fields.insert(key(span), i as u16);
+                    items[i].clone()
+                }
+                _ => {
+                    let shown = self.show(&Ty::Tuple(items.clone()));
+                    let last = items.len() - 1;
+                    let help = if name.parse::<usize>().is_ok() {
+                        format!("its values are `.0` to `.{last}`")
+                    } else {
+                        format!("a tuple's values are named by position, `.0` to `.{last}`")
+                    };
+                    self.error(
+                        TypeError::new(format!("{shown} has no field '{name}'"), name_span)
+                            .help(help),
+                    );
+                    Ty::Error
+                }
+            },
             Ty::Named(n, _) => {
                 self.error(
                     TypeError::new(format!("'{n}' is an enum, so it has no fields"), name_span)
@@ -967,6 +989,27 @@ impl Checker {
                     .collect();
                 Pat::Ctor(Ctor::Variant(index), subs)
             }
+            PatternKind::Tuple(items) => {
+                let tys = match self.resolve(expected) {
+                    Ty::Tuple(tys) if tys.len() == items.len() => tys,
+                    _ => {
+                        let tys: Vec<Ty> = items.iter().map(|_| self.fresh(Class::Any)).collect();
+                        let before = self.errors.len();
+                        self.pattern_type(&Ty::Tuple(tys.clone()), expected, p.span);
+                        if self.errors.len() != before {
+                            self.bind_unchecked(items.iter(), names);
+                            return Pat::Wild;
+                        }
+                        tys
+                    }
+                };
+                let subs = items
+                    .iter()
+                    .zip(&tys)
+                    .map(|(sub, t)| self.pattern(sub, t, names))
+                    .collect();
+                Pat::Ctor(Ctor::Tuple, subs)
+            }
             PatternKind::Struct {
                 name,
                 name_span,
@@ -1128,6 +1171,46 @@ impl Checker {
         self.expect(expected, pat, span, |e, f| {
             format!("mismatched types: this pattern matches {f}, but the value is {e}")
         });
+    }
+
+    /// Check the pattern of a `let` or `for` (`keyword`), which must match
+    /// every value of type `ty`, and define its bindings in the current
+    /// scope.
+    pub(super) fn irrefutable(&mut self, p: &Pattern, ty: &Ty, keyword: &str) {
+        let before = self.errors.len();
+        let pat = self.pattern(p, ty, &mut HashSet::new());
+        if self.errors.len() != before {
+            return;
+        }
+        let ty = self.zonk(ty);
+        if matches!(ty, Ty::Error | Ty::Never) {
+            return;
+        }
+        let tys = [ty.clone()];
+        let Some(w) = self.useful(&[vec![pat]], &[Pat::Wild], &tys) else {
+            return;
+        };
+        let missing = self.show_pat(&w[0], &ty);
+        let what = if keyword == "let" {
+            "a `let`"
+        } else {
+            "a `for` loop"
+        };
+        // Values left out by a literal, such as the ints other than 0 in
+        // `(0, x)`, show only as `_`, which says nothing.
+        let message = if missing.chars().all(|c| "_(), ".contains(c)) {
+            "this pattern doesn't match every value".to_string()
+        } else {
+            format!("this pattern doesn't match every value: `{missing}` isn't covered")
+        };
+        self.error(
+            TypeError::new(message, p.span)
+                .help("use `match` to handle the values it doesn't match")
+                .note(format!(
+                    "the pattern of {what} must match every value of its type, {}",
+                    self.show(&ty)
+                )),
+        );
     }
 
     // ---- Exhaustiveness --------------------------------------------------------
@@ -1292,12 +1375,16 @@ impl Checker {
                 None => Some(vec![Ctor::Struct]),
             },
             Ty::Bool => Some(vec![Ctor::Bool(false), Ctor::Bool(true)]),
+            Ty::Tuple(_) => Some(vec![Ctor::Tuple]),
             _ => None,
         }
     }
 
     /// The types of the values a constructor of `ty` holds.
     fn ctor_fields(&self, ty: &Ty, c: &Ctor) -> Vec<Ty> {
+        if let (Ty::Tuple(items), Ctor::Tuple) = (ty, c) {
+            return items.iter().map(|t| self.zonk(t)).collect();
+        }
         let (params, tys): (&[Id], Vec<&Ty>) = match (ty, c) {
             (Ty::Named(n, _), Ctor::Variant(i)) => (
                 &self.enums[n].params,
@@ -1355,6 +1442,7 @@ impl Checker {
                     format!("{n} {{ {}, .. }}", shown.join(", "))
                 }
             }
+            (_, Ctor::Tuple) => format!("({})", args.join(", ")),
             (_, Ctor::Bool(b)) => b.to_string(),
             (_, Ctor::Int(i)) => i.to_string(),
             (_, Ctor::Str(s)) => format!("{s:?}"),
@@ -1432,5 +1520,52 @@ fn value_span(stmt: &Statement) -> Option<Span> {
         Statement::Block(_, Some(tail)) => Some(tail.span),
         Statement::Expr(e) => Some(e.span),
         _ => None,
+    }
+}
+
+/// How a pattern is written, for suggestions such as an annotation:
+/// `(a, b)`, `Point { x, .. }`.
+pub(super) fn pattern_text(p: &Pattern) -> String {
+    let list = |ps: &[Pattern]| ps.iter().map(pattern_text).collect::<Vec<_>>().join(", ");
+    match &p.kind {
+        PatternKind::Wildcard | PatternKind::Error(_) => "_".to_string(),
+        PatternKind::Binding(v) => v.name.to_string(),
+        PatternKind::Int(i) => i.to_string(),
+        PatternKind::Str(s) => format!("{s:?}"),
+        PatternKind::Bool(b) => b.to_string(),
+        PatternKind::Tuple(items) => format!("({})", list(items)),
+        PatternKind::Or(alternatives) => alternatives
+            .iter()
+            .map(pattern_text)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        PatternKind::Variant {
+            enum_name,
+            variant,
+            fields,
+            parens,
+        } => {
+            let name = variant_display(enum_name, variant);
+            if *parens {
+                format!("{name}({})", list(fields))
+            } else {
+                name
+            }
+        }
+        PatternKind::Struct {
+            name, fields, rest, ..
+        } => {
+            let mut parts: Vec<String> = fields
+                .iter()
+                .map(|(f, _, sub)| match &sub.kind {
+                    PatternKind::Binding(v) if v.name == *f => f.to_string(),
+                    _ => format!("{f}: {}", pattern_text(sub)),
+                })
+                .collect();
+            if *rest {
+                parts.push("..".to_string());
+            }
+            format!("{name} {{ {} }}", parts.join(", "))
+        }
     }
 }

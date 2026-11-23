@@ -508,6 +508,11 @@ impl<'a> Resolver<'a> {
                 }
                 self.ty(ret_type);
             }
+            Type::Tuple(items) => {
+                for t in items {
+                    self.ty(t);
+                }
+            }
             Type::Int | Type::Float | Type::Bool | Type::String | Type::Void | Type::Error => {}
         }
     }
@@ -711,10 +716,21 @@ impl<'a> Resolver<'a> {
                     self.expr(e);
                 }
             }
-            Statement::For { var, iter, body } => {
+            Statement::LetPattern { pattern, t, value } => {
+                if let Some(t) = t {
+                    self.ty(t);
+                }
+                self.expr(value);
+                self.pattern(pattern);
+            }
+            Statement::For {
+                pattern,
+                iter,
+                body,
+            } => {
                 self.expr(iter);
                 self.scoped(|r| {
-                    r.bind(&var.name);
+                    r.pattern(pattern);
                     r.stmt(body);
                 });
             }
@@ -783,7 +799,7 @@ impl<'a> Resolver<'a> {
                 });
             }
             Expression::Field(obj, _, _) => self.expr(obj),
-            Expression::List(items) => {
+            Expression::List(items) | Expression::Tuple(items) => {
                 for x in items {
                     self.expr(x);
                 }
@@ -932,7 +948,7 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
-            PatternKind::Error(subs) | PatternKind::Or(subs) => {
+            PatternKind::Error(subs) | PatternKind::Or(subs) | PatternKind::Tuple(subs) => {
                 for f in subs {
                     self.pattern(f);
                 }

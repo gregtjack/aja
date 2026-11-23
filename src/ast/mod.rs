@@ -296,6 +296,9 @@ pub enum PatternKind {
         fields: Vec<(Id, Span, Pattern)>,
         rest: bool,
     },
+    /// `(a, b)`: a tuple with as many values as there are patterns (two
+    /// or more), each matching its pattern.
+    Tuple(Vec<Pattern>),
     /// `a | b | c`: matches a value any of the alternatives does. Each
     /// binds the same names, to values of the same types.
     Or(Vec<Pattern>),
@@ -317,14 +320,24 @@ pub enum Statement {
         value: Expr,
         mutable: bool,
     },
+    /// `let (a, b) = value;`, or `let Point { x, y }: Point = value;`: a
+    /// `let` whose pattern is more than a name. The pattern must match
+    /// every value of its type, and the names it binds are immutable.
+    /// They are in scope after the statement.
+    LetPattern {
+        pattern: Pattern,
+        t: Option<Type>,
+        value: Expr,
+    },
     If(Expr, Box<Statement>),
     While(Expr, Box<Statement>),
-    /// `for var in iter { body }`: `body` once for each value of `iter`,
+    /// `for pattern in iter { body }`: `body` once for each value of `iter`,
     /// an `Iter<T>` or a value whose type has a method
-    /// `iter(self) -> Iter<T>`, bound to `var` (immutable, and new for each
-    /// value).
+    /// `iter(self) -> Iter<T>`, matched against `pattern`, which must match
+    /// every value (usually a name, or a tuple such as `(k, v)`). The names
+    /// it binds are immutable, and new for each value.
     For {
-        var: Variable,
+        pattern: Pattern,
         iter: Expr,
         body: Box<Statement>,
     },
@@ -358,7 +371,8 @@ pub enum Expression {
     Assign(Id, Box<Expr>),
     /// Parameters, optional return type (inferred when absent), and body.
     Closure(Vec<Variable>, Option<Type>, Box<Statement>),
-    /// `value.field`, with where the field's name appears.
+    /// `value.field`, with where the field's name appears. A tuple's
+    /// values are fields named by their position: `pair.0`.
     Field(Box<Expr>, Id, Span),
     /// `Enum::Variant`, `Type::function`, or `module::item`: everything
     /// before the last `::` (which may itself hold `::`, as in
@@ -380,6 +394,8 @@ pub enum Expression {
     Try(Box<Expr>),
     /// `[a, b, c]`: a `List`.
     List(Vec<Expr>),
+    /// `(a, b)`: a tuple of two or more values.
+    Tuple(Vec<Expr>),
     /// `list[index]`, which stops the program if `index` is out of range.
     Index(Box<Expr>, Box<Expr>),
     /// A string with expressions in it, `"x is {x}"`: its text and its

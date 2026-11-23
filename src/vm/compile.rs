@@ -45,6 +45,8 @@ pub struct Compiler {
     count: u32,
     /// The program's structs and enums, by name.
     data: HashMap<Id, DataDef>,
+    /// The layout of the tuples with each number of values.
+    tuples: HashMap<usize, Rc<Layout>>,
     /// Every string literal's number.
     literals: HashMap<Box<str>, u32>,
     /// The literals numbered since the last unit was finished.
@@ -103,6 +105,7 @@ impl Compiler {
             globals: HashMap::new(),
             count: 0,
             data: HashMap::new(),
+            tuples: HashMap::new(),
             literals: HashMap::new(),
             new_literals: Vec::new(),
             new_functions: Vec::new(),
@@ -218,6 +221,20 @@ impl Compiler {
             }
             Definition::Function { .. } | Definition::Impl { .. } => {}
         }
+    }
+
+    /// The layout of tuples of `n` values: shown as `(a, b)`, with no name.
+    fn tuple_layout(&mut self, n: usize) -> Rc<Layout> {
+        self.tuples
+            .entry(n)
+            .or_insert_with(|| {
+                Rc::new(Layout {
+                    name: String::new(),
+                    tag: 0,
+                    fields: None,
+                })
+            })
+            .clone()
     }
 
     fn define_global(&mut self, name: Id) -> u32 {
@@ -654,14 +671,24 @@ impl<'a> FnCompiler<'a> {
                     self.void(dst);
                 }
             }
-            Statement::For { var, iter, body } => {
+            Statement::LetPattern { pattern, value, .. } => {
+                self.let_pattern(pattern, value);
+                if let Some(dst) = dst {
+                    self.void(dst);
+                }
+            }
+            Statement::For {
+                pattern,
+                iter,
+                body,
+            } => {
                 let mark = self.mark();
                 match range_bounds(iter, self.types) {
-                    Some((start, end)) => self.for_range(var, start, end, body),
+                    Some((start, end)) => self.for_range(pattern, start, end, body),
                     None if self.types.for_iter(iter).is_some_and(|f| f == "List::iter") => {
-                        self.for_list(var, iter, body)
+                        self.for_list(pattern, iter, body)
                     }
-                    None => self.for_iter(var, iter, body),
+                    None => self.for_iter(pattern, iter, body),
                 }
                 self.release(mark);
                 if let Some(dst) = dst {
@@ -736,7 +763,7 @@ impl<'a> FnCompiler<'a> {
     /// `for var in start..end { body }`, as a loop that counts, without
     /// making an `Iter`. `end` is evaluated once, before the first
     /// iteration, as `Iter::range` would.
-    fn for_range(&mut self, var: &Variable, start: &Expr, end: &Expr, body: &Statement) {
+    fn for_range(&mut self, pattern: &Pattern, start: &Expr, end: &Expr, body: &Statement) {
         let i = self.alloc();
         self.expr(start, i);
         let limit = self.alloc();
@@ -762,29 +789,29 @@ impl<'a> FnCompiler<'a> {
         // The loop variable is the count itself: it is immutable, so
         // nothing in the body can change it, and a closure copies it.
         self.cur().scopes.push(Vec::new());
-        self.declare(var.name.clone(), i, false);
+        self.bind_loop_pattern(pattern, i);
         self.loop_body(None, |fc| fc.stmt(body, None));
         self.cur().scopes.pop();
         self.continue_here();
         // `i < limit`, so this can't overflow.
-        self.emit(Op::LoadInt { dst: one, value: 1 }, var.span);
+        self.emit(Op::LoadInt { dst: one, value: 1 }, pattern.span);
         self.emit(
             Op::AddI {
                 dst: i,
                 a: i,
                 b: one,
             },
-            var.span,
+            pattern.span,
         );
-        self.emit(Op::Jump { target: top }, var.span);
+        self.emit(Op::Jump { target: top }, pattern.span);
         self.patch(exit);
         self.end_loop();
     }
 
-    /// `for var in list { body }`, as a loop over the list's indexes,
+    /// `for pattern in list { body }`, as a loop over the list's indexes,
     /// without making an `Iter`. A list never changes, so its length is
     /// read once, and this goes over the same values `List::iter` would.
-    fn for_list(&mut self, var: &Variable, list: &Expr, body: &Statement) {
+    fn for_list(&mut self, pattern: &Pattern, list: &Expr, body: &Statement) {
         let l = self.alloc();
         self.expr(list, l);
         let len = self.alloc();
@@ -828,23 +855,23 @@ impl<'a> FnCompiler<'a> {
                 list: l,
                 index: i,
             },
-            var.span,
+            pattern.span,
         );
         self.cur().scopes.push(Vec::new());
-        self.declare(var.name.clone(), x, false);
+        self.bind_loop_pattern(pattern, x);
         self.loop_body(None, |fc| fc.stmt(body, None));
         self.cur().scopes.pop();
         self.continue_here();
-        self.emit(Op::LoadInt { dst: one, value: 1 }, var.span);
+        self.emit(Op::LoadInt { dst: one, value: 1 }, pattern.span);
         self.emit(
             Op::AddI {
                 dst: i,
                 a: i,
                 b: one,
             },
-            var.span,
+            pattern.span,
         );
-        self.emit(Op::Jump { target: top }, var.span);
+        self.emit(Op::Jump { target: top }, pattern.span);
         self.patch(exit);
         self.end_loop();
     }
@@ -881,9 +908,9 @@ impl<'a> FnCompiler<'a> {
         }
     }
 
-    /// `for var in iter { body }`: call the `Iter`'s step function until
+    /// `for pattern in iter { body }`: call the `Iter`'s step function until
     /// it gives `None`.
-    fn for_iter(&mut self, var: &Variable, iter: &Expr, body: &Statement) {
+    fn for_iter(&mut self, pattern: &Pattern, iter: &Expr, body: &Statement) {
         let it = self.alloc();
         self.expr(iter, it);
         if let Some(global) = self.types.for_iter(iter).cloned() {
@@ -955,10 +982,10 @@ impl<'a> FnCompiler<'a> {
                 obj: item,
                 index: 0,
             },
-            var.span,
+            pattern.span,
         );
         self.cur().scopes.push(Vec::new());
-        self.declare(var.name.clone(), x, false);
+        self.bind_loop_pattern(pattern, x);
         self.loop_body(Some(top), |fc| fc.stmt(body, None));
         self.cur().scopes.pop();
         self.emit(Op::Jump { target: top }, iter.span);
@@ -980,6 +1007,54 @@ impl<'a> FnCompiler<'a> {
             step.expect("the prelude's Iter has a field 'step'") as u16,
             some.expect("the prelude's Option has a variant 'Some'") as u32,
         )
+    }
+
+    /// Bind a `for` loop's pattern to the value in `reg`, each time
+    /// around. A name is the register itself.
+    fn bind_loop_pattern(&mut self, pattern: &Pattern, reg: Reg) {
+        match &pattern.kind {
+            PatternKind::Binding(var) => self.declare(var.name.clone(), reg, false),
+            _ => self.irrefutable_pattern(pattern, reg),
+        }
+    }
+
+    /// Bind the names in `pattern`, which the checker has made sure
+    /// matches every value, to the parts of the value in `value`.
+    fn irrefutable_pattern(&mut self, pattern: &Pattern, value: Reg) {
+        let mut fails = Vec::new();
+        self.pattern(pattern, value, &mut fails);
+        // An or-pattern such as `true | false` still tests its
+        // alternatives, though one of them always matches.
+        if !fails.is_empty() {
+            let matched = self.emit(Op::Jump { target: 0 }, pattern.span);
+            for f in fails {
+                self.patch(f);
+            }
+            self.emit(Op::NoMatch, pattern.span);
+            self.patch(matched);
+        }
+    }
+
+    /// `let pattern = value;`
+    fn let_pattern(&mut self, pattern: &Pattern, value: &Expr) {
+        let reg = self.alloc();
+        self.expr(value, reg);
+        self.irrefutable_pattern(pattern, reg);
+
+        // A REPL input's top-level names outlive the input, so they are
+        // globals too.
+        if self.repl && self.fns.len() == 1 && self.cur().scopes.len() == 1 {
+            let mut names = Vec::new();
+            pattern_bindings(pattern, &mut names);
+            for (name, _) in names {
+                let src = self
+                    .find_local(0, &name)
+                    .expect("the pattern has just bound it")
+                    .reg;
+                let index = self.compiler.define_global(name);
+                self.emit(Op::SetGlobal { index, src }, pattern.span);
+            }
+        }
     }
 
     fn let_(&mut self, var: &Variable, value: &Expr, mutable: bool) {
@@ -1316,6 +1391,14 @@ impl<'a> FnCompiler<'a> {
                     u32::try_from(items.len()).expect("a list literal this long fits in memory");
                 self.emit(Op::NewList { dst, start, count }, span);
             }
+            Expression::Tuple(items) => {
+                let start = self.alloc_n(items.len());
+                for (i, x) in items.iter().enumerate() {
+                    self.expr(x, start + i as Reg);
+                }
+                let layout = self.compiler.tuple_layout(items.len());
+                self.new_data(dst, layout, start, items.len(), span);
+            }
             Expression::Index(list, index) => {
                 // Use the list variable's own register only if the index
                 // can't assign to it first.
@@ -1593,6 +1676,11 @@ impl FnCompiler<'_> {
                     self.sub_pattern(sub, value, i, fails);
                 }
             }
+            PatternKind::Tuple(items) => {
+                for (i, sub) in items.iter().enumerate() {
+                    self.sub_pattern(sub, value, i, fails);
+                }
+            }
             PatternKind::Struct { name, fields, .. } => {
                 let (_, names) = self.struct_def(name);
                 for (field, _, sub) in fields {
@@ -1827,9 +1915,21 @@ impl CaptureFinder {
                 self.expr(cond);
                 self.stmt(body);
             }
-            Statement::For { var, iter, body } => {
+            Statement::LetPattern { pattern, value, .. } => {
+                self.expr(value);
+                let mut vars = Vec::new();
+                pattern_bindings(pattern, &mut vars);
+                self.scopes.last_mut().unwrap().1.extend(vars);
+            }
+            Statement::For {
+                pattern,
+                iter,
+                body,
+            } => {
                 self.expr(iter);
-                self.scope(vec![(var.name.clone(), decl_key(var))], |s| s.stmt(body));
+                let mut vars = Vec::new();
+                pattern_bindings(pattern, &mut vars);
+                self.scope(vars, |s| s.stmt(body));
             }
             Statement::Break(_) | Statement::Continue(_) => {}
             Statement::Return(value) => {
@@ -1852,7 +1952,9 @@ impl CaptureFinder {
             | Expression::Unary(_, e)
             | Expression::Field(e, ..)
             | Expression::Try(e) => self.expr(e),
-            Expression::Error(es) | Expression::List(es) => es.iter().for_each(|e| self.expr(e)),
+            Expression::Error(es) | Expression::List(es) | Expression::Tuple(es) => {
+                es.iter().for_each(|e| self.expr(e))
+            }
             Expression::Template(parts) => {
                 for part in parts {
                     if let TemplatePart::Expr(e) = part {
@@ -1926,7 +2028,9 @@ fn pattern_bindings(p: &Pattern, out: &mut Vec<(Id, DeclKey)>) {
         PatternKind::Struct { fields, .. } => {
             fields.iter().for_each(|(_, _, f)| pattern_bindings(f, out))
         }
-        PatternKind::Error(subs) => subs.iter().for_each(|f| pattern_bindings(f, out)),
+        PatternKind::Error(subs) | PatternKind::Tuple(subs) => {
+            subs.iter().for_each(|f| pattern_bindings(f, out))
+        }
         // Every alternative binds the same names; the first's stand for them.
         PatternKind::Or(alternatives) => pattern_bindings(&alternatives[0], out),
         PatternKind::Wildcard

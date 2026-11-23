@@ -30,8 +30,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     ast::{
-        types::Type, Definition, Expr, Expression, Id, Op1, Op2, Program, Source, Span, Statement,
-        Variable,
+        types::Type, Definition, Expr, Expression, Id, Op1, Op2, PatternKind, Program, Source,
+        Span, Statement, Variable,
     },
     builtins::{Params, BUILTINS},
     diagnostic::{closest_match, Diagnostic},
@@ -56,6 +56,8 @@ pub enum Ty {
     Str,
     Void,
     Fn(Vec<Ty>, Box<Ty>),
+    /// A tuple of two or more values.
+    Tuple(Vec<Ty>),
     /// A struct or enum, by name, with its type arguments.
     Named(Id, Vec<Ty>),
     /// A type parameter, inside the generic definition that declares it.
@@ -150,7 +152,7 @@ pub enum OperandType {
     Float,
     Bool,
     Str,
-    /// A struct or enum, compared field by field.
+    /// A struct, enum, or tuple, compared field by field.
     Data,
 }
 
@@ -355,6 +357,10 @@ pub struct Checker {
     /// The files of the standard library's modules, which can use each
     /// other's private items.
     std_sources: HashSet<Source>,
+    /// The type expected of the closure literal about to be checked, if
+    /// known: the closure's unannotated parameters start out with its
+    /// parameter types, so its body can use them (`xs.map(fn(p) { p.0 })`).
+    closure_hint: Option<Ty>,
 }
 
 impl Checker {
@@ -396,6 +402,7 @@ impl Checker {
             for_iters: HashMap::new(),
             templates: HashMap::new(),
             std_sources: HashSet::new(),
+            closure_hint: None,
         };
         for builtin in BUILTINS {
             let binding = match &builtin.params {
@@ -434,7 +441,7 @@ impl Checker {
                         Ty::Float => OperandType::Float,
                         Ty::Bool => OperandType::Bool,
                         Ty::Str => OperandType::Str,
-                        Ty::Named(..) => OperandType::Data,
+                        Ty::Named(..) | Ty::Tuple(_) => OperandType::Data,
                         // `never` operands are in code that can't run, and
                         // anything still unknown has been reported.
                         _ => OperandType::Int,
@@ -746,7 +753,10 @@ impl Checker {
                     self.define(var.name.clone(), t.clone(), kind);
                     t
                 });
-                let found = self.expr(value);
+                let found = match &placeholder {
+                    Some(p) if var.t.is_some() => self.expr_expecting(value, &p.clone()),
+                    _ => self.expr(value),
+                };
                 if let Some(p) = &placeholder {
                     if var.t.is_none() {
                         self.expect(p, &found, value.span, |e, f| {
@@ -793,11 +803,43 @@ impl Checker {
                 self.loop_depth -= 1;
                 Ty::Void
             }
-            Statement::For { var, iter, body } => {
+            Statement::LetPattern { pattern, t, value } => {
+                let found = self.expr(value);
+                let ty = match t {
+                    Some(annotation) => {
+                        let declared = self.from_ast(annotation);
+                        self.expect(&declared, &found, value.span, |e, f| {
+                            format!("mismatched types: this pattern is declared as {e} but was given {f}")
+                        });
+                        declared
+                    }
+                    None => {
+                        self.pending.push(Pending {
+                            name: data::pattern_text(pattern).into(),
+                            ty: found.clone(),
+                            span: pattern.span,
+                            what: "the value of this pattern".to_string(),
+                        });
+                        found
+                    }
+                };
+                self.irrefutable(pattern, &ty, "let");
+                Ty::Void
+            }
+            Statement::For {
+                pattern,
+                iter,
+                body,
+            } => {
                 let t = self.expr(iter);
                 let item = self.iter_item(&t, iter.span);
                 self.scopes.push(HashMap::new());
-                self.define(var.name.clone(), item, BindingKind::Loop);
+                match &pattern.kind {
+                    PatternKind::Binding(var) => {
+                        self.define(var.name.clone(), item, BindingKind::Loop)
+                    }
+                    _ => self.irrefutable(pattern, &item, "for"),
+                }
                 self.loop_depth += 1;
                 self.stmt(body);
                 self.loop_depth -= 1;
@@ -877,6 +919,16 @@ impl Checker {
     }
 
     // ---- Expressions -------------------------------------------------------
+
+    /// Check `expr`, whose type should be `expected`. Only a closure
+    /// literal makes use of it, for its parameters' types; the caller
+    /// still checks that the types match.
+    fn expr_expecting(&mut self, expr: &Expr, expected: &Ty) -> Ty {
+        if expr.is_closure() {
+            self.closure_hint = Some(expected.clone());
+        }
+        self.expr(expr)
+    }
 
     fn expr(&mut self, expr: &Expr) -> Ty {
         let span = expr.span;
@@ -1027,12 +1079,22 @@ impl Checker {
             }
             Expression::Call(callee, args) => self.call(callee, args, span),
             Expression::Closure(params, rtype, body) => {
+                let hinted = match self.closure_hint.take().map(|h| self.resolve(&h)) {
+                    Some(Ty::Fn(ps, _)) if ps.len() == params.len() => Some(ps),
+                    _ => None,
+                };
                 let param_tys: Vec<Ty> = params
                     .iter()
-                    .map(|p| match &p.t {
+                    .enumerate()
+                    .map(|(i, p)| match &p.t {
                         Some(t) => self.from_ast(t),
                         None => {
                             let t = self.fresh(Class::Any);
+                            if let Some(ps) = &hinted {
+                                // If they don't fit, the mismatch is reported
+                                // where the closure is passed.
+                                self.unify(&t, &ps[i]);
+                            }
                             self.pending.push(Pending {
                                 name: p.name.clone(),
                                 ty: t.clone(),
@@ -1068,6 +1130,7 @@ impl Checker {
                 }
                 Ty::Named("List".into(), vec![item])
             }
+            Expression::Tuple(items) => Ty::Tuple(items.iter().map(|x| self.expr(x)).collect()),
             Expression::Index(list, index) => self.index(list, index),
             Expression::Template(parts) => {
                 for part in parts {
@@ -1259,7 +1322,7 @@ impl Checker {
                 ));
             } else if s1 == s2 && class == Class::Eq {
                 err = err.note(
-                    "only int, float, bool, and str values, and structs and enums made of them, \
+                    "only int, float, bool, and str values, and structs, enums, and tuples made of them, \
                      can be compared with '==' and '!='",
                 );
             }
@@ -1363,7 +1426,7 @@ impl Checker {
             .and_then(|n| self.param_names.get(n).cloned());
 
         for (i, (arg, param)) in args.iter().zip(&params).enumerate() {
-            let found = self.expr(arg);
+            let found = self.expr_expecting(arg, param);
             let which = match &param_names {
                 Some(names) => format!("parameter '{}'", names[i]),
                 None => format!("argument {}", i + 1),
@@ -1449,6 +1512,7 @@ impl Checker {
                 Box::new(self.zonk(&ret)),
             ),
             Ty::Named(name, args) => Ty::Named(name, args.iter().map(|a| self.zonk(a)).collect()),
+            Ty::Tuple(items) => Ty::Tuple(items.iter().map(|t| self.zonk(t)).collect()),
             t => t,
         }
     }
@@ -1461,7 +1525,7 @@ impl Checker {
                 .chain(std::iter::once(&**ret))
                 .flat_map(Self::free_vars)
                 .collect(),
-            Ty::Named(_, args) => args.iter().flat_map(Self::free_vars).collect(),
+            Ty::Named(_, args) | Ty::Tuple(args) => args.iter().flat_map(Self::free_vars).collect(),
             _ => vec![],
         }
     }
@@ -1478,6 +1542,7 @@ impl Checker {
                 name.clone(),
                 args.iter().map(|a| Self::subst(a, map)).collect(),
             ),
+            Ty::Tuple(items) => Ty::Tuple(items.iter().map(|t| Self::subst(t, map)).collect()),
             t => t.clone(),
         }
     }
@@ -1508,7 +1573,7 @@ impl Checker {
                 }
                 Self::params_in(ret, out);
             }
-            Ty::Named(_, args) => {
+            Ty::Named(_, args) | Ty::Tuple(args) => {
                 for a in args {
                     Self::params_in(a, out);
                 }
@@ -1534,6 +1599,9 @@ impl Checker {
             }
             (Ty::Named(n1, a1), Ty::Named(n2, a2)) => {
                 n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| self.unify(x, y))
+            }
+            (Ty::Tuple(t1), Ty::Tuple(t2)) => {
+                t1.len() == t2.len() && t1.iter().zip(t2).all(|(x, y)| self.unify(x, y))
             }
             _ => a == b,
         }
@@ -1574,6 +1642,10 @@ impl Checker {
             (Class::Eq, Ty::Named(n, args)) => {
                 self.comparable(n, &mut HashSet::new())
                     && args.clone().iter().all(|a| self.constrain(a, Class::Eq))
+            }
+            // A tuple supports `==` if each of its types does.
+            (Class::Eq, Ty::Tuple(items)) => {
+                items.clone().iter().all(|t| self.constrain(t, Class::Eq))
             }
             _ => class.admits(t),
         }
@@ -1656,6 +1728,7 @@ impl Checker {
                 param_types.iter().map(|t| self.from_ast(t)).collect(),
                 Box::new(self.from_ast(ret_type)),
             ),
+            Type::Tuple(items) => Ty::Tuple(items.iter().map(|t| self.from_ast(t)).collect()),
             Type::Named(name, args, span) => self.named_type(name, args, *span),
             Type::Error => Ty::Error,
         }
@@ -1688,6 +1761,10 @@ impl Checker {
                 let params: Vec<String> = params.iter().map(|p| self.show(p)).collect();
                 format!("({}) -> {}", params.join(", "), self.show(&ret))
             }
+            Ty::Tuple(items) => {
+                let items: Vec<String> = items.iter().map(|t| self.show(t)).collect();
+                format!("({})", items.join(", "))
+            }
         }
     }
 
@@ -1702,7 +1779,7 @@ impl Checker {
                     params.iter_mut().for_each(fill);
                     fill(ret);
                 }
-                Ty::Named(_, args) => args.iter_mut().for_each(fill),
+                Ty::Named(_, args) | Ty::Tuple(args) => args.iter_mut().for_each(fill),
                 _ => {}
             }
         }

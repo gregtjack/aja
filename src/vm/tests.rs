@@ -1928,3 +1928,133 @@ fn main() -> str {
 }";
     assert_eq!(value(src), "Str(\"321 28 30 31 -0+ 5 abc\")");
 }
+
+#[test]
+fn tuples_hold_values_by_position() {
+    assert_eq!(
+        main_value("int", "let t = (1, (2, 3)); t.0 + t.1.0 * t.1.1"),
+        "Int(7)"
+    );
+    assert_eq!(
+        value(
+            "fn divmod(a: int, b: int) -> (int, int) { (a / b, a % b) }
+             fn main() -> int { let (q, r) = divmod(17, 5); q * 10 + r }"
+        ),
+        "Int(32)"
+    );
+    assert_eq!(
+        value(
+            "fn swap<A, B>(p: (A, B)) -> (B, A) { (p.1, p.0) }
+             fn main() -> str { swap((1, \"one\")).0 }"
+        ),
+        "Str(\"one\")"
+    );
+    // A tuple shows as its values in parentheses.
+    let (vm, v) = run_vm("fn main() -> (int, (str, bool)) { (1, (\"a\", true)) }");
+    assert_eq!(vm.heap.repr(&v.unwrap()), "(1, (\"a\", true))");
+}
+
+#[test]
+fn tuples_compare_by_value() {
+    assert_eq!(
+        main_value("bool", "(1, \"a\") == (1, \"a\") && (1, 2) != (2, 1)"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "((1, 2), Some(3)) == ((1, 2), Some(4))"),
+        "Bool(false)"
+    );
+}
+
+#[test]
+fn tuple_patterns_in_match_let_and_for() {
+    assert_eq!(
+        value(
+            "fn classify(p: (int, bool)) -> str {
+                 match p { (0, _) => \"zero\", (_, true) => \"yes\", (n, false) => \"no {n}\" }
+             }
+             fn main() -> str { classify((0, true)) + classify((1, true)) + classify((2, false)) }"
+        ),
+        "Str(\"zeroyesno 2\")"
+    );
+    assert_eq!(
+        main_value(
+            "int",
+            "var total = 0;
+             for (i, (a, b)) in [(1, (2, 3)), (4, (5, 6))] { total = total + i * (a + b); }
+             for (k, v) in [(\"x\", 1)].iter() { total = total + v; }
+             total"
+        ),
+        "Int(50)"
+    );
+    // Struct patterns, `_`, and or-patterns that match everything work in `let`.
+    assert_eq!(
+        value(
+            "struct P { x: int, y: int }
+             fn main() -> int {
+                 let P { x, y: _ } = P { x: 3, y: 4 };
+                 let (true | false, n) = (true, 5);
+                 let _ = 9;
+                 x + n
+             }"
+        ),
+        "Int(8)"
+    );
+    // Each iteration's names are new, so closures keep their own.
+    assert_eq!(
+        main_value(
+            "int",
+            "var fs = [];
+             for (a, b) in [(1, 2), (3, 4)] { fs = fs.push(fn() -> int { a * b }); }
+             fs[0]() + fs[1]()"
+        ),
+        "Int(14)"
+    );
+}
+
+#[test]
+fn closures_get_parameter_types_from_where_they_are_passed() {
+    assert_eq!(
+        main_value(
+            "int",
+            "let pairs = [(1, \"a\"), (2, \"b\")];
+             let firsts = pairs.map(fn(p) { p.0 });
+             firsts[0] + firsts[1]"
+        ),
+        "Int(3)"
+    );
+    assert_eq!(
+        value(
+            "struct P { x: int }
+             fn apply(f: (P) -> int, p: P) -> int { f(p) }
+             fn main() -> int {
+                 let g: (P) -> int = fn(p) { p.x * 2 };
+                 apply(fn(p) { p.x }, P { x: 1 }) + g(P { x: 5 })
+             }"
+        ),
+        "Int(11)"
+    );
+}
+
+#[test]
+fn repl_let_patterns_define_globals() {
+    let mut checker = check::Checker::new();
+    let mut compiler = Compiler::new();
+    let mut vm = Vm::new();
+    vm.heap.stress = true;
+    let mut eval = |src: &str| {
+        let stmt = Parser::new(tokenize(src).unwrap().into_iter())
+            .parse_stmt_only()
+            .unwrap();
+        let types = checker.check_repl_stmt(&stmt).unwrap();
+        let span = Span::new(
+            crate::ast::Location::new(0, 1, 1),
+            crate::ast::Location::new(0, 1, 1),
+        );
+        let input = compiler.repl(&stmt, &types, span);
+        let v = vm.run_repl(&input).unwrap();
+        show(&vm, &v)
+    };
+    assert_eq!(eval("let (a, b) = (2, 3)"), "Void");
+    assert_eq!(eval("a * b"), "Int(6)");
+}

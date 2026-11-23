@@ -643,10 +643,15 @@ mod tests {
         );
 
         let mut parser = create_parser("for i in 0..n + 1 { break; continue; }");
-        let Statement::For { var, iter, body } = parser.parse_stmt_only().unwrap() else {
+        let Statement::For {
+            pattern,
+            iter,
+            body,
+        } = parser.parse_stmt_only().unwrap()
+        else {
             panic!("expected a for loop");
         };
-        assert_eq!(var.name, "i");
+        assert!(matches!(&pattern.kind, PatternKind::Binding(v) if v.name == "i"));
         // `a..b` is a call of `Iter::range`, with the end's arithmetic inside it.
         let Expression::Call(callee, args) = &iter.kind else {
             panic!("expected a call, got {iter:?}")
@@ -682,6 +687,72 @@ mod tests {
         assert!(err("fn main() { for None in 0..3 { } }")
             .message
             .contains("variant"));
+    }
+
+    #[test]
+    fn test_parse_tuples() {
+        let e = create_parser("(1, (a, b), c,)").parse_expr_only().unwrap();
+        let Expression::Tuple(items) = &e.kind else {
+            panic!("expected a tuple, got {e:?}")
+        };
+        assert_eq!(items.len(), 3);
+        assert!(matches!(items[1].kind, Expression::Tuple(_)));
+        assert!(matches!(
+            create_parser("(1)").parse_expr_only().unwrap().kind,
+            Expression::Grouping(_)
+        ));
+        // `.0.1` is two positions, not the float `0.1`.
+        let e = create_parser("t.0.1").parse_expr_only().unwrap();
+        let Expression::Field(inner, one, _) = &e.kind else {
+            panic!("expected a field access, got {e:?}")
+        };
+        assert_eq!(one, "1");
+        assert!(matches!(&inner.kind, Expression::Field(_, zero, _) if zero == "0"));
+
+        let err = |src: &str| create_parser(src).parse().unwrap_err();
+        assert_eq!(
+            err("fn main() { let x = (1,); }").message,
+            "a tuple holds two or more values"
+        );
+        assert!(err("fn main() { let x = (); }")
+            .help
+            .unwrap()
+            .contains("Aja has no `()` value"));
+        assert_eq!(
+            err("fn main() { var (a, b) = (1, 2); }").message,
+            "'var' declares a single name, not a pattern"
+        );
+    }
+
+    #[test]
+    fn test_parse_tuple_types_and_patterns() {
+        let (params, rt) = parse_closure("fn(p: (int, str)) -> ((int, str)) -> (bool, int) { p }");
+        assert_eq!(
+            params[0].t,
+            Some(Type::Tuple(vec![Type::Int, Type::String]))
+        );
+        assert_eq!(
+            rt,
+            Some(Type::Fn {
+                param_types: vec![Type::Tuple(vec![Type::Int, Type::String])],
+                ret_type: Box::new(Type::Tuple(vec![Type::Bool, Type::Int])),
+            })
+        );
+        let mut parser = create_parser("let (a, (_, b)) = t");
+        let Statement::LetPattern { pattern, .. } = parser.parse_stmt_only().unwrap() else {
+            panic!("expected a let with a pattern");
+        };
+        assert!(matches!(&pattern.kind, PatternKind::Tuple(items) if items.len() == 2));
+        let mut parser = create_parser("let x: int = 1");
+        assert!(matches!(
+            parser.parse_stmt_only().unwrap(),
+            Statement::Let { .. }
+        ));
+        let mut parser = create_parser("for (k, v) in m { }");
+        let Statement::For { pattern, .. } = parser.parse_stmt_only().unwrap() else {
+            panic!("expected a for loop");
+        };
+        assert!(matches!(pattern.kind, PatternKind::Tuple(_)));
     }
 
     #[test]
@@ -1490,35 +1561,79 @@ where
         Ok(xs)
     }
 
-    /// `let name = value;` or `var name = value;`.
+    /// `let name = value;`, `var name = value;`, or `let pattern = value;`
+    /// for a pattern that is more than a name, such as `let (a, b) = pair;`.
     fn parse_let(&mut self) -> ParseResult<Statement> {
         let mutable = tok_matches!(self, Token::Var);
         let keyword = if mutable { "var" } else { "let" };
         self.next();
 
-        let (id, span) = match self.peek() {
-            Some((start, Token::Ident(id), end)) if id != "true" && id != "false" => {
-                (id.clone(), Span::new(*start, *end))
-            }
-            _ => return Err(self.expected(&format!("a variable name after '{keyword}'"))),
+        let Some(pattern) = self.parse_binding_pattern("a variable name")? else {
+            return Err(self.expected(&format!("a variable name after '{keyword}'")));
         };
-        let tok = self.peek().cloned();
-        self.check_new_name(tok, &id, "a variable name")?;
-        self.next();
+        if mutable && !matches!(pattern.kind, PatternKind::Binding(_)) {
+            return Err(ParseError {
+                start: pattern.span.start,
+                end: pattern.span.end,
+                message: "'var' declares a single name, not a pattern".to_string(),
+                help: Some(
+                    "the names a pattern binds can't change: use `let`, and copy a value \
+                     into a `var` if it needs to"
+                        .to_string(),
+                ),
+            });
+        }
 
         let ttype = self.parse_type_annotation()?;
         if !tok_matches!(self, Token::Equal) {
+            let shown = match &pattern.kind {
+                PatternKind::Binding(v) => v.name.to_string(),
+                _ => "...".to_string(),
+            };
             return Err(self.expected("'='").help(format!(
-                "variables must be initialized: `{keyword} {id} = <value>;`"
+                "variables must be initialized: `{keyword} {shown} = <value>;`"
             )));
         }
         self.consume(Token::Equal)?;
         let e = self.parse_expr()?;
-        Ok(Statement::Let {
-            var: Variable::new(id, ttype, span),
-            value: e,
-            mutable,
+        Ok(match pattern.kind {
+            PatternKind::Binding(v) => Statement::Let {
+                var: Variable::new(v.name, ttype, v.span),
+                value: e,
+                mutable,
+            },
+            _ => Statement::LetPattern {
+                pattern,
+                t: ttype,
+                value: e,
+            },
         })
+    }
+
+    /// What a `let` or `for` binds: a name, or a pattern such as `(a, b)`
+    /// or `Point { x, y }`. `None` if there is neither. `what` describes a
+    /// name declared there, for errors.
+    fn parse_binding_pattern(&mut self, what: &str) -> ParseResult<Option<Pattern>> {
+        let tok = self.peek().cloned();
+        match tok.clone() {
+            Some((start, Token::Ident(name), end)) if name != "true" && name != "false" => {
+                self.next();
+                let span = Span::new(start, end);
+                let structured = tok_matches!(self, Token::DoubleColon | Token::LeftBrace)
+                    || (prelude::variant_enum(&name).is_some()
+                        && tok_matches!(self, Token::LeftParen));
+                if !structured && name != "_" {
+                    self.check_new_name(tok, &name, what)?;
+                }
+                let kind = self.pattern_after_name(name, span)?;
+                Ok(Some(Pattern {
+                    kind,
+                    span: Span::new(start, self.last_end()),
+                }))
+            }
+            Some((_, Token::LeftParen, _)) => Ok(Some(self.parse_single_pattern()?)),
+            _ => Ok(None),
+        }
     }
 
     fn parse_block(&mut self) -> ParseResult<Statement> {
@@ -1620,18 +1735,10 @@ where
     /// `for x in iter { ... }`
     fn parse_for(&mut self) -> ParseResult<Statement> {
         self.consume(Token::For)?;
-        let tok = self.peek().cloned();
-        let var = match tok.clone() {
-            Some((start, Token::Ident(name), end)) => {
-                self.next();
-                self.check_new_name(tok, &name, "a loop variable")?;
-                Variable::new(name, None, Span::new(start, end))
-            }
-            _ => {
-                return Err(self
-                    .expected("a name after 'for'")
-                    .help("a for loop names each value: `for x in 0..10 { ... }`"))
-            }
+        let Some(pattern) = self.parse_binding_pattern("a loop variable")? else {
+            return Err(self
+                .expected("a name after 'for'")
+                .help("a for loop names each value: `for x in 0..10 { ... }`"));
         };
         if tok_matches!(self, Token::Colon) {
             let tok = self.peek().cloned();
@@ -1640,15 +1747,19 @@ where
                 .help("its type is the type of the values being looped over"));
         }
         if !tok_matches!(self, Token::In) {
+            let shown = match &pattern.kind {
+                PatternKind::Binding(v) => v.name.to_string(),
+                _ => "x".to_string(),
+            };
             return Err(self
                 .expected("'in'")
-                .help(format!("write `for {} in values {{ ... }}`", var.name)));
+                .help(format!("write `for {shown} in values {{ ... }}`")));
         }
         self.next();
         let iter = self.parse_head()?;
         let body = self.parse_body()?;
         Ok(Statement::For {
-            var,
+            pattern,
             iter,
             body: Box::new(body),
         })
@@ -1868,6 +1979,10 @@ where
                 self.next();
                 let (name, name_span) = match self.peek().cloned() {
                     Some((start, Token::Ident(name), end)) => (name, Span::new(start, end)),
+                    // A tuple's value by position: `pair.0`.
+                    Some((start, Token::Int(i), end)) if i >= 0 => {
+                        (Id::from(i.to_string()), Span::new(start, end))
+                    }
                     _ => return Err(self.expected("a field name after '.'")),
                 };
                 self.next();
@@ -1951,12 +2066,7 @@ where
                     self.parse_expr_seq(Token::LeftBracket, Token::Comma, Token::RightBracket)?;
                 Expression::List(items)
             }
-            Token::LeftParen => {
-                self.next();
-                let expr = self.with_structs(true, |p| p.parse_expr())?;
-                self.consume(Token::RightParen)?;
-                Expression::Grouping(Box::new(expr))
-            }
+            Token::LeftParen => self.with_structs(true, |p| p.parse_paren_expr())?,
             Token::Match => {
                 self.next();
                 let scrutinee = self.parse_head()?;
@@ -1993,6 +2103,36 @@ where
 
         // Compound expressions extend to the last token they consumed.
         Ok(Expr::new(kind, Span::new(span.start, self.last_end())))
+    }
+
+    /// `(e)`, a grouping, or `(a, b, ...)`, a tuple, from the `(`.
+    fn parse_paren_expr(&mut self) -> ParseResult<Expression> {
+        self.next();
+        if tok_matches!(self, Token::RightParen) {
+            return Err(self.expected("an expression").help(
+                "a tuple holds two or more values, e.g. `(1, \"a\")`; Aja has no `()` value",
+            ));
+        }
+        let first = self.parse_expr()?;
+        if !tok_matches!(self, Token::Comma) {
+            self.consume(Token::RightParen)?;
+            return Ok(Expression::Grouping(Box::new(first)));
+        }
+        let mut items = vec![first];
+        while tok_matches!(self, Token::Comma) {
+            let comma = self.next();
+            if tok_matches!(self, Token::RightParen) {
+                if items.len() == 1 {
+                    return Err(self
+                        .error(comma, "a tuple holds two or more values".to_string())
+                        .help("remove the ',' to use the value by itself"));
+                }
+                break;
+            }
+            items.push(self.parse_expr()?);
+        }
+        self.consume(Token::RightParen)?;
+        Ok(Expression::Tuple(items))
     }
 
     /// The fields of a struct literal, after its name.
@@ -2148,38 +2288,75 @@ where
             Token::Ident(name) => {
                 let name_end = self.peek().unwrap().2;
                 self.next();
-                match name.as_str() {
-                    "_" => PatternKind::Wildcard,
-                    "true" => PatternKind::Bool(true),
-                    "false" => PatternKind::Bool(false),
-                    _ if tok_matches!(self, Token::DoubleColon) => {
-                        let mut path = self.parse_path_tail(name)?;
-                        let name_span = Span::new(start, self.last_end());
-                        if tok_matches!(self, Token::LeftBrace) {
-                            self.parse_struct_pattern(path.join("::").into(), name_span)?
-                        } else {
-                            let last = path.pop().expect("a path has two names or more");
-                            self.parse_variant_pattern(path.join("::").into(), last)?
-                        }
-                    }
-                    // `Some(x)` for `Option::Some(x)`, and the like.
-                    v if prelude::variant_enum(v).is_some() => {
-                        self.parse_variant_pattern(prelude::variant_enum(v).unwrap().into(), name)?
-                    }
-                    _ if tok_matches!(self, Token::LeftBrace) => {
-                        self.parse_struct_pattern(name, Span::new(start, name_end))?
-                    }
-                    _ => {
-                        PatternKind::Binding(Variable::new(name, None, Span::new(start, name_end)))
-                    }
-                }
+                self.pattern_after_name(name, Span::new(start, name_end))?
             }
+            Token::LeftParen => self.parse_tuple_pattern()?,
             _ => return Err(self.expected("a pattern")),
         };
         Ok(Pattern {
             kind,
             span: Span::new(start, self.last_end()),
         })
+    }
+
+    /// The pattern that starts with the name `name` (at `span`), which has
+    /// just been read: `_`, a literal, a variant, a struct, or a binding.
+    fn pattern_after_name(&mut self, name: Id, span: Span) -> ParseResult<PatternKind> {
+        Ok(match name.as_str() {
+            "_" => PatternKind::Wildcard,
+            "true" => PatternKind::Bool(true),
+            "false" => PatternKind::Bool(false),
+            _ if tok_matches!(self, Token::DoubleColon) => {
+                let mut path = self.parse_path_tail(name)?;
+                let name_span = Span::new(span.start, self.last_end());
+                if tok_matches!(self, Token::LeftBrace) {
+                    self.parse_struct_pattern(path.join("::").into(), name_span)?
+                } else {
+                    let last = path.pop().expect("a path has two names or more");
+                    self.parse_variant_pattern(path.join("::").into(), last)?
+                }
+            }
+            // `Some(x)` for `Option::Some(x)`, and the like.
+            v if prelude::variant_enum(v).is_some() => {
+                self.parse_variant_pattern(prelude::variant_enum(v).unwrap().into(), name)?
+            }
+            _ if tok_matches!(self, Token::LeftBrace) => self.parse_struct_pattern(name, span)?,
+            _ => PatternKind::Binding(Variable::new(name, None, span)),
+        })
+    }
+
+    /// `(a, b, ...)`, a tuple pattern, or `(p)`, which is just `p`, from
+    /// the `(`.
+    fn parse_tuple_pattern(&mut self) -> ParseResult<PatternKind> {
+        self.next();
+        if tok_matches!(self, Token::RightParen) {
+            return Err(self
+                .expected("a pattern")
+                .help("a tuple pattern matches two or more values, e.g. `(a, b)`"));
+        }
+        let first = self.parse_pattern()?;
+        if !tok_matches!(self, Token::Comma) {
+            self.consume(Token::RightParen)?;
+            return Ok(first.kind);
+        }
+        let mut items = vec![first];
+        while tok_matches!(self, Token::Comma) {
+            let comma = self.next();
+            if tok_matches!(self, Token::RightParen) {
+                if items.len() == 1 {
+                    return Err(self
+                        .error(
+                            comma,
+                            "a tuple pattern matches two or more values".to_string(),
+                        )
+                        .help("remove the ','"));
+                }
+                break;
+            }
+            items.push(self.parse_pattern()?);
+        }
+        self.consume(Token::RightParen)?;
+        Ok(PatternKind::Tuple(items))
     }
 
     /// The fields of a struct pattern, after its name: `{ x, y: 0, .. }`.
@@ -2328,7 +2505,7 @@ where
                 self.next();
                 let err = self.error(tok, "function types are written without 'fn'".to_string());
                 let fixed = if tok_matches!(self, Token::LeftParen) {
-                    self.parse_fn_type(false).ok()
+                    self.parse_fn_type().ok()
                 } else {
                     None
                 };
@@ -2340,7 +2517,7 @@ where
                     ),
                 })
             }
-            Some((_, Token::LeftParen, _)) => self.parse_fn_type(true),
+            Some((_, Token::LeftParen, _)) => self.parse_paren_type(),
             Some((start, Token::Ident(ref v), _)) => {
                 let v = v.clone();
                 self.next();
@@ -2384,30 +2561,49 @@ where
         }
     }
 
-    /// Parse a function type, `(int, bool) -> str`, from its `(`. With
-    /// `require_return` false, a missing `-> T` means `void` (used to suggest
-    /// a fix for the old `fn(int)` spelling).
-    fn parse_fn_type(&mut self, require_return: bool) -> ParseResult<Type> {
+    /// A type that starts with `(`: a function type, `(int, bool) -> str`,
+    /// or a tuple type, `(int, bool)`, which has two or more types and no
+    /// `->`.
+    fn parse_paren_type(&mut self) -> ParseResult<Type> {
+        let types = self.parse_paren_types()?;
+        if tok_matches!(self, Token::RightArrow) {
+            self.next();
+            let ret_type = self.parse_type_name()?;
+            return Ok(Type::Fn {
+                param_types: types,
+                ret_type: Box::new(ret_type),
+            });
+        }
+        if types.len() >= 2 {
+            return Ok(Type::Tuple(types));
+        }
+        let params: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        Err(self.expected("'->' and a return type").help(format!(
+            "a function type always names its return type: `({}) -> void` if it returns nothing",
+            params.join(", ")
+        )))
+    }
+
+    /// `(T, U, ...)`: the types in parentheses, which may end in a ','.
+    fn parse_paren_types(&mut self) -> ParseResult<Vec<Type>> {
         self.consume(Token::LeftParen)?;
-        let mut param_types = Vec::new();
-        if !tok_matches!(self, Token::RightParen) {
-            loop {
-                param_types.push(self.parse_type_name()?);
-                if tok_matches!(self, Token::Comma) {
-                    self.next();
-                } else {
-                    break;
-                }
+        let mut types = Vec::new();
+        while !tok_matches!(self, Token::RightParen) {
+            types.push(self.parse_type_name()?);
+            if tok_matches!(self, Token::Comma) {
+                self.next();
+            } else {
+                break;
             }
         }
         self.consume(Token::RightParen)?;
-        if require_return && !tok_matches!(self, Token::RightArrow) {
-            let params: Vec<String> = param_types.iter().map(|t| t.to_string()).collect();
-            return Err(self.expected("'->' and a return type").help(format!(
-                "a function type always names its return type: `({}) -> void` if it returns nothing",
-                params.join(", ")
-            )));
-        }
+        Ok(types)
+    }
+
+    /// Parse the old spelling of a function type after `fn`, `(int) -> str`
+    /// or `(int)`, where a missing `-> T` means `void`, to suggest a fix.
+    fn parse_fn_type(&mut self) -> ParseResult<Type> {
+        let param_types = self.parse_paren_types()?;
         let ret_type = self
             .parse_fn_return_type_annotation()?
             .unwrap_or(Type::Void);

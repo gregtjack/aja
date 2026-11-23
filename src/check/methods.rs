@@ -485,7 +485,7 @@ impl Checker {
             return *ret;
         }
         for ((arg, param), pname) in args.iter().zip(params).zip(names) {
-            let found = self.expr(arg);
+            let found = self.expr_expecting(arg, param);
             self.expect(param, &found, arg.span, |e, f| {
                 format!("mismatched types: parameter '{pname}' of {what} expects {e}, found {f}")
             });

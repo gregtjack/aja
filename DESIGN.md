@@ -316,6 +316,23 @@ by a number with a fractional part.
   likely non-goal), and are traits implemented nominally or structurally?
   Today a type parameter has no bounds, so generic code can't use `==` or
   operators on it; bounds (`fn max<T: Ord>`) come with traits.
+- **Tuples** (decided). `(int, str)` is a type and `(1, "a")` a value,
+  with two or more parts: `(x)` is just `x`, `(x,)` is an error, and
+  `()` is not a value (see "A `void` value"). A part is read by position,
+  `t.0`, or with a pattern, and tuples compare part by part with `==`.
+  Anything whose parts deserve names should be a struct. With tuples,
+  `let` and `for` take any pattern that matches every value of its type
+  (`let (q, r) = divmod(a, b);`, `let Point { x, y } = p;`,
+  `for (k, v) in pairs`), checked by the same usefulness algorithm as
+  `match`; one that might not match is an error that points to `match`.
+  `var` still declares a single name, since names bound by patterns are
+  immutable (rule 5).
+- **Closure parameter types from context.** An unannotated closure
+  parameter takes its type from where the closure is passed or bound
+  (a parameter of a function or method, or an annotated `let`) before
+  its body is checked, so `pairs.map(fn(p) { p.0 })` needs no annotation.
+  This is the only place inference uses an expected type; everywhere
+  else it is plain unification.
 - **Explicit type arguments.** Type arguments are always inferred, and an
   annotation fixes one inference can't. Is a call-site syntax
   (`none::<int>()`) ever needed, and does it fit "one way to do it"?

@@ -13,6 +13,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [garbage.aja](garbage.aja) | The garbage collector freeing a million self-referencing closures |
 | [strings.aja](strings.aja) | Template strings (`"{name} is {age}"`), a `to_str` method for a struct, string methods (`split`, `trim`, `join`, `parse_int`, ...), and the collector freeing big strings |
 | [data.aja](data.aja) | Structs, enums with data, recursive types, and `match` with nested patterns and guards |
+| [tuples.aja](tuples.aja) | Tuples: returning several values, `.0` / `.1`, patterns in `let`, `for`, and `match`, and comparing with `==` |
 | [generics.aja](generics.aja) | Generic functions, structs, and enums: `Pair`, and a linked list with `map`, `fold`, and `find` |
 | [lists.aja](lists.aja) | Lists: literals, indexing, `get`, `push` and `set` making new lists, `map` / `filter` / `fold`, and sorting |
 | [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |

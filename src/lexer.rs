@@ -69,6 +69,9 @@ where
     /// of its current expression are still open: a `}` when it is 0 ends
     /// the expression and goes back to the string's text.
     templates: Vec<u32>,
+    /// Whether the last token was a `.`, so a number is a tuple field's
+    /// position and has no fraction: `pair.0.1` is `pair.0`, then `.1`.
+    after_dot: bool,
 }
 
 impl<T> Lexer<T>
@@ -85,11 +88,18 @@ where
             source: Source::MAIN,
             pending: None,
             templates: Vec::new(),
+            after_dot: false,
         }
     }
 
     /// Process one token.
     pub fn token(&mut self) -> LexResult {
+        let result = self.next_token();
+        self.after_dot = matches!(result, Ok((_, Token::Dot, _)));
+        result
+    }
+
+    fn next_token(&mut self) -> LexResult {
         if let Some(t) = self.pending.take() {
             return Ok(t);
         }
@@ -387,6 +397,7 @@ where
 
     fn tok_number(&mut self, c: char, start: Location) -> LexResult {
         let mut is_float = false;
+        let after_dot = self.after_dot;
         let mut num_str = String::new();
         num_str.push(c);
 
@@ -396,7 +407,7 @@ where
                     num_str.push(*c);
                     self.inner_next();
                 }
-                '.' if is_float => break,
+                '.' if is_float || after_dot => break,
                 '.' => {
                     let dot = self.get_location();
                     self.inner_next();

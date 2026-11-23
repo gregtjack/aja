@@ -1,0 +1,64 @@
+// Tuples: a few values of different types grouped without naming a struct.
+// A tuple holds two or more values, read by position (`.0`, `.1`) or taken
+// apart with a pattern. Once its parts deserve names, make it a struct.
+
+// Returning more than one value.
+fn divmod(a: int, b: int) -> (int, int) {
+    (a / b, a % b)
+}
+
+// Tuples are generic over their parts' types.
+fn swap<A, B>(pair: (A, B)) -> (B, A) {
+    let (a, b) = pair;
+    (b, a)
+}
+
+// The smallest and largest of a list, if it has any values.
+fn bounds(xs: List<int>) -> Option<(int, int)> {
+    let first = xs.get(0)?;
+    var lo = first;
+    var hi = first;
+    for x in xs {
+        lo = lo.min(x);
+        hi = hi.max(x);
+    }
+    Some((lo, hi))
+}
+
+fn describe(point: (int, int)) -> str {
+    match point {
+        (0, 0) => "the origin",
+        (0, _) | (_, 0) => "on an axis",
+        (x, y) if x == y => "on the diagonal",
+        _ => "somewhere else",
+    }
+}
+
+fn main() {
+    let (q, r) = divmod(17, 5);
+    println("17 = 5 * {q} + {r}");
+
+    let named = swap((3, "three"));
+    println("{named.0} is {named.1}");
+
+    match bounds([4, -2, 9, 0]) {
+        Some((lo, hi)) => println("from {lo} to {hi}"),
+        None => println("no values"),
+    }
+
+    // `for` takes patterns too, and a closure's parameter gets its type
+    // from where it is passed, so `p.1` needs no annotation.
+    let scores = [("ada", 92), ("grace", 88), ("alan", 95)];
+    for (name, score) in scores {
+        println("{name}: {score}");
+    }
+    let total = scores.map(fn(p) { p.1 }).fold(0, fn(sum, s) { sum + s });
+    println("total: {total}");
+
+    for p in [(0, 0), (0, 5), (3, 3), (1, 2)] {
+        println("({p.0}, {p.1}) is {describe(p)}");
+    }
+
+    // Tuples compare value by value.
+    println((1, "a") == (1, "a"));
+}
