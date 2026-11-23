@@ -282,7 +282,15 @@ by a number with a fractional part.
    `str`, `int`, `float`, and `bool` in the prelude, with template strings ✅.
 8. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.
-9. **Green threads and structured concurrency** in the VM.
+9. **Green threads and structured concurrency** in the VM, first with every
+   task on one OS thread (see [the plan](plans/green-threads.md)). A
+   library, not syntax: `task::scope(fn(s) { s.spawn(fn() { ... }).join() })`.
+   Tasks share no mutable state, since a `var` cell can't reach another task,
+   and they communicate over bounded channels. A panic in a task cancels
+   its scope and propagates to the parent. A cancelled task stops silently
+   at its next safepoint (a call or a loop's back edge). Blocking
+   intrinsics run on worker threads so that they block only their task.
+   Several OS threads, `select`, and timers come after.
 10. **Cranelift AoT backend** producing native binaries, with the same runtime
     semantics as the VM.
 
