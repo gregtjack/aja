@@ -81,11 +81,59 @@ parameters. Its return value is not printed; use `println` for output.
 | `int`   | `42`, `-7`, `1_000`     | 64-bit signed integer                |
 | `float` | `3.14`, `-0.5`          | 64-bit float                         |
 | `bool`  | `true`, `false`         |                                      |
-| `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`; join with `+` |
+| `str`   | `"hi\n"`, `"x is {x}"` | UTF-8; see [Strings](#strings). Escapes: `\n`, `\t`, `\r`, `\\`, `\"`, `\{`, `\}` |
 | `void`  | —                       | Result of statements / no value      |
 | `(int, str) -> bool` | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
 | `List<T>` | `[1, 2, 3]`, `[]`        | Immutable; see [Lists](#lists)       |
 | structs and enums | `Point { x: 1, y: 2 }`, `Shape::Circle(p, 3)` | Defined at the top level; see below |
+
+### Strings
+
+A string can hold expressions in braces. Each one is turned into a string
+and put in its place, so there's no need to join pieces with `+`:
+
+```rust
+let name = "Ada";
+println("{name} is {age + 1} next year");   // Ada is 37 next year
+println("a literal \{brace}");               // a literal {brace}
+```
+
+- **What can go in a template:** a `str`, `int`, `float`, or `bool`, or a
+  value of any type with a method `to_str(self) -> str`, which the template
+  calls. Lists, functions, and values of a type parameter can't, since there
+  is no single right way to show them; call a method that makes the string
+  you want. When traits arrive, `to_str` becomes a `Show` trait.
+- Any expression works, including calls and other strings:
+  `"{user.name.to_upper()} has {xs.len()} items"`.
+- `\{` and `\}` write braces. A `}` with no `{` before it is just text.
+- Templates can't be `match` patterns, since their value isn't known until
+  the program runs.
+
+Strings have methods (defined in the prelude):
+
+| Method | Gives |
+|--------|-------|
+| `len()`, `byte_len()`, `is_empty()` | The number of characters, or of UTF-8 bytes |
+| `contains(s)`, `starts_with(s)`, `ends_with(s)` | `bool` |
+| `find(s)` | `Option<int>`: the position of the first `s` |
+| `slice(start, end)` | The characters from `start` up to `end`; stops the program if out of range |
+| `chars()`, `split(sep)`, `lines()`, `words()` | `List<str>` |
+| `trim()`, `trim_start()`, `trim_end()`, `to_upper()`, `to_lower()` | A new string |
+| `replace(from, to)`, `repeat(n)` | A new string |
+| `sep.join(parts)` | The strings in `parts`, with `sep` between each two |
+| `parse_int()`, `parse_float()` | `Option<int>`, `Option<float>` |
+| `to_str()` | Itself |
+
+**Positions count characters** (Unicode code points), not bytes:
+`"héllo".len()` is 5 and `"héllo".slice(1, 2)` is `"é"`. Finding a
+position takes time in proportion to it, so to go through a string a
+character at a time, loop over `chars()`.
+
+Numbers and bools have methods too: `n.to_str()`, `n.to_float()`, `n.abs()`,
+`n.min(m)`, `n.max(m)`, `n.clamp(lo, hi)`, and `n.pow(e)` for `int`; `x.to_str()`,
+`x.to_int()` (rounding towards zero), `floor`, `ceil`, `round`, `sqrt`,
+`abs`, `min`, `max`, and `is_nan` for `float`; and `b.to_str()` for `bool`.
+`3.min(4)` is a method call; `3.5` is a float.
 
 ### Structs, enums, and `match`
 
@@ -330,8 +378,9 @@ v.dot(v)
   called as `s.f(x)`.
 - The receiver's type must be known where a method is called, as for a
   field: in `fn(p) { p.norm() }`, annotate `p`.
-- Built-in types (`int`, `str`, ...) have no methods yet; they'll come with
-  the standard library.
+- Built-in types (`int`, `float`, `bool`, `str`) get their methods from the
+  prelude's `impl str { ... }` and so on (see [Strings](#strings)); a
+  program can't add more.
 - A method compiles to an ordinary function named like `Vec2::plus`, with
   `self` as its first argument, so tail calls and error traces work the
   same way.
@@ -567,9 +616,6 @@ fn main() -> Result<void, io::Error> {
 - To add a module, write `src/stdlib/<name>.aja` and list it in `MODULES`
   in `src/stdlib/mod.rs`.
 
-There are no conversions to strings yet (`int` has no `to_str`), so
-`println` is still the way to show a number.
-
 ## Architecture
 
 ```
@@ -645,7 +691,8 @@ the VM forgets to keep reachable is caught.
 with indexing;
 structs, enums with data, and exhaustive `match`; generic functions, structs, and enums; `Option` and `Result` in the prelude, and `?`; methods and associated functions in `impl` blocks;
 modules, with `import` and `pub`; the start of the standard library
-(`std::io`, `std::fs`); static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
+(`std::io`, `std::fs`); template strings, and methods on strings and
+numbers; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 
 **Reserved or partially present, not yet usable:**

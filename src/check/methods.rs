@@ -48,6 +48,29 @@ impl MethodInfo {
     }
 }
 
+/// The name a built-in type's methods are declared under (`str` for
+/// `str::len`), if `t` is a built-in type that can have methods.
+pub(super) fn builtin_name(t: &Ty) -> Option<&'static str> {
+    match t {
+        Ty::Int => Some("int"),
+        Ty::Float => Some("float"),
+        Ty::Bool => Some("bool"),
+        Ty::Str => Some("str"),
+        _ => None,
+    }
+}
+
+/// The built-in type whose methods are declared under `name`.
+fn builtin_ty(name: &str) -> Option<Ty> {
+    match name {
+        "int" => Some(Ty::Int),
+        "float" => Some(Ty::Float),
+        "bool" => Some(Ty::Bool),
+        "str" => Some(Ty::Str),
+        _ => None,
+    }
+}
+
 /// A method whose body is still to be checked.
 pub(super) struct MethodBody<'p> {
     method: &'p Method,
@@ -79,7 +102,11 @@ impl Checker {
             else {
                 continue;
             };
-            let Some((type_name, impl_params)) = self.impl_target(type_params, target, &local)
+            let in_prelude = methods
+                .first()
+                .is_some_and(|m| m.name_span.start.source == Source::Prelude);
+            let Some((type_name, impl_params)) =
+                self.impl_target(type_params, target, &local, in_prelude, methods)
             else {
                 continue;
             };
@@ -99,7 +126,32 @@ impl Checker {
         type_params: &[crate::ast::TypeParam],
         target: &Type,
         local: &HashSet<&Id>,
+        in_prelude: bool,
+        methods: &[Method],
     ) -> Option<(Id, Vec<Id>)> {
+        let builtin = match target {
+            Type::Int => Some("int"),
+            Type::Float => Some("float"),
+            Type::Bool => Some("bool"),
+            Type::String => Some("str"),
+            _ => None,
+        };
+        if let Some(name) = builtin {
+            if in_prelude {
+                return Some((name.into(), Vec::new()));
+            }
+            if let Some(m) = methods.first() {
+                self.error(
+                    TypeError::new(
+                        format!("methods for '{name}' can only be defined in the prelude"),
+                        m.name_span,
+                    )
+                    .help("write a function that takes it instead")
+                    .note("a type's methods are all defined next to it, so there is one place to look for them"),
+                );
+            }
+            return None;
+        }
         let Type::Named(name, args, span) = target else {
             let shown = target.to_string();
             let span = type_params.first().map_or(Self::dummy_span(), |p| p.span);
@@ -193,10 +245,12 @@ impl Checker {
             .collect();
         let generics: Vec<Id> = impl_params.iter().chain(&own).cloned().collect();
         self.type_params = generics.clone();
-        let this = Ty::Named(
-            type_name.clone(),
-            impl_params.iter().map(|p| Ty::Param(p.clone())).collect(),
-        );
+        let this = builtin_ty(type_name).unwrap_or_else(|| {
+            Ty::Named(
+                type_name.clone(),
+                impl_params.iter().map(|p| Ty::Param(p.clone())).collect(),
+            )
+        });
         let params: Vec<Ty> = m
             .params
             .iter()
@@ -266,12 +320,15 @@ impl Checker {
         self.methods.get(type_name)?.get(name)
     }
 
-    /// The names of a type's methods, sorted, for messages.
-    fn method_names(&self, type_name: &Id) -> Vec<Id> {
-        let mut names: Vec<Id> = self
-            .methods
-            .get(type_name)
-            .map_or(Vec::new(), |ms| ms.keys().cloned().collect());
+    /// The names of a type's methods that code at `at` can call, sorted,
+    /// for messages.
+    fn method_names(&self, type_name: &Id, at: Span) -> Vec<Id> {
+        let mut names: Vec<Id> = self.methods.get(type_name).map_or(Vec::new(), |ms| {
+            ms.iter()
+                .filter(|(_, info)| info.visible(at, &self.std_sources))
+                .map(|(name, _)| name.clone())
+                .collect()
+        });
         names.sort();
         names
     }
@@ -305,7 +362,7 @@ impl Checker {
                 } else {
                     "enum"
                 };
-                let methods = self.method_names(&n);
+                let methods = self.method_names(&n, name_span);
                 let fields: Vec<Id> = self.structs.get(&n).map_or(Vec::new(), |s| {
                     s.fields.iter().map(|(f, _)| f.clone()).collect()
                 });
@@ -337,11 +394,26 @@ impl Checker {
                 self.poison(&[&t]);
             }
             other => {
-                let shown = self.show(&other);
-                self.error(
-                    TypeError::new(format!("{shown} has no method '{name}'"), name_span)
-                        .note("built-in types have no methods yet; they will come with the standard library"),
-                );
+                if let Some(n) = builtin_name(&other) {
+                    let n = Id::from(n);
+                    if let Some(info) = self.method(&n, name).cloned() {
+                        return Ok(self.call_method(&n, name, info, &[], callee, args, span));
+                    }
+                    let methods = self.method_names(&n, name_span);
+                    let help = match closest_match(name, methods.iter().map(|m| m.as_str())) {
+                        Some(s) => format!("a method with a similar name exists: '{s}'"),
+                        None => format!("its methods are: {}", methods.join(", ")),
+                    };
+                    self.error(
+                        TypeError::new(format!("{n} has no method '{name}'"), name_span).help(help),
+                    );
+                } else {
+                    let shown = self.show(&other);
+                    self.error(TypeError::new(
+                        format!("{shown} has no method '{name}'"),
+                        name_span,
+                    ));
+                }
             }
         }
         for a in args {
@@ -457,6 +529,75 @@ impl Checker {
                 ),
             ),
         );
+    }
+
+    /// Check `e`, an expression in a template string, which must be a
+    /// `str` or have a method `to_str(self) -> str`, as `int`, `float`, and
+    /// `bool` do. The method is recorded for the backends to call.
+    pub(super) fn template_part(&mut self, e: &Expr) {
+        const NOTE: &str = "an expression in a template string must be a str, \
+                            or have a method `to_str(self) -> str`, as int, float, and bool do";
+        let t = self.expr(e);
+        let name: Id = match self.resolve(&t) {
+            Ty::Str | Ty::Error | Ty::Never => return,
+            Ty::Named(n, _) => n,
+            other => match builtin_name(&other) {
+                Some(n) => n.into(),
+                None => {
+                    let shown = self.show(&other);
+                    let mut err = TypeError::new(
+                        format!("{shown} can't be put in a template string"),
+                        e.span,
+                    );
+                    err = match other {
+                        Ty::Var(_) => TypeError::new(
+                            "type annotations needed: the type of this value must be known to put it in a template string",
+                            e.span,
+                        )
+                        .help("annotate the variable or parameter it comes from, e.g. `x: int`"),
+                        Ty::Param(p) => err.note(format!(
+                            "'{p}' could be any type, and not every type has a `to_str` method"
+                        )),
+                        _ => err.note(NOTE),
+                    };
+                    self.error(err);
+                    self.poison(&[&t]);
+                    return;
+                }
+            },
+        };
+        let to_str = Id::from("to_str");
+        let fits = |c: &mut Self, info: &MethodInfo| {
+            info.has_self
+                && matches!(&info.ty, Ty::Fn(params, ret)
+                    if params.len() == 1 && matches!(c.resolve(ret), Ty::Str))
+        };
+        match self.method(&name, &to_str).cloned() {
+            Some(info) if fits(self, &info) => {
+                if !info.visible(e.span, &self.std_sources) {
+                    self.private_method(&name, &to_str, &info, e.span);
+                }
+                self.templates.insert(key(e.span), info.global.clone());
+            }
+            Some(info) => {
+                let shown = self.show(&info.ty);
+                self.error(
+                    TypeError::new(format!("'{name}' can't be put in a template string"), e.span)
+                        .help(format!("'{name}::to_str' must be a method that takes only `self` and returns a str"))
+                        .note(format!("'{}' has type {shown}", info.global)),
+                );
+            }
+            None => {
+                self.error(
+                    TypeError::new(
+                        format!("'{name}' can't be put in a template string"),
+                        e.span,
+                    )
+                    .help(format!("give '{name}' a method `to_str(self) -> str`"))
+                    .note(NOTE),
+                );
+            }
+        }
     }
 
     /// The type of the values a `for` loop over a value of type `t` (at

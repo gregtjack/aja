@@ -278,7 +278,8 @@ by a number with a fractional part.
 7. **Standard library**, layer by layer, starting with the prelude and core.
    Started: the library is embedded and imported as `std::...` ✅, the
    intrinsics layer ✅, `std::io` (standard input, output, and error) ✅,
-   and `std::fs` (whole-file reads and writes, directories) ✅.
+   `std::fs` (whole-file reads and writes, directories) ✅, and methods on
+   `str`, `int`, `float`, and `bool` in the prelude, with template strings ✅.
 8. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.
 9. **Green threads and structured concurrency** in the VM.
@@ -294,9 +295,14 @@ by a number with a fractional part.
   when `i` is out of range, as division by zero does: an index that might be
   out of range is a job for `xs.get(i)`, which returns an `Option`. Lists
   are immutable, so there is no `xs[i] = v`.
-- **String interpolation.** `"x = {x}"` is much easier to write than
-  concatenation, but it calls `Show` implicitly. Is that hidden control flow
-  (rule 4), or acceptable because `Show` is meant to have no side effects?
+- **String interpolation** (decided). Every string literal can hold
+  expressions, `"x = {x}"`, with `\{` for a literal brace. A value in one
+  must be a `str`, `int`, `float`, or `bool`, or have a method
+  `to_str(self) -> str`, which the template calls. That call is the only
+  hidden one, and it is acceptable because showing a value is meant to have
+  no side effects; with traits, `to_str` becomes the `Show` trait. Lists
+  and other generic types can't be shown this way until then, since their
+  `to_str` would need their items' types to have one too.
 - **`Iter` as a trait.** A `for` loop takes an `Iter<T>`, a struct around a
   closure, or a value with a method `iter(self) -> Iter<T>`, found by name.
   With traits, should the loop take anything implementing an `Iter` trait
@@ -313,13 +319,16 @@ by a number with a fractional part.
 - **Explicit type arguments.** Type arguments are always inferred, and an
   annotation fixes one inference can't. Is a call-site syntax
   (`none::<int>()`) ever needed, and does it fit "one way to do it"?
-- **Methods on built-in types.** `s.len()` and `n.abs()` need `impl str` and
-  `impl int` in the prelude, and bodies for some of them that only the
-  runtime can provide. The prelude can now declare `native fn`s, so the
-  bodies are solved; what's left is how an `impl int` is allowed there when
-  impls must be next to their type.
+- **Methods on built-in types** (decided). The prelude has `impl str`,
+  `impl int`, `impl float`, and `impl bool`; it counts as where those types
+  are defined, so no other module can add to them.
 - **A `void` value.** `Ok(...)` of a `Result<void, E>` can only be written
   by calling a `void` function (`Ok(write(...))`); there is no literal for
   "nothing". Does `void` get one, and what is it written as?
-- **Strings.** UTF-8 everywhere, and is indexing by byte, by code point, or not
-  allowed at all?
+- **Strings** (decided for now). UTF-8 everywhere. Positions and lengths
+  count code points, which matches what people mean by "the third
+  character" more often than bytes do; `byte_len` gives the size. There is
+  no `s[i]`: `slice`, `find`, and `chars` cover it. Whether to move to
+  grapheme clusters, or to give `slice` byte positions for speed, is open;
+  a string type that remembers where its characters start would make
+  positions cheap either way.

@@ -484,6 +484,24 @@ fn intrinsics_are_only_for_the_standard_library() {
 }
 
 #[test]
+fn strings_and_templates_survive_collection() {
+    // `run` collects garbage at every allocation.
+    let main = "
+fn main() -> str {
+    var out = [];
+    for i in 0..20 {
+        let word = \"w{i}\".repeat(2).to_upper();
+        out = out.push(\"{word}:{i * 2}:{word.len()}\");
+    }
+    \",\".join(out.slice(18, 20)) + \" {\"a b c\".split(\" \").len()}\"
+}";
+    assert_eq!(
+        value(&[("main.aja", main)]),
+        "\"W18W18:36:6,W19W19:38:6 3\""
+    );
+}
+
+#[test]
 fn std_fs_can_be_imported() {
     let main = "
 import std::fs;

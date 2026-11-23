@@ -11,13 +11,13 @@ fn main() -> Result<void, io::Error> {
     let out = io::stdout();
     out.write("New note: ")?;
     match io::stdin().read_line()? {
-        Some(note) => fs::append(path, note + "\n")?,
+        Some(note) => fs::append(path, "{note}\n")?,
         None => {}
     }
     if !fs::exists(path) {
         return out.write_line("No notes yet.");
     }
-    println("Notes (" + path + ",", fs::size(path)?, "bytes):");
+    println("Notes ({path}, {fs::size(path)?} bytes):");
     for note in fs::read_lines(path)? {
         println("-", note);
     }

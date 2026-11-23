@@ -1768,3 +1768,117 @@ fn out_of_range_is_an_error() {
         "slice 1..3 is out of range for a list of length 2"
     );
 }
+
+#[test]
+fn string_methods() {
+    let cases = [
+        ("\"héllo\".len()", "Int(5)"),
+        ("\"héllo\".byte_len()", "Int(6)"),
+        ("\"héllo\".slice(1, 3)", "Str(\"él\")"),
+        ("\"héllo\".slice(5, 5)", "Str(\"\")"),
+        ("\"héllo\".find(\"l\").unwrap_or(-1)", "Int(2)"),
+        ("\"abc\".find(\"z\").is_none()", "Bool(true)"),
+        ("\"  x y  \".trim()", "Str(\"x y\")"),
+        ("\"  x\".trim_start() + \"y  \".trim_end()", "Str(\"xy\")"),
+        ("\"MiXed\".to_upper() + \"MiXed\".to_lower()", "Str(\"MIXEDmixed\")"),
+        ("\"a-b-c\".replace(\"-\", \"+\")", "Str(\"a+b+c\")"),
+        ("\"abc\".replace(\"\", \"x\")", "Str(\"abc\")"),
+        ("\"ab\".repeat(3) + \"z\".repeat(-1)", "Str(\"ababab\")"),
+        ("\", \".join([\"a\", \"b\", \"c\"])", "Str(\"a, b, c\")"),
+        ("\"-\".join([])", "Str(\"\")"),
+        ("\"a,b,,c\".split(\",\").len()", "Int(4)"),
+        ("\"abc\".split(\"\")[2]", "Str(\"c\")"),
+        ("\"l1\\nl2\\r\\n\".lines()[1]", "Str(\"l2\")"),
+        ("\" one  two\\tthree \".words().len()", "Int(3)"),
+        ("\"héllo\".chars()[1]", "Str(\"é\")"),
+        ("\"Hello\".starts_with(\"He\") && \"Hello\".ends_with(\"lo\") && \"Hello\".contains(\"ell\")", "Bool(true)"),
+        ("\"\".is_empty() && !\" \".is_empty()", "Bool(true)"),
+        ("\"-42\".parse_int().unwrap_or(0)", "Int(-42)"),
+        ("\" 42\".parse_int().is_none() && \"4x\".parse_int().is_none()", "Bool(true)"),
+        ("\"1e3\".parse_float().unwrap_or(0.0)", "Float(1000.0)"),
+        ("\"\".parse_float().is_none()", "Bool(true)"),
+    ];
+    for (expr, expected) in cases {
+        let src = format!("fn main() -> _ {{ {expr} }}");
+        let src = src.replace("-> _", &format!("-> {}", type_of(expected)));
+        assert_eq!(value(&src), expected, "{expr}");
+    }
+}
+
+/// The Aja type of a value as `show` writes it, for a test's `main`.
+fn type_of(shown: &str) -> &'static str {
+    match shown.split('(').next() {
+        Some("Int") => "int",
+        Some("Float") => "float",
+        Some("Bool") => "bool",
+        Some("Str") => "str",
+        _ => panic!("no type for {shown}"),
+    }
+}
+
+#[test]
+fn number_methods() {
+    let cases = [
+        (
+            "(-5).abs() + 3.min(9) + 3.max(9) + 15.clamp(0, 10)",
+            "Int(27)",
+        ),
+        (
+            "2.pow(10) + 7.pow(0) + (-1).pow(5_000_000_001)",
+            "Int(1024)",
+        ),
+        ("(-2.7).to_int() + 2.7.to_int()", "Int(0)"),
+        (
+            "7.to_float() + 2.5.round() + 2.5.floor() + 2.5.ceil() + 9.0.sqrt()",
+            "Float(18.0)",
+        ),
+        ("(-1.5).abs().min(4.0).max(0.5)", "Float(1.5)"),
+        ("(0.0 / 0.0).is_nan()", "Bool(true)"),
+        (
+            "1.to_str() + 1.5.to_str() + 1.0.to_str() + false.to_str()",
+            "Str(\"11.51.0false\")",
+        ),
+    ];
+    for (expr, expected) in cases {
+        let src = format!("fn main() -> {} {{ {expr} }}", type_of(expected));
+        assert_eq!(value(&src), expected, "{expr}");
+    }
+    for (expr, message) in [
+        (
+            "2.pow(-1)",
+            "'pow' needs an exponent of 0 or more, but it was -1",
+        ),
+        ("10.pow(19)", "integer overflow in 'pow'"),
+        ("(0.0 / 0.0).to_int()", "NaN can't be converted to an int"),
+        (
+            "(9223372036854775807.to_float() * 2.0).to_int()",
+            "1.8446744073709552e19 can't be converted to an int",
+        ),
+        (
+            "\"abc\".slice(2, 5).len()",
+            "slice 2..5 is out of range for a string of length 3",
+        ),
+    ] {
+        let src = format!("fn main() {{ {expr}; }}");
+        assert_eq!(run(&src).unwrap_err().message, message, "{expr}");
+    }
+}
+
+#[test]
+fn template_strings() {
+    let src = "
+struct P { x: int, y: int }
+impl P {
+    fn to_str(self) -> str { \"({self.x}, {self.y})\" }
+}
+fn main() -> str {
+    let name = \"Ada\";
+    var s = \"<\";
+    s = \"{s}{s}\";
+    \"{name} is {36 + 1}, {1.5 * 2.0}, {true}, at {P { x: 1, y: -2 }}; {\"in {name.to_upper()}\"} {s} \\{x}\"
+}";
+    assert_eq!(
+        value(src),
+        "Str(\"Ada is 37, 3.0, true, at (1, -2); in ADA << {x}\")"
+    );
+}

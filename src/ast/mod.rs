@@ -332,6 +332,13 @@ pub enum Statement {
     Return(Option<Expr>),
 }
 
+/// A piece of a template string.
+#[derive(Debug, Clone)]
+pub enum TemplatePart {
+    Text(EcoString),
+    Expr(Expr),
+}
+
 #[derive(Debug, Clone)]
 pub enum Expression {
     Int(i64),
@@ -372,6 +379,9 @@ pub enum Expression {
     List(Vec<Expr>),
     /// `list[index]`, which stops the program if `index` is out of range.
     Index(Box<Expr>, Box<Expr>),
+    /// A string with expressions in it, `"x is {x}"`: its text and its
+    /// expressions in order, each expression's value turned into a string.
+    Template(Vec<TemplatePart>),
     /// An expression whose error has already been reported (by the module
     /// resolver), holding the expressions inside it that can still be
     /// checked. The checker gives it a type that fits anywhere; it never

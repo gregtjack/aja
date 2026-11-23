@@ -19,7 +19,7 @@ fn main() -> Result<void, io::Error> {
             return out.write_line("\nNo name, no greeting.");
         }
     };
-    out.write_line("Hello, " + name + "! Now some lines, please.")?;
+    out.write_line("Hello, {name}! Now some lines, please.")?;
 
     var count = 0;
     for line in stdin.lines() {

@@ -71,7 +71,7 @@ pub fn remove_file(path: str) -> Result<void, io::Error> {
 // sorted order. They are names, not paths: join one to `path` to use it.
 //
 //     for name in fs::read_dir("src")? {
-//         if fs::is_dir("src/" + name) { ... }
+//         if fs::is_dir("src/{name}") { ... }
 //     }
 pub fn read_dir(path: str) -> Result<List<str>, io::Error> {
     io::checked(native::read_dir(path))

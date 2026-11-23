@@ -788,6 +788,13 @@ impl<'a> Resolver<'a> {
                     self.expr(x);
                 }
             }
+            Expression::Template(parts) => {
+                for part in parts {
+                    if let crate::ast::TemplatePart::Expr(x) = part {
+                        self.expr(x);
+                    }
+                }
+            }
             Expression::Index(list, index) => {
                 self.expr(list);
                 self.expr(index);

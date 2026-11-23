@@ -71,6 +71,6 @@ fn main() {
     println("sum of 0..50000 =", sum(range(50000), 0));
 
     // Structs and enums compare field by field.
-    println("p == Point { x: 1, y: 2 }?", p == Point { x: 1, y: 2 });
+    println("p == Point \{ x: 1, y: 2 }?", p == Point { x: 1, y: 2 });
     println("range(3) == range(3)?", range(3) == range(3));
 }

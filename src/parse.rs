@@ -1,7 +1,8 @@
 use crate::{
     ast::{
         types::Type, Arm, Definition, Expr, Expression, FieldDef, FieldInit, Id, Import, Location,
-        Method, Pattern, PatternKind, Program, Span, Statement, TypeParam, Variable, VariantDef,
+        Method, Pattern, PatternKind, Program, Span, Statement, TemplatePart, TypeParam, Variable,
+        VariantDef,
     },
     diagnostic::Diagnostic,
     lexer::SrcSpan,
@@ -545,6 +546,46 @@ mod tests {
         assert!(crate::lexer::tokenize("let x = @;").is_err());
         assert!(crate::lexer::tokenize("\"unterminated").is_err());
         assert!(crate::lexer::tokenize("99999999999999999999").is_err());
+    }
+
+    #[test]
+    fn test_parse_template_strings() {
+        let src = r#""{a} + {b} = {a + b}!""#;
+        let Expression::Template(parts) = create_parser(src).parse_expr_only().unwrap().kind else {
+            panic!("expected a template");
+        };
+        let text = |e: &Expr| -> String {
+            src.chars()
+                .skip(e.span.start.col as usize - 1)
+                .take((e.span.end.col - e.span.start.col) as usize)
+                .collect()
+        };
+        let shown: Vec<String> = parts
+            .iter()
+            .map(|p| match p {
+                TemplatePart::Text(t) => format!("{t:?}"),
+                TemplatePart::Expr(e) => format!("<{}>", text(e)),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            ["<a>", "\" + \"", "<b>", "\" = \"", "<a + b>", "\"!\""]
+        );
+
+        for (src, message) in [
+            (r#""a {} b""#, "a template string has an empty '{}'"),
+            (
+                r#""a {x y} b""#,
+                "expected '}' to end the expression in a template string, found 'y'",
+            ),
+        ] {
+            let err = create_parser(src).parse_expr_only().unwrap_err();
+            assert_eq!(err.message, message, "{src}");
+        }
+        let err = create_parser(r#"match s { "{x}" => 1 }"#)
+            .parse_expr_only()
+            .unwrap_err();
+        assert_eq!(err.message, "template strings can't be used as patterns");
     }
 
     #[test]
@@ -1219,6 +1260,44 @@ where
         })
     }
 
+    /// The rest of a template string, after its first text: its
+    /// expressions, each followed by the text after it.
+    fn parse_template(&mut self, first: ecow::EcoString) -> ParseResult<Expression> {
+        let mut parts = Vec::new();
+        let mut text = first;
+        loop {
+            if !text.is_empty() {
+                parts.push(TemplatePart::Text(text));
+            }
+            if let Some((_, Token::TemplateMiddle(_) | Token::TemplateEnd(_), _)) = self.peek() {
+                let tok = self.peek().cloned();
+                return Err(self
+                    .error(tok, "a template string has an empty '{}'".to_string())
+                    .help("put an expression in it, or write '\\{' for a literal brace"));
+            }
+            let expr = self.with_structs(true, |p| p.parse_expr())?;
+            parts.push(TemplatePart::Expr(expr));
+            match self.peek().cloned() {
+                Some((_, Token::TemplateMiddle(t), _)) => {
+                    self.next();
+                    text = t;
+                }
+                Some((_, Token::TemplateEnd(t), _)) => {
+                    self.next();
+                    if !t.is_empty() {
+                        parts.push(TemplatePart::Text(t));
+                    }
+                    return Ok(Expression::Template(parts));
+                }
+                _ => {
+                    return Err(self
+                        .expected("'}' to end the expression in a template string")
+                        .help("write '\\{' for a literal brace in a string"))
+                }
+            }
+        }
+    }
+
     /// Parse with struct literals allowed (`true`) or not, restoring the
     /// previous setting afterwards.
     fn with_structs<R>(&mut self, allowed: bool, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -1772,6 +1851,10 @@ where
                 self.next();
                 Expression::String(s)
             }
+            Token::TemplateStart(text) => {
+                self.next();
+                self.parse_template(text)?
+            }
             Token::Ident(var) => {
                 self.next();
                 match var.as_str() {
@@ -1970,6 +2053,12 @@ where
             Token::String(s) => {
                 self.next();
                 PatternKind::Str(s)
+            }
+            Token::TemplateStart(_) => {
+                let tok = self.peek().cloned();
+                return Err(self
+                    .error(tok, "template strings can't be used as patterns".to_string())
+                    .help("bind the value and compare it in a guard: `s if s == \"...\" => ...`, or write '\\{' for a literal brace"));
             }
             Token::Float(_) => {
                 let tok = self.peek().cloned();

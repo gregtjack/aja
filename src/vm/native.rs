@@ -152,6 +152,82 @@ fn lines(text: &str) -> Vec<String> {
     text.lines().map(str::to_string).collect()
 }
 
+/// The longest string a native function will make, in bytes, so a
+/// mistake like `"x".repeat(n)` with a huge `n` stops the program instead
+/// of exhausting memory.
+const MAX_STR_BYTES: usize = 1 << 32;
+
+/// The string argument of a string method that takes no others.
+fn str_arg<'h>(heap: &'h Heap, name: &str, args: &[Value]) -> Result<&'h str, String> {
+    match args {
+        [Value::Str(s)] => Ok(heap.str(*s)),
+        _ => Err(bad_args(&format!("str::{name}"), args)),
+    }
+}
+
+/// The arguments of a string method that takes one other string.
+fn two_strs<'h>(heap: &'h Heap, name: &str, args: &[Value]) -> Result<(&'h str, &'h str), String> {
+    match args {
+        [Value::Str(a), Value::Str(b)] => Ok((heap.str(*a), heap.str(*b))),
+        _ => Err(bad_args(&format!("str::{name}"), args)),
+    }
+}
+
+/// The characters of `s` from position `start` up to `end`, counting
+/// characters, or the error if that isn't a range within it.
+fn char_slice(s: &str, start: i64, end: i64) -> Result<&str, String> {
+    let out_of_range = || {
+        format!(
+            "slice {start}..{end} is out of range for a string of length {}",
+            s.chars().count()
+        )
+    };
+    if start < 0 || end < start {
+        return Err(out_of_range());
+    }
+    // The byte offset of each character position, and of the end.
+    let mut offsets = s
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(s.len()));
+    let from = offsets.nth(start as usize).ok_or_else(out_of_range)?;
+    let to = if end == start {
+        from
+    } else {
+        offsets
+            .nth((end - start - 1) as usize)
+            .ok_or_else(out_of_range)?
+    };
+    Ok(&s[from..to])
+}
+
+/// `base` to the power `exp`, for `int::pow`.
+fn pow(base: i64, exp: i64) -> Result<i64, String> {
+    if exp < 0 {
+        return Err(format!(
+            "'pow' needs an exponent of 0 or more, but it was {exp}"
+        ));
+    }
+    let overflow = || "integer overflow in 'pow'".to_string();
+    match u32::try_from(exp) {
+        Ok(exp) => base.checked_pow(exp).ok_or_else(overflow),
+        // Only these bases have powers this high that fit.
+        Err(_) => match base {
+            0 | 1 => Ok(base),
+            -1 => Ok(if exp % 2 == 0 { 1 } else { -1 }),
+            _ => Err(overflow()),
+        },
+    }
+}
+
+/// A float method that maps a float to a float.
+fn float_op(name: &str, args: &[Value], f: fn(f64) -> f64) -> Result<Value, String> {
+    match args {
+        [Value::Float(x)] => Ok(Value::Float(f(*x))),
+        _ => Err(bad_args(&format!("float::{name}"), args)),
+    }
+}
+
 /// A list of strings for a native function to return.
 fn str_list(heap: &mut Heap, items: Vec<String>) -> Value {
     let list: super::list::List = items.into_iter().map(|s| str_value(heap, s)).collect();
@@ -378,6 +454,198 @@ static NATIVES: &[(&str, NativeFn)] = &[
         let (from, to) = two_paths(heap, "copy_file", args)?;
         record_fs(fs::copy(from, to), &format!("copy '{from}' to"), to);
         Ok(Value::Void)
+    }),
+    // ---- Strings (`impl str` in the prelude) ------------------------------
+    ("str::len", |heap, args| {
+        let s = str_arg(heap, "len", args)?;
+        Ok(Value::Int(s.chars().count() as i64))
+    }),
+    ("str::byte_len", |heap, args| {
+        let s = str_arg(heap, "byte_len", args)?;
+        Ok(Value::Int(s.len() as i64))
+    }),
+    ("str::contains", |heap, args| {
+        let (s, part) = two_strs(heap, "contains", args)?;
+        Ok(Value::Bool(s.contains(part)))
+    }),
+    ("str::starts_with", |heap, args| {
+        let (s, part) = two_strs(heap, "starts_with", args)?;
+        Ok(Value::Bool(s.starts_with(part)))
+    }),
+    ("str::ends_with", |heap, args| {
+        let (s, part) = two_strs(heap, "ends_with", args)?;
+        Ok(Value::Bool(s.ends_with(part)))
+    }),
+    ("str::index_of", |heap, args| {
+        let (s, part) = two_strs(heap, "index_of", args)?;
+        let i = s
+            .find(part)
+            .map_or(-1, |byte| s[..byte].chars().count() as i64);
+        Ok(Value::Int(i))
+    }),
+    ("str::slice", |heap, args| {
+        let [Value::Str(s), Value::Int(start), Value::Int(end)] = args else {
+            return Err(bad_args("str::slice", args));
+        };
+        let s = heap.str(*s);
+        let part = char_slice(s, *start, *end)?.to_string();
+        Ok(str_value(heap, part))
+    }),
+    ("str::chars", |heap, args| {
+        let s = str_arg(heap, "chars", args)?;
+        let chars = s.chars().map(String::from).collect();
+        Ok(str_list(heap, chars))
+    }),
+    ("str::split", |heap, args| {
+        let (s, sep) = two_strs(heap, "split", args)?;
+        let parts = if sep.is_empty() {
+            s.chars().map(String::from).collect()
+        } else {
+            s.split(sep).map(str::to_string).collect()
+        };
+        Ok(str_list(heap, parts))
+    }),
+    ("str::lines", |heap, args| {
+        let s = str_arg(heap, "lines", args)?;
+        let lines = lines(s);
+        Ok(str_list(heap, lines))
+    }),
+    ("str::words", |heap, args| {
+        let s = str_arg(heap, "words", args)?;
+        let words = s.split_whitespace().map(str::to_string).collect();
+        Ok(str_list(heap, words))
+    }),
+    ("str::trim", |heap, args| {
+        let s = str_arg(heap, "trim", args)?.trim().to_string();
+        Ok(str_value(heap, s))
+    }),
+    ("str::trim_start", |heap, args| {
+        let s = str_arg(heap, "trim_start", args)?.trim_start().to_string();
+        Ok(str_value(heap, s))
+    }),
+    ("str::trim_end", |heap, args| {
+        let s = str_arg(heap, "trim_end", args)?.trim_end().to_string();
+        Ok(str_value(heap, s))
+    }),
+    ("str::to_upper", |heap, args| {
+        let s = str_arg(heap, "to_upper", args)?.to_uppercase();
+        Ok(str_value(heap, s))
+    }),
+    ("str::to_lower", |heap, args| {
+        let s = str_arg(heap, "to_lower", args)?.to_lowercase();
+        Ok(str_value(heap, s))
+    }),
+    ("str::replace", |heap, args| {
+        let [Value::Str(s), Value::Str(from), Value::Str(to)] = args else {
+            return Err(bad_args("str::replace", args));
+        };
+        let (s, from, to) = (heap.str(*s), heap.str(*from), heap.str(*to));
+        let out = if from.is_empty() {
+            s.to_string()
+        } else {
+            s.replace(from, to)
+        };
+        Ok(str_value(heap, out))
+    }),
+    ("str::repeat", |heap, args| {
+        let [Value::Str(s), Value::Int(count)] = args else {
+            return Err(bad_args("str::repeat", args));
+        };
+        let s = heap.str(*s);
+        let count = (*count).max(0) as usize;
+        if s.len().checked_mul(count).is_none_or(|n| n > MAX_STR_BYTES) {
+            return Err(format!(
+                "'repeat' would make a string of {count} copies of {} bytes, which is too long",
+                s.len()
+            ));
+        }
+        let out = s.repeat(count);
+        Ok(str_value(heap, out))
+    }),
+    ("str::join", |heap, args| {
+        let [Value::Str(sep), Value::List(parts)] = args else {
+            return Err(bad_args("str::join", args));
+        };
+        let mut out = String::new();
+        for (i, part) in heap.list(*parts).iter().enumerate() {
+            if i > 0 {
+                out.push_str(heap.str(*sep));
+            }
+            let Value::Str(part) = part else {
+                return Err(bad_args("str::join", args));
+            };
+            out.push_str(heap.str(*part));
+        }
+        Ok(str_value(heap, out))
+    }),
+    ("str::is_int", |heap, args| {
+        let s = str_arg(heap, "is_int", args)?;
+        Ok(Value::Bool(s.parse::<i64>().is_ok()))
+    }),
+    ("str::to_int_unchecked", |heap, args| {
+        let s = str_arg(heap, "to_int_unchecked", args)?;
+        s.parse::<i64>()
+            .map(Value::Int)
+            .map_err(|_| format!("{s:?} isn't an int"))
+    }),
+    ("str::is_float", |heap, args| {
+        let s = str_arg(heap, "is_float", args)?;
+        Ok(Value::Bool(s.parse::<f64>().is_ok()))
+    }),
+    ("str::to_float_unchecked", |heap, args| {
+        let s = str_arg(heap, "to_float_unchecked", args)?;
+        s.parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| format!("{s:?} isn't a float"))
+    }),
+    // ---- Numbers (`impl int` and `impl float` in the prelude) -------------
+    ("int::to_str", |heap, args| {
+        let [Value::Int(n)] = args else {
+            return Err(bad_args("int::to_str", args));
+        };
+        Ok(str_value(heap, n.to_string()))
+    }),
+    ("int::to_float", |_, args| {
+        let [Value::Int(n)] = args else {
+            return Err(bad_args("int::to_float", args));
+        };
+        Ok(Value::Float(*n as f64))
+    }),
+    ("int::pow", |_, args| {
+        let [Value::Int(base), Value::Int(exp)] = args else {
+            return Err(bad_args("int::pow", args));
+        };
+        pow(*base, *exp).map(Value::Int)
+    }),
+    ("float::to_str", |heap, args| {
+        let [Value::Float(x)] = args else {
+            return Err(bad_args("float::to_str", args));
+        };
+        Ok(str_value(heap, format!("{x:?}")))
+    }),
+    ("float::to_int", |_, args| {
+        let [Value::Float(x)] = args else {
+            return Err(bad_args("float::to_int", args));
+        };
+        // Every float in this range truncates to an int; 2^63 itself doesn't.
+        if x.is_nan() || *x < -9_223_372_036_854_775_808.0 || *x >= 9_223_372_036_854_775_808.0 {
+            return Err(format!("{x:?} can't be converted to an int"));
+        }
+        Ok(Value::Int(*x as i64))
+    }),
+    ("float::floor", |_, args| {
+        float_op("floor", args, f64::floor)
+    }),
+    ("float::ceil", |_, args| float_op("ceil", args, f64::ceil)),
+    ("float::round", |_, args| {
+        float_op("round", args, f64::round)
+    }),
+    ("float::sqrt", |_, args| float_op("sqrt", args, f64::sqrt)),
+    ("float::is_nan", |_, args| {
+        let [Value::Float(x)] = args else {
+            return Err(bad_args("float::is_nan", args));
+        };
+        Ok(Value::Bool(x.is_nan()))
     }),
     // ---- Lists (`List` in the prelude) ------------------------------------
     ("List::len", |heap, args| {

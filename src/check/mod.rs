@@ -172,6 +172,7 @@ pub struct Types {
     tries: HashMap<SpanKey, TryOn>,
     functions: HashMap<SpanKey, Id>,
     for_iters: HashMap<SpanKey, Id>,
+    templates: HashMap<SpanKey, Id>,
 }
 
 /// Identifies an expression by where it is in the source. Two operator
@@ -221,6 +222,13 @@ impl Types {
     /// loop over `e` calls to get an `Iter`, or `None` if `e` is one.
     pub fn for_iter(&self, e: &Expr) -> Option<&Id> {
         self.for_iters.get(&key(e.span))
+    }
+
+    /// The `to_str` method, by the name it is compiled under, that turns
+    /// `e`, an expression in a template string, into a string, or `None` if
+    /// `e` is a string already.
+    pub fn template_to_str(&self, e: &Expr) -> Option<&Id> {
+        self.templates.get(&key(e.span))
     }
 }
 
@@ -342,6 +350,8 @@ pub struct Checker {
     loop_depth: usize,
     /// The `iter` method each `for` loop calls, if it calls one.
     for_iters: HashMap<SpanKey, Id>,
+    /// The `to_str` method each expression in a template string calls.
+    templates: HashMap<SpanKey, Id>,
     /// The files of the standard library's modules, which can use each
     /// other's private items.
     std_sources: HashSet<Source>,
@@ -384,6 +394,7 @@ impl Checker {
             type_params: Vec::new(),
             loop_depth: 0,
             for_iters: HashMap::new(),
+            templates: HashMap::new(),
             std_sources: HashSet::new(),
         };
         for builtin in BUILTINS {
@@ -435,12 +446,14 @@ impl Checker {
             let tries = std::mem::take(&mut self.tries);
             let functions = std::mem::take(&mut self.functions);
             let for_iters = std::mem::take(&mut self.for_iters);
+            let templates = std::mem::take(&mut self.templates);
             return Ok(Types {
                 operands,
                 fields,
                 tries,
                 functions,
                 for_iters,
+                templates,
             });
         }
         errors.sort_by_key(|e| (e.span.start.source, e.span.start.line, e.span.start.col));
@@ -1050,6 +1063,14 @@ impl Checker {
                 Ty::Named("List".into(), vec![item])
             }
             Expression::Index(list, index) => self.index(list, index),
+            Expression::Template(parts) => {
+                for part in parts {
+                    if let crate::ast::TemplatePart::Expr(e) = part {
+                        self.template_part(e);
+                    }
+                }
+                Ty::Str
+            }
             Expression::Path(type_name, name) => match self.associated(type_name, name, span) {
                 Some(t) => t,
                 None => self.variant_value(type_name, name, span),

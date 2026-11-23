@@ -7,7 +7,7 @@
 fn parse(s: str) -> Result<int, str> {
     match s {
         "1" => Ok(1),
-        _ => Err("not a number: " + s),
+        _ => Err("not a number: {s}"),
     }
 }
 

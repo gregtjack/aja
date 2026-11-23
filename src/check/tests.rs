@@ -1202,8 +1202,8 @@ fn method_call_errors() {
     let (msg, _) = err("fn main() { let f = Point::origin().sum; }");
     assert_eq!(msg, "'sum' is a function of 'Point', not a field");
     assert_eq!(
-        err("fn main() { let n = 1; n.abs(); }").0,
-        "int has no method 'abs'"
+        err("fn main() { let n = 1; n.absolute(); }").0,
+        "int has no method 'absolute'"
     );
     assert_eq!(
         err("fn main() { let f = fn(p) { p.sum() }; }").0,
@@ -1401,5 +1401,64 @@ fn list_elements_cant_be_assigned() {
     assert_eq!(
         err.help.unwrap(),
         "lists can't be changed; make a new one instead: `xs = xs.set(0, ...)`"
+    );
+}
+
+#[test]
+fn built_in_types_have_methods() {
+    ok("fn main() -> int {
+            let words: List<str> = \" a b \".trim().split(\" \");
+            let n: Option<int> = \"42\".parse_int();
+            let x: float = 2.5.floor() + 3.to_float();
+            let s: str = true.to_str() + 1.to_str() + x.to_str();
+            words.len() + s.len() + n.unwrap_or(0) + (-3).abs().max(2)
+        }");
+    assert_eq!(
+        error("fn main() { \"a\".len(1); }").0,
+        "method 'str::len' takes 0 arguments but 1 was given"
+    );
+    assert_eq!(
+        error("fn main() { \"a\".index_of(\"a\"); }").0,
+        "method 'index_of' of 'str' is private"
+    );
+    assert_eq!(
+        error("fn main() { let b = true; b.not(); }").0,
+        "bool has no method 'not'"
+    );
+    assert_eq!(
+        error("impl int { fn double(self) -> int { self * 2 } } fn main() {}").0,
+        "methods for 'int' can only be defined in the prelude"
+    );
+}
+
+#[test]
+fn template_strings_take_values_with_to_str() {
+    ok("struct P { x: int }
+        impl P { fn to_str(self) -> str { \"P({self.x})\" } }
+        fn main() -> str { \"{1} {2.5} {true} {\"s\"} {P { x: 1 }} {[1].len()}\" }");
+    let (msg, text) = error("fn main() { let xs = [1]; let s = \"{xs}\"; }");
+    assert_eq!(
+        (msg.as_str(), text.as_str()),
+        ("'List' can't be put in a template string", "xs")
+    );
+    assert_eq!(
+        error("fn f<T>(x: T) -> str { \"{x}\" } fn main() {}").0,
+        "T can't be put in a template string"
+    );
+    assert_eq!(
+        error(
+            "struct P { x: int } impl P { fn to_str(self) -> int { 1 } }
+               fn main() { let s = \"{P { x: 1 }}\"; }"
+        )
+        .0,
+        "'P' can't be put in a template string"
+    );
+    assert_eq!(
+        error("fn main() { let s = \"{main}\"; }").0,
+        "() -> void can't be put in a template string"
+    );
+    assert_eq!(
+        error("fn main() -> int { \"{1}\" }").0,
+        "mismatched types: function 'main' is declared to return int, but this is str"
     );
 }

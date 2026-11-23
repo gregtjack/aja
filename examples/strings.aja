@@ -1,41 +1,59 @@
-// Strings: `+` joins two of them into a new one. Strings live on the
-// garbage-collected heap like everything else, so the ones a program stops
-// using are freed, and big strings count for more than small ones when the
-// collector decides it's time to run.
+// Strings: text, as UTF-8. A string never changes; `+` and methods like
+// `trim` and `replace` give a new one.
 //
-// There are no implicit conversions: `"n = " + 1` is a type error.
+// A string can hold expressions in braces, which are turned into strings
+// and put in their place: `"{name} is {age}"`. `str`, `int`, `float`, and
+// `bool` work there as they are, and any other type with a method
+// `to_str(self) -> str`. There are no other implicit conversions:
+// `"n = " + 1` is a type error, and `"n = {1}"` is how to write it.
 
 struct Person { name: str, title: str }
 
-fn greet(p: Person) -> str {
-    "Hello, " + p.title + " " + p.name + "!"
-}
-
-fn repeat(s: str, times: int) -> str {
-    var out = "";
-    var i = 0;
-    while i < times { out = out + s; i = i + 1; }
-    out
+impl Person {
+    // How a Person shows in a template string.
+    fn to_str(self) -> str {
+        "{self.title} {self.name}"
+    }
 }
 
 fn main() {
-    let lovelace = Person {
-        name: "Lovelace",
-        title: "Countess"
-    };
-    println(greet(lovelace));
-    println(repeat("ab", 3) == "ababab");
+    let lovelace = Person { name: "Lovelace", title: "Countess" };
+    println("Hello, {lovelace}!");
+    println("{lovelace.name} has {lovelace.name.len()} letters; 2 + 2 is {2 + 2}");
+    println("A literal brace is written \{ like this }.");
 
-    // Builds a 64 KiB string ten thousand times (about 640 MB in all) and
-    // throws each one away. Memory stays flat, because the collector frees
-    // the old ones. On macOS, see the peak memory with:
+    // Positions count characters, not bytes.
+    let word = "naïve";
+    println("{word}: {word.len()} characters, {word.byte_len()} bytes, starts with {word.slice(0, 2)}");
+
+    // Splitting, joining, and cleaning up.
+    let csv = " ada, grace ,  hedy ";
+    let names = csv.split(",").map(fn(s: str) -> str { s.trim() });
+    println(", ".join(names.map(fn(s: str) -> str { s.to_upper() })));
+    println("the quick  brown fox".words().len(), "words");
+    println("a-b-c".replace("-", " + "));
+
+    // Parsing gives an Option, since the text might not be a number.
+    for text in ["42", "-7", "4x"] {
+        match text.parse_int() {
+            Some(n) => println("{text} parses as {n}, squared {n.pow(2)}"),
+            None => println("{text} isn't an int"),
+        }
+    }
+    let r = 2.0.sqrt();
+    println("sqrt(2) is about {r}, which rounds to {r.round().to_int()}");
+
+    // Strings live on the garbage-collected heap like everything else, so
+    // the ones a program stops using are freed. This builds a 64 KiB string
+    // ten thousand times (about 640 MB in all) and throws each one away;
+    // memory stays flat. On macOS, see the peak memory with:
     //
     //     /usr/bin/time -l cargo run --release -- examples/strings.aja
-    let block = repeat("0123456789abcdef", 4096);
+    let block = "0123456789abcdef".repeat(4096);
     var i = 0;
     while i < 10_000 {
         let copy = block + "#";
         i = i + 1;
     }
-    println("built", i, "strings of 64 KiB each");
+    println("built {i} strings of {block.len() / 1024} KiB each");
 }

@@ -62,9 +62,13 @@ where
     col: u32,
     eof: bool,
     source: Source,
-    /// A token already read, to give before reading more: the `..` that
-    /// ends a number, as in `0..10`.
+    /// A token already read, to give before reading more: the `..` or `.`
+    /// that ends a number, as in `0..10` or `3.min(x)`.
     pending: Option<SrcSpan>,
+    /// For each template string being lexed, innermost last, how many `{`
+    /// of its current expression are still open: a `}` when it is 0 ends
+    /// the expression and goes back to the string's text.
+    templates: Vec<u32>,
 }
 
 impl<T> Lexer<T>
@@ -80,6 +84,7 @@ where
             eof: false,
             source: Source::MAIN,
             pending: None,
+            templates: Vec::new(),
         }
     }
 
@@ -102,8 +107,23 @@ where
                 '\n' => self.advance_line(),
                 '(' => return Ok((start, Token::LeftParen, self.get_location())),
                 ')' => return Ok((start, Token::RightParen, self.get_location())),
-                '{' => return Ok((start, Token::LeftBrace, self.get_location())),
-                '}' => return Ok((start, Token::RightBrace, self.get_location())),
+                '{' => {
+                    if let Some(depth) = self.templates.last_mut() {
+                        *depth += 1;
+                    }
+                    return Ok((start, Token::LeftBrace, self.get_location()));
+                }
+                '}' => match self.templates.last_mut() {
+                    Some(0) => {
+                        self.templates.pop();
+                        return self.tok_str(start, true);
+                    }
+                    Some(depth) => {
+                        *depth -= 1;
+                        return Ok((start, Token::RightBrace, self.get_location()));
+                    }
+                    None => return Ok((start, Token::RightBrace, self.get_location())),
+                },
                 '[' => return Ok((start, Token::LeftBracket, self.get_location())),
                 ']' => return Ok((start, Token::RightBracket, self.get_location())),
                 '|' => {
@@ -128,10 +148,7 @@ where
                     }
                 }
                 ';' => return Ok((start, Token::Semicolon, self.get_location())),
-                '"' => {
-                    let tok = self.tok_str(start)?;
-                    return Ok(tok);
-                }
+                '"' => return self.tok_str(start, false),
                 '+' => return Ok((start, Token::Plus, self.get_location())),
                 '-' => {
                     if self.match_advance('>') {
@@ -166,6 +183,15 @@ where
             start = self.get_location();
         }
 
+        if !self.templates.is_empty() {
+            self.templates.clear();
+            return Err(LexicalError::new(
+                start,
+                self.get_location(),
+                "unterminated expression in a template string",
+            )
+            .help("close the expression with '}', or write '\\{' for a literal brace"));
+        }
         self.eof = true;
         Ok((start, Token::Eof, self.get_location()))
     }
@@ -276,13 +302,31 @@ where
         }
     }
 
-    fn tok_str(&mut self, start: Location) -> LexResult {
+    /// A string's text, from after its opening `"`, or (if `resumed`) after
+    /// the `}` that ends one of its expressions, up to the closing `"` or
+    /// the `{` that starts its next expression.
+    fn tok_str(&mut self, start: Location, resumed: bool) -> LexResult {
         let mut literal = EcoString::new();
         while let Some(&c) = self.inner_peek() {
             match c {
                 '"' => {
                     self.inner_next();
-                    return Ok((start, Token::String(literal), self.get_location()));
+                    let tok = if resumed {
+                        Token::TemplateEnd(literal)
+                    } else {
+                        Token::String(literal)
+                    };
+                    return Ok((start, tok, self.get_location()));
+                }
+                '{' => {
+                    self.inner_next();
+                    self.templates.push(0);
+                    let tok = if resumed {
+                        Token::TemplateMiddle(literal)
+                    } else {
+                        Token::TemplateStart(literal)
+                    };
+                    return Ok((start, tok, self.get_location()));
                 }
                 '\\' => {
                     self.inner_next();
@@ -303,9 +347,9 @@ where
                                 self.inner_next();
                                 literal.push('\r')
                             }
-                            '\\' => {
+                            '\\' | '"' | '{' | '}' => {
                                 self.inner_next();
-                                literal.push('\\')
+                                literal.push(c)
                             }
                             _ => {
                                 self.warn(format!("unknown escape sequence '\\{}'", c));
@@ -330,10 +374,15 @@ where
 
         let mut quote_end = start;
         quote_end.col += 1;
-        Err(
-            LexicalError::new(start, quote_end, "unterminated string literal")
-                .help("add a closing '\"' to end the string"),
-        )
+        let help = if self.templates.is_empty() {
+            "add a closing '\"' to end the string"
+        } else {
+            // The string that didn't end is most likely the rest of a
+            // template whose `{` was never closed.
+            "if this '\"' is meant to end a string, an expression in it is missing its '}'; \
+             write '\\{' for a literal brace"
+        };
+        Err(LexicalError::new(start, quote_end, "unterminated string literal").help(help))
     }
 
     fn tok_number(&mut self, c: char, start: Location) -> LexResult {
@@ -355,6 +404,14 @@ where
                         // `0..10`: the number ends, and a `..` follows.
                         self.inner_next();
                         self.pending = Some((dot, Token::DotDot, self.get_location()));
+                        break;
+                    }
+                    if self
+                        .inner_peek()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || *c == '_')
+                    {
+                        // `3.min(9)`: a method call on the int, not a float.
+                        self.pending = Some((dot, Token::Dot, self.get_location()));
                         break;
                     }
                     num_str.push('.');
@@ -511,6 +568,74 @@ mod tests {
         assert_eq!(
             err.help.as_deref(),
             Some("int values must be between -9223372036854775808 and 9223372036854775807")
+        );
+    }
+
+    fn kinds(src: &str) -> Vec<Token> {
+        tokenize(src)
+            .unwrap()
+            .into_iter()
+            .map(|(_, t, _)| t)
+            .collect()
+    }
+
+    #[test]
+    fn template_strings_are_split_around_their_expressions() {
+        use Token::*;
+        assert_eq!(
+            kinds(r#""a {x} b {f("c {y}")} d" "plain""#),
+            [
+                TemplateStart("a ".into()),
+                Ident("x".into()),
+                TemplateMiddle(" b ".into()),
+                Ident("f".into()),
+                LeftParen,
+                TemplateStart("c ".into()),
+                Ident("y".into()),
+                TemplateEnd("".into()),
+                RightParen,
+                TemplateEnd(" d".into()),
+                String("plain".into()),
+                Eof,
+            ]
+        );
+        // Braces inside the expression nest; escaped ones are text.
+        assert_eq!(
+            kinds(r#""{P { x: 1 }} \{ \} \" }""#),
+            [
+                TemplateStart("".into()),
+                Ident("P".into()),
+                LeftBrace,
+                Ident("x".into()),
+                Colon,
+                Int(1),
+                RightBrace,
+                TemplateEnd(" { } \" }".into()),
+                Eof,
+            ]
+        );
+        let err = tokenize(r#""a {x"#).unwrap_err();
+        assert_eq!(err.message, "unterminated expression in a template string");
+    }
+
+    #[test]
+    fn a_dot_and_a_name_after_a_number_is_a_method_call() {
+        use Token::*;
+        assert_eq!(
+            kinds("3.min(x) 2.5 1..2"),
+            [
+                Int(3),
+                Dot,
+                Ident("min".into()),
+                LeftParen,
+                Ident("x".into()),
+                RightParen,
+                Float(2.5),
+                Int(1),
+                DotDot,
+                Int(2),
+                Eof,
+            ]
         );
     }
 }

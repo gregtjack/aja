@@ -27,7 +27,7 @@ use std::{
 use crate::{
     ast::{
         types::Type, Arm, Definition, Expr, Expression, FieldInit, Id, Method, Op1, Op2, Pattern,
-        PatternKind, Program, Span, Statement, Variable,
+        PatternKind, Program, Span, Statement, TemplatePart, Variable,
     },
     builtins::BUILTINS,
     check::{self, OperandType, TryOn, Types},
@@ -141,12 +141,18 @@ impl Compiler {
         let mut methods = Vec::new();
         for def in defs {
             let Definition::Impl {
-                target: Type::Named(type_name, ..),
+                target,
                 methods: ms,
                 ..
             } = def
             else {
                 continue;
+            };
+            // `Point` for `impl Point`, `str` for `impl str` (in the prelude).
+            let type_name = match target {
+                Type::Named(name, ..) => name.clone(),
+                Type::Int | Type::Float | Type::Bool | Type::String => target.to_string().into(),
+                _ => continue,
             };
             for m in ms {
                 let global: Id = format!("{type_name}::{}", m.name).into();
@@ -843,6 +849,38 @@ impl<'a> FnCompiler<'a> {
         self.end_loop();
     }
 
+    /// A piece of a template string, as a string, into `dst`: its text, or
+    /// its expression's value, passed to the `to_str` method the checker
+    /// found for it unless it is a string already.
+    fn template_part(&mut self, part: &TemplatePart, dst: Reg, span: Span) {
+        match part {
+            TemplatePart::Text(text) => {
+                let index = self.compiler.literal(text);
+                self.emit(Op::LoadStr { dst, index }, span);
+            }
+            TemplatePart::Expr(e) => match self.types.template_to_str(e).cloned() {
+                None => self.expr(e, dst),
+                Some(global) => {
+                    let callee = self.alloc();
+                    let index = self.compiler.globals[&global];
+                    self.emit(Op::GetGlobal { dst: callee, index }, e.span);
+                    let arg = self.alloc();
+                    self.expr(e, arg);
+                    let at = self.emit(
+                        Op::Call {
+                            dst,
+                            callee,
+                            argc: 1,
+                        },
+                        e.span,
+                    );
+                    self.cur().call_names.insert(at, global);
+                    self.release(callee);
+                }
+            },
+        }
+    }
+
     /// `for var in iter { body }`: call the `Iter`'s step function until
     /// it gives `None`.
     fn for_iter(&mut self, var: &Variable, iter: &Expr, body: &Statement) {
@@ -1062,6 +1100,31 @@ impl<'a> FnCompiler<'a> {
             Expression::String(s) => {
                 let index = self.compiler.literal(s);
                 self.emit(Op::LoadStr { dst, index }, span);
+            }
+            Expression::Template(parts) => {
+                // Build the string up in a register of its own: `dst` may be
+                // a variable that a later part reads.
+                let mark = self.mark();
+                let acc = self.alloc();
+                for (i, part) in parts.iter().enumerate() {
+                    if i == 0 {
+                        self.template_part(part, acc, span);
+                    } else {
+                        let r = self.alloc();
+                        self.template_part(part, r, span);
+                        self.emit(
+                            Op::AddS {
+                                dst: acc,
+                                a: acc,
+                                b: r,
+                            },
+                            span,
+                        );
+                        self.release(r);
+                    }
+                }
+                self.emit(Op::Move { dst, src: acc }, span);
+                self.release(mark);
             }
             Expression::Grouping(inner) => self.expr(inner, dst),
             Expression::Unary(op, operand) => {
@@ -1744,6 +1807,13 @@ impl CaptureFinder {
             | Expression::Field(e, ..)
             | Expression::Try(e) => self.expr(e),
             Expression::Error(es) | Expression::List(es) => es.iter().for_each(|e| self.expr(e)),
+            Expression::Template(parts) => {
+                for part in parts {
+                    if let TemplatePart::Expr(e) = part {
+                        self.expr(e);
+                    }
+                }
+            }
             Expression::Index(list, index) => {
                 self.expr(list);
                 self.expr(index);

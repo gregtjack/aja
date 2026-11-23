@@ -452,3 +452,221 @@ impl<T> List<T> {
         out
     }
 }
+
+// ---- Methods on the built-in types --------------------------------------------
+
+// Text, as UTF-8. A string never changes: methods like `trim` and `replace`
+// give a new string.
+//
+// Positions and lengths count characters (Unicode code points), not bytes,
+// so `"héllo".len()` is 5 and `"héllo".slice(1, 2)` is "é". Finding the
+// character at a position takes time in proportion to the position, so
+// code that goes through a string one character at a time should loop over
+// `chars()` rather than call `slice` for each position.
+//
+// A string can hold expressions, which are turned into strings and put in
+// its place: `"{name} is {age} years old"`. Write `\{` for a literal brace.
+impl str {
+    // How many characters it holds.
+    pub native fn len(self) -> int;
+
+    // How many bytes its UTF-8 encoding takes.
+    pub native fn byte_len(self) -> int;
+
+    pub fn is_empty(self) -> bool {
+        self == ""
+    }
+
+    // Itself, so a string can be used wherever a `to_str` method is wanted.
+    pub fn to_str(self) -> str {
+        self
+    }
+
+    // ---- Searching ----
+
+    pub native fn contains(self, part: str) -> bool;
+
+    pub native fn starts_with(self, prefix: str) -> bool;
+
+    pub native fn ends_with(self, suffix: str) -> bool;
+
+    // The position of the first `part` in it, if there is one.
+    pub fn find(self, part: str) -> Option<int> {
+        let i = self.index_of(part);
+        if i < 0 {
+            None
+        } else {
+            Some(i)
+        }
+    }
+
+    // The position of the first `part`, or -1.
+    native fn index_of(self, part: str) -> int;
+
+    // ---- Pieces ----
+
+    // The characters from position `start` up to, but not including, `end`.
+    // Stops the program unless `0 <= start <= end <= len`.
+    pub native fn slice(self, start: int, end: int) -> str;
+
+    // Each character, as a string of its own.
+    pub native fn chars(self) -> List<str>;
+
+    // The pieces between each `separator`: `"a,b,,c".split(",")` is
+    // `["a", "b", "", "c"]`. An empty separator splits it into characters.
+    pub native fn split(self, separator: str) -> List<str>;
+
+    // Its lines, without their line endings (`\n` or `\r\n`). A newline at
+    // the very end doesn't start another, empty line.
+    pub native fn lines(self) -> List<str>;
+
+    // The words in it: the pieces between runs of whitespace, so none is
+    // empty.
+    pub native fn words(self) -> List<str>;
+
+    // ---- New strings ----
+
+    // Without whitespace at the start and end.
+    pub native fn trim(self) -> str;
+
+    pub native fn trim_start(self) -> str;
+
+    pub native fn trim_end(self) -> str;
+
+    pub native fn to_upper(self) -> str;
+
+    pub native fn to_lower(self) -> str;
+
+    // With every `from` replaced by `to`. An empty `from` changes nothing.
+    pub native fn replace(self, from: str, to: str) -> str;
+
+    // `count` copies of it, one after another (none if `count` <= 0).
+    pub native fn repeat(self, count: int) -> str;
+
+    // The strings in `parts`, with this one between each two:
+    // `", ".join(["a", "b", "c"])` is "a, b, c".
+    pub native fn join(self, parts: List<str>) -> str;
+
+    // ---- Conversions ----
+
+    // The int it spells, as in `"-42"`, or `None` if it isn't one.
+    // Whitespace around it isn't allowed; `trim` it first if there might be
+    // some.
+    pub fn parse_int(self) -> Option<int> {
+        if self.is_int() {
+            Some(self.to_int_unchecked())
+        } else {
+            None
+        }
+    }
+
+    // The float it spells, as in `"2.5"`, `"-1e3"`, or `"7"`, or `None`.
+    pub fn parse_float(self) -> Option<float> {
+        if self.is_float() {
+            Some(self.to_float_unchecked())
+        } else {
+            None
+        }
+    }
+
+    native fn is_int(self) -> bool;
+    native fn to_int_unchecked(self) -> int;
+    native fn is_float(self) -> bool;
+    native fn to_float_unchecked(self) -> float;
+}
+
+impl int {
+    // It in decimal, as `println` shows it: `-42`.
+    pub native fn to_str(self) -> str;
+
+    // It as a float, as near as a float can be.
+    pub native fn to_float(self) -> float;
+
+    pub fn abs(self) -> int {
+        if self < 0 {
+            -self
+        } else {
+            self
+        }
+    }
+
+    pub fn min(self, other: int) -> int {
+        if other < self {
+            other
+        } else {
+            self
+        }
+    }
+
+    pub fn max(self, other: int) -> int {
+        if other > self {
+            other
+        } else {
+            self
+        }
+    }
+
+    // It, moved into the range `low..=high`.
+    pub fn clamp(self, low: int, high: int) -> int {
+        self.max(low).min(high)
+    }
+
+    // It to the power `exponent`, which must not be negative. Stops the
+    // program if the result is too large for an int.
+    pub native fn pow(self, exponent: int) -> int;
+}
+
+impl float {
+    // It as `println` shows it: `2.5`, `1.0`, `inf`, or `NaN`.
+    pub native fn to_str(self) -> str;
+
+    // It without its fractional part, rounded towards zero: `-2.7` gives
+    // `-2`. Stops the program if it is NaN or too large for an int.
+    pub native fn to_int(self) -> int;
+
+    pub native fn floor(self) -> float;
+
+    pub native fn ceil(self) -> float;
+
+    // The nearest whole number, with halves rounded away from zero.
+    pub native fn round(self) -> float;
+
+    pub native fn sqrt(self) -> float;
+
+    pub native fn is_nan(self) -> bool;
+
+    pub fn abs(self) -> float {
+        if self < 0.0 {
+            -self
+        } else {
+            self
+        }
+    }
+
+    pub fn min(self, other: float) -> float {
+        if other < self {
+            other
+        } else {
+            self
+        }
+    }
+
+    pub fn max(self, other: float) -> float {
+        if other > self {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+impl bool {
+    // "true" or "false".
+    pub fn to_str(self) -> str {
+        if self {
+            "true"
+        } else {
+            "false"
+        }
+    }
+}

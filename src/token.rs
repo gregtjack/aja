@@ -6,6 +6,13 @@ pub enum Token {
     Int(i64),
     Float(f64),
     String(EcoString),
+    /// The text of a template string up to its first `{`: `"a {` in
+    /// `"a {x} b {y} c"`. The tokens of the expression `x` follow.
+    TemplateStart(EcoString),
+    /// The text between two of a template's expressions: `} b {`.
+    TemplateMiddle(EcoString),
+    /// The text after a template's last expression: `} c"`.
+    TemplateEnd(EcoString),
     Eof,
     LeftParen,    // (
     RightParen,   // )
@@ -66,6 +73,10 @@ impl std::fmt::Display for Token {
             Token::Int(i) => return write!(f, "'{i}'"),
             Token::Float(x) => return write!(f, "'{x:?}'"),
             Token::String(s) => return write!(f, "string {s:?}"),
+            Token::TemplateStart(_) => return write!(f, "a template string"),
+            Token::TemplateMiddle(_) | Token::TemplateEnd(_) => {
+                return write!(f, "'}}' (the end of a template expression)")
+            }
             Token::Eof => return write!(f, "end of file"),
             Token::LeftParen => "(",
             Token::RightParen => ")",

@@ -6,7 +6,7 @@
 //         let out = io::stdout();
 //         out.write("What's your name? ")?;
 //         match io::stdin().read_line()? {
-//             Some(name) => out.write_line("Hello, " + name + "!"),
+//             Some(name) => out.write_line("Hello, {name}!"),
 //             None => out.write_line("Goodbye!"),
 //         }
 //     }
