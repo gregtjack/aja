@@ -4,6 +4,10 @@
 //! The type checker reads these signatures. Each backend implements every
 //! built-in listed here (the VM's are in `vm/native.rs`), and
 //! fails at startup, and in its tests, if one is missing.
+//!
+//! These are in scope everywhere. Functions the prelude and standard
+//! library implement natively are declared `native fn` there instead, with
+//! their types written in Aja; the backends implement those too.
 
 use crate::ast::types::Type;
 

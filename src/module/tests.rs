@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::{
-    check,
-    vm::{Compiler, Vm},
-};
+use crate::vm::Vm;
 
 /// The files of a program, `main.aja` being the one run.
 fn files(files: &[(&str, &str)]) -> HashMap<String, String> {
@@ -17,20 +14,13 @@ fn files(files: &[(&str, &str)]) -> HashMap<String, String> {
 /// Every stage's diagnostics, or the program's value, for a program whose
 /// files are `fs`.
 fn run(fs: &[(&str, &str)]) -> Result<String, Vec<Diagnostic>> {
-    let root = files(fs);
-    let (loaded, errors) = load(&root, "main.aja");
-    if !errors.is_empty() {
-        return Err(errors);
-    }
-    let (program, types) = resolve_and_check(loaded.modules)?;
-    let compiled = Compiler::new()
-        .program(&program, &types)
-        .map_err(|d| vec![d])?;
+    let (files, compiled) = build(&files(fs), "main.aja");
+    let compiled = compiled?;
     let mut vm = Vm::new();
     vm.heap.stress = true;
     match vm.run_program(&compiled) {
         Ok(v) => Ok(vm.heap.repr(&v)),
-        Err(e) => Err(vec![e.to_diagnostic_in(&loaded.files)]),
+        Err(e) => Err(vec![e.to_diagnostic_in(&files)]),
     }
 }
 
@@ -52,32 +42,13 @@ fn errors(fs: &[(&str, &str)]) -> Vec<String> {
     }
 }
 
-/// Resolve and type-check `modules` the way `main` does, returning every
-/// error from both, in order.
-fn resolve_and_check(modules: Vec<Module>) -> Result<(Program, check::Types), Vec<Diagnostic>> {
-    let (program, mut errors) = resolve(modules);
-    match check::check_program(&program) {
-        Ok(types) if errors.is_empty() => Ok((program, types)),
-        Ok(_) => Err(errors),
-        Err(type_errors) => {
-            errors.extend(type_errors.iter().map(|e| e.to_diagnostic()));
-            errors.sort_by_key(Diagnostic::sort_key);
-            Err(errors)
-        }
-    }
-}
-
 /// The first error, rendered without color.
 fn rendered(fs: &[(&str, &str)]) -> String {
-    let root = files(fs);
-    let (loaded, mut errs) = load(&root, "main.aja");
-    if errs.is_empty() {
-        match resolve_and_check(loaded.modules) {
-            Ok(_) => panic!("program should fail"),
-            Err(es) => errs = es,
-        }
+    let (files, compiled) = build(&files(fs), "main.aja");
+    match compiled {
+        Ok(_) => panic!("program should fail"),
+        Err(errors) => errors[0].render_in(&files, false),
     }
-    errs[0].render_in(&loaded.files, false)
 }
 
 const SHAPES: &str = "
@@ -470,9 +441,122 @@ fn errors_point_into_the_right_file() {
 #[test]
 fn the_example_runs() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/modules");
-    let (loaded, errors) = load(&Dir(dir), "main.aja");
-    assert!(errors.is_empty(), "{errors:#?}");
-    let (program, types) = resolve_and_check(loaded.modules).expect("the example checks");
-    let compiled = Compiler::new().program(&program, &types).unwrap();
+    let (_, compiled) = build(&Dir(dir), "main.aja");
+    let compiled = compiled.expect("the example compiles");
     Vm::new().run_program(&compiled).expect("the example runs");
+}
+
+// ---- The standard library ---------------------------------------------------------
+
+#[test]
+fn std_io_can_be_imported() {
+    let main = "
+import std::io;
+import std::io::{Writer, stderr};
+
+fn main() -> Result<void, io::Error> {
+    let out: Writer = io::stdout();
+    out.write(\"\")?;
+    out.flush()?;
+    stderr().write(\"\")
+}";
+    assert_eq!(value(&[("main.aja", main)]), "Ok(())");
+}
+
+#[test]
+fn std_modules_must_exist() {
+    let fs = [("main.aja", "import std::nope; fn main() {}")];
+    assert_eq!(errors(&fs), ["no module named 'std::nope'"]);
+    assert!(rendered(&fs).contains("the standard library's modules are: std::io"));
+}
+
+#[test]
+fn intrinsics_are_only_for_the_standard_library() {
+    for main in [
+        "import std::native; fn main() { native::flush(1); }",
+        "import std::native::{flush}; fn main() { flush(1); }",
+    ] {
+        assert_eq!(
+            errors(&[("main.aja", main)]),
+            ["module 'std::native' is internal to the standard library"]
+        );
+    }
+}
+
+#[test]
+fn std_types_keep_their_fields_private() {
+    let main = "import std::io; fn main() { let w = io::Writer { fd: 7 }; }";
+    assert_eq!(
+        errors(&[("main.aja", main)]),
+        ["struct 'std::io::Writer' has private fields, so it can only be built in module 'std::io'"]
+    );
+}
+
+#[test]
+fn an_err_from_main_is_an_error() {
+    let fs = [("main.aja", "fn main() -> Result<int, str> { Err(\"no\") }")];
+    assert_eq!(errors(&fs), ["main returned an error: \"no\""]);
+    let fs = [("main.aja", "fn main() -> Result<int, str> { Ok(1) }")];
+    assert_eq!(value(&fs), "Ok(1)");
+}
+
+#[test]
+fn only_the_standard_library_declares_natives() {
+    let fs = [(
+        "main.aja",
+        "native fn secret() -> int; native struct Blob; fn main() {}",
+    )];
+    assert_eq!(
+        errors(&fs),
+        [
+            "only the standard library can declare native functions and types",
+            "only the standard library can declare native functions and types",
+        ]
+    );
+    // `native` is still an ordinary name everywhere else.
+    assert_eq!(
+        value(&[("main.aja", "fn main() -> int { let native = 2; native }")]),
+        "2"
+    );
+}
+
+#[test]
+fn every_native_function_is_implemented() {
+    use crate::{ast::Definition, prelude, stdlib, vm::native_implemented};
+    let mut natives: Vec<String> = Vec::new();
+    let mut collect = |defs: &[Definition], prefix: &str| {
+        for d in defs {
+            match d {
+                Definition::Function {
+                    native: true, name, ..
+                } => natives.push(format!("{prefix}{name}")),
+                Definition::Impl {
+                    target: crate::ast::types::Type::Named(t, ..),
+                    methods,
+                    ..
+                } => natives.extend(
+                    methods
+                        .iter()
+                        .filter(|m| m.native)
+                        .map(|m| format!("{prefix}{t}::{}", m.name)),
+                ),
+                _ => {}
+            }
+        }
+    };
+    collect(&prelude::definitions(), "");
+    for (name, source) in stdlib::MODULES {
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        let program = crate::parse::Parser::new(tokens.into_iter())
+            .parse()
+            .unwrap();
+        collect(&program.definitions, &format!("std::{name}::"));
+    }
+    assert!(natives.len() > 10, "{natives:?}");
+    for n in natives {
+        assert!(
+            native_implemented(&n),
+            "native function '{n}' has no implementation in the VM"
+        );
+    }
 }

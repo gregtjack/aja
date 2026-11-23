@@ -431,7 +431,7 @@ fn structs_and_enums_check() {
     // Field shorthand.
     shapes_ok("fn main() -> Point { let x = 1; let y = 2; Point { x, y } }");
     // Types can refer to each other and to themselves, in any order.
-    ok("enum List { Nil, Cons(Item, List) } struct Item { n: int } fn main() { }");
+    ok("enum Seq { Nil, Cons(Item, Seq) } struct Item { n: int } fn main() { }");
     // Inferred from use.
     shapes_ok("fn main() -> int { let f = fn(c) { match c { Color::Red => 1, _ => 2 } }; f(Color::Blue) }");
 }
@@ -750,7 +750,7 @@ fn plus_concatenates_strings() {
 
 const GENERIC_TYPES: &str = "
 struct Pair<A, B> { first: A, second: B }
-enum List<T> { Nil, Cons(T, List<T>) }
+enum Seq<T> { Nil, Cons(T, Seq<T>) }
 ";
 
 fn generic(src: &str) -> String {
@@ -806,7 +806,7 @@ fn generic_types_check() {
                     let p = Pair { first: 1, second: \"one\" };
                     let n: int = p.first;
                     let s: str = p.second;
-                    let xs: List<int> = List::Cons(1, List::Cons(2, List::Nil));
+                    let xs: Seq<int> = Seq::Cons(1, Seq::Cons(2, Seq::Nil));
                 }",
     );
     generic_ok(
@@ -814,13 +814,13 @@ fn generic_types_check() {
                 fn main() -> str { swap(Pair { first: 1, second: \"x\" }).first }",
     );
     generic_ok(
-        "fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
+        "fn map<T, U>(xs: Seq<T>, f: (T) -> U) -> Seq<U> {
                     match xs {
-                        List::Nil => List::Nil,
-                        List::Cons(x, rest) => List::Cons(f(x), map(rest, f)),
+                        Seq::Nil => Seq::Nil,
+                        Seq::Cons(x, rest) => Seq::Cons(f(x), map(rest, f)),
                     }
                 }
-                fn main() -> List<bool> { map(List::Cons(1, List::Nil), fn(n) { n > 0 }) }",
+                fn main() -> Seq<bool> { map(Seq::Cons(1, Seq::Nil), fn(n) { n > 0 }) }",
     );
     // The expected type decides a type argument nothing else does.
     generic_ok(
@@ -842,9 +842,9 @@ fn type_arguments_must_match() {
         "mismatched types: parameter 'o' of function 'f' expects Option<int>, found Option<bool>"
     );
     assert_eq!(
-        generic_error("fn main() { let xs = List::Cons(1, List::Cons(\"two\", List::Nil)); }").0,
-        // The outer `Cons` holds an int, so its list must be a `List<int>`.
-        "mismatched types: value 2 of 'List::Cons' is List<int>, found List<str>"
+        generic_error("fn main() { let xs = Seq::Cons(1, Seq::Cons(\"two\", Seq::Nil)); }").0,
+        // The outer `Cons` holds an int, so its list must be a `Seq<int>`.
+        "mismatched types: value 2 of 'Seq::Cons' is Seq<int>, found Seq<str>"
     );
     assert_eq!(
         generic_error("fn main() -> str { let p = Pair { first: 1, second: 2 }; p.first }").0,
@@ -964,7 +964,7 @@ fn partly_known_types_need_annotations() {
 #[test]
 fn generic_equality_depends_on_type_arguments() {
     generic_ok("fn main() -> bool { Some(1) == None }");
-    generic_ok("fn main() -> bool { Pair { first: \"a\", second: List::Cons(1, List::Nil) } == Pair { first: \"a\", second: List::Nil } }");
+    generic_ok("fn main() -> bool { Pair { first: \"a\", second: Seq::Cons(1, Seq::Nil) } == Pair { first: \"a\", second: Seq::Nil } }");
     // Equality on an unknown argument decides what it can be.
     generic_ok("fn main() -> bool { let n = None; n == Some(1.5) }");
     let (msg, _) = generic_error("fn main() -> bool { let a = Some(fn() { }); a == a }");
@@ -1132,30 +1132,30 @@ fn methods_and_associated_functions() {
 
 #[test]
 fn generic_methods() {
-    let list = "enum List<T> { Nil, Cons(T, List<T>) }
-                impl<T> List<T> {
-                    fn empty() -> List<T> { List::Nil }
-                    fn push(self, x: T) -> List<T> { List::Cons(x, self) }
-                    fn map<U>(self, f: (T) -> U) -> List<U> {
-                        match self { List::Nil => List::Nil, List::Cons(x, t) => List::Cons(f(x), t.map(f)) }
+    let list = "enum Seq<T> { Nil, Cons(T, Seq<T>) }
+                impl<T> Seq<T> {
+                    fn empty() -> Seq<T> { Seq::Nil }
+                    fn push(self, x: T) -> Seq<T> { Seq::Cons(x, self) }
+                    fn map<U>(self, f: (T) -> U) -> Seq<U> {
+                        match self { Seq::Nil => Seq::Nil, Seq::Cons(x, t) => Seq::Cons(f(x), t.map(f)) }
                     }
                 }";
-    ok(&format!("{list} fn main() -> List<str> {{ List::empty().push(1).map(fn(n) {{ if n > 0 {{ \"pos\" }} else {{ \"neg\" }} }}) }}"));
+    ok(&format!("{list} fn main() -> Seq<str> {{ Seq::empty().push(1).map(fn(n) {{ if n > 0 {{ \"pos\" }} else {{ \"neg\" }} }}) }}"));
     let (msg, at) = error(&format!(
-        "{list} fn main() {{ let xs: List<int> = List::empty(); xs.push(\"s\"); }}"
+        "{list} fn main() {{ let xs: Seq<int> = Seq::empty(); xs.push(\"s\"); }}"
     ));
     assert_eq!(
         msg,
-        "mismatched types: parameter 'x' of method 'List::push' expects int, found str"
+        "mismatched types: parameter 'x' of method 'Seq::push' expects int, found str"
     );
     assert_eq!(at, "\"s\"");
     // The receiver's type arguments fix the impl's type parameters.
     assert_eq!(
         error(&format!(
-            "{list} fn main() -> List<str> {{ List::Cons(1, List::Nil).map(fn(n) {{ n }}) }}"
+            "{list} fn main() -> Seq<str> {{ Seq::Cons(1, Seq::Nil).map(fn(n) {{ n }}) }}"
         ))
         .0,
-        "mismatched types: function 'main' is declared to return List<str>, but this is List<int>"
+        "mismatched types: function 'main' is declared to return Seq<str>, but this is Seq<int>"
     );
 }
 
@@ -1255,5 +1255,151 @@ fn impl_errors() {
     assert_eq!(
         error("struct P { } impl P { fn f(self) -> int { true } } fn main() { }").0,
         "mismatched types: function 'P::f' is declared to return int, but this is bool"
+    );
+}
+
+// ---- Loops and iterators ---------------------------------------------------------
+
+#[test]
+fn for_loops_take_iters_and_values_with_iter_methods() {
+    ok("fn main() { for i in 0..3 { let x: int = i; } }");
+    ok("fn main() { for s in Iter::once(\"a\") { let x: str = s; } }");
+    ok("fn main() { for x in Some(1.5) { let y: float = x; } }");
+    ok("struct Bag { n: int }
+        impl Bag { fn iter(self) -> Iter<int> { 0..self.n } }
+        fn main() { for x in (Bag { n: 2 }) { let y: int = x; } }");
+    ok(
+        "fn evens(xs: Iter<int>) -> Iter<int> { xs.filter(fn(x) { x % 2 == 0 }) }
+        fn main() -> int { evens(0..10).map(fn(x) { x * 3 }).fold(0, fn(a, b) { a + b }) }",
+    );
+    // The loop variable's type is inferred from what is looped over.
+    assert_eq!(
+        error("fn main() { for s in Iter::once(\"a\") { let x: int = s; } }").0,
+        "mismatched types: 'x' is declared as int but was given str"
+    );
+}
+
+#[test]
+fn things_that_cant_be_looped_over() {
+    assert_eq!(
+        error("fn main() { for c in \"abc\" { } }"),
+        ("str can't be looped over".into(), "\"abc\"".into())
+    );
+    assert_eq!(
+        error("struct P { x: int } fn main() { for c in (P { x: 1 }) { } }").0,
+        "'P' can't be looped over"
+    );
+    assert_eq!(
+        error(
+            "struct P { x: int } impl P { fn iter(self) -> int { 1 } }
+               fn main() { for c in (P { x: 1 }) { } }"
+        )
+        .0,
+        "'P' can't be looped over"
+    );
+    assert!(help("fn main() { for c in 5 { } }").contains("a range `0..n`"));
+    assert_eq!(
+        error("fn main() { for x in 0..1.5 { } }").0,
+        "mismatched types: argument 2 of function 'Iter::range' expects int, found float"
+    );
+}
+
+#[test]
+fn loop_variables_are_immutable() {
+    assert_eq!(
+        error("fn main() { for i in 0..3 { i = 1; } }").0,
+        "cannot assign to 'i' because it is a loop variable"
+    );
+}
+
+#[test]
+fn break_and_continue_need_a_loop() {
+    ok("fn main() { while true { break; } for i in 0..3 { continue; } }");
+    assert_eq!(
+        error("fn main() { break; }"),
+        ("'break' outside a loop".into(), "break".into())
+    );
+    let errors =
+        check("fn main() { for i in 0..3 { let f = fn() -> void { continue; }; } }").unwrap_err();
+    assert_eq!(errors[0].message, "'continue' outside a loop");
+    assert!(errors[0].notes[0].contains("a closure's body is a function of its own"));
+    // `break` never produces a value, so a match arm can end in one.
+    ok("fn main() { for o in Some(1) { let x: int = match Some(o) { Some(v) => v, None => { break; } }; } }");
+}
+
+#[test]
+fn iter_is_a_prelude_type() {
+    assert_eq!(
+        error("struct Iter { x: int } fn main() { }").0,
+        "'Iter' is defined in the prelude, so it can't be redefined"
+    );
+    let errors =
+        check("fn main() { let it: Iter<int> = Iter { step: fn() { None } }; }").unwrap_err();
+    assert_eq!(
+        errors[0].message,
+        "struct 'Iter' has private fields, so it can only be built in the prelude"
+    );
+}
+
+// ---- Lists ---------------------------------------------------------------------
+
+#[test]
+fn list_types() {
+    ok("fn main() { let xs: List<int> = [1, 2]; let e: List<str> = []; let n: List<List<int>> = [xs, []]; }");
+    ok("fn first<T>(xs: List<T>) -> Option<T> { xs.get(0) } fn main() -> int { first([1]).unwrap_or(0) }");
+    assert_eq!(
+        error("fn main() { let xs = [1, \"two\"]; }"),
+        (
+            "mismatched types: this list's values are int, but this one is str".into(),
+            "\"two\"".into()
+        )
+    );
+    assert_eq!(
+        error("fn main() { let x: str = [1, 2][0]; }").0,
+        "mismatched types: 'x' is declared as str but was given int"
+    );
+    assert_eq!(
+        error("fn main() { let x = [1][true]; }").0,
+        "mismatched types: a list's index is an int, found bool"
+    );
+    assert_eq!(
+        error("fn main() { let x = 5[0]; }").0,
+        "int can't be indexed"
+    );
+    assert_eq!(
+        error("fn main() { let xs = []; }").0,
+        "type annotations needed: cannot infer the type of variable 'xs'"
+    );
+    // Lists compare like the values in them.
+    ok("fn main() { let same = [1] == [2]; }");
+    assert!(check("fn main() { let same = [fn() { 1 }] == []; }").is_err());
+}
+
+#[test]
+fn lists_are_built_in() {
+    assert_eq!(
+        error("fn main() { let xs = List {}; }").0,
+        "'List' is built in, so it has no fields"
+    );
+    assert!(help("fn main() { let xs = List {}; }").contains("`[a, b, c]`"));
+    assert_eq!(
+        error("enum List { A } fn main() {}").0,
+        "'List' is defined in the prelude, so it can't be redefined"
+    );
+}
+
+#[test]
+fn list_elements_cant_be_assigned() {
+    let err = Parser::new(
+        tokenize("fn main() { var xs = [1]; xs[0] = 2; }")
+            .unwrap()
+            .into_iter(),
+    )
+    .parse()
+    .unwrap_err();
+    assert_eq!(err.message, "cannot assign to an element of a list");
+    assert_eq!(
+        err.help.unwrap(),
+        "lists can't be changed; make a new one instead: `xs = xs.set(0, ...)`"
     );
 }

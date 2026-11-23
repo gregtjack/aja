@@ -10,7 +10,7 @@
 use std::{mem::size_of, rc::Rc};
 
 use crate::{
-    ast::{Source, Span},
+    ast::{Id, Source, Span},
     builtins::BUILTINS,
     diagnostic::{Diagnostic, Files},
 };
@@ -18,6 +18,7 @@ use crate::{
 pub mod bytecode;
 pub mod compile;
 pub mod heap;
+pub mod list;
 mod native;
 pub mod value;
 
@@ -28,6 +29,12 @@ use bytecode::{Capture, Layout, Literals, Op, Proto};
 pub use compile::{Compiled, Compiler, ReplInput};
 use heap::{Closure, Gc, Heap, MAX_STR_LEN};
 use value::Value;
+
+/// Whether the VM implements the native function `name`.
+#[cfg(test)]
+pub fn native_implemented(name: &str) -> bool {
+    native::implementation(name).is_some()
+}
 
 /// How much memory the call stack (frames and their registers) may use
 /// before the VM reports a stack overflow: 256 MiB.
@@ -137,10 +144,10 @@ impl Vm {
         let globals = BUILTINS
             .iter()
             .map(|b| {
-                let f = native::implementation(b.name).unwrap_or_else(|| {
+                let (name, f) = native::implementation(b.name).unwrap_or_else(|| {
                     panic!("built-in '{}' has no implementation in the VM", b.name)
                 });
-                Value::Native(b, f)
+                Value::Native(name, f)
             })
             .collect();
         Vm {
@@ -158,16 +165,30 @@ impl Vm {
     pub fn run_program(&mut self, program: &Compiled) -> Result<Value, RuntimeError> {
         self.load_literals(&program.literals);
         self.load_functions(&program.functions);
+        self.load_natives(&program.natives);
         let Value::Fn(main) = self.globals[program.main as usize] else {
             unreachable!("'main' is a function");
         };
-        self.run(main)
+        let value = self.run(main)?;
+        if let (Some(span), Value::Data(gc)) = (program.main_result, &value) {
+            let (layout, fields) = self.heap.data(*gc);
+            // `Result::Err` is the second variant.
+            if layout.tag == 1 {
+                return Err(RuntimeError {
+                    message: format!("main returned an error: {}", self.heap.repr(&fields[0])),
+                    span: Some(span),
+                    trace: Vec::new(),
+                });
+            }
+        }
+        Ok(value)
     }
 
     /// Run a compiled REPL input and return its value.
     pub fn run_repl(&mut self, input: &ReplInput) -> Result<Value, RuntimeError> {
         self.load_literals(&input.literals);
         self.load_functions(&input.functions);
+        self.load_natives(&input.natives);
         let f = self.alloc_closure(input.proto.clone(), Box::new([]));
         self.run(f)
     }
@@ -177,6 +198,16 @@ impl Vm {
         for (slot, proto) in functions {
             let f = self.alloc_closure(proto.clone(), Box::new([]));
             self.set_global(*slot, Value::Fn(f));
+        }
+    }
+
+    /// Define native functions in their global slots.
+    fn load_natives(&mut self, natives: &[(u32, Id)]) {
+        for (slot, name) in natives {
+            let (name, f) = native::implementation(name).unwrap_or_else(|| {
+                panic!("native function '{name}' has no implementation in the VM")
+            });
+            self.set_global(*slot, Value::Native(name, f));
         }
     }
 
@@ -233,6 +264,14 @@ impl Vm {
             self.collect_garbage_with(value.handle().into_iter().collect());
         }
         self.heap.alloc_cell(value)
+    }
+
+    fn alloc_list(&mut self, list: list::List) -> Gc {
+        if self.heap.wants_collection(list.len() * size_of::<Value>()) {
+            // The values are still in registers, so they stay alive.
+            self.collect_garbage_with(Vec::new());
+        }
+        self.heap.alloc_list(list)
     }
 
     fn alloc_str(&mut self, s: Box<str>) -> Gc {
@@ -452,6 +491,25 @@ impl Vm {
                     let data = self.alloc_data(layout, fields);
                     reg!(dst) = Value::Data(data);
                 }
+                Op::NewList { dst, start, count } => {
+                    let from = base + start as usize;
+                    let list: list::List = self.regs[from..from + count as usize]
+                        .iter()
+                        .cloned()
+                        .collect();
+                    let gc = self.alloc_list(list);
+                    reg!(dst) = Value::List(gc);
+                }
+                Op::Index { dst, list, index } => {
+                    let Value::Int(i) = reg!(index) else {
+                        internal_error("Int", &reg!(index));
+                    };
+                    let items = self.heap.list(get!(List, list));
+                    match native::in_range(i, items.len()) {
+                        Ok(i) => reg!(dst) = items.get(i).unwrap().clone(),
+                        Err(msg) => throw!(msg),
+                    }
+                }
                 Op::GetField { dst, obj, index } => {
                     let v = self.heap.data(get!(Data, obj)).1[index as usize].clone();
                     reg!(dst) = v;
@@ -554,7 +612,7 @@ impl Vm {
                     }
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
-                        match f(&self.heap, &self.regs[start..start + argc as usize]) {
+                        match f(&mut self.heap, &self.regs[start..start + argc as usize]) {
                             Ok(v) => reg!(dst) = v,
                             Err(msg) => throw!(msg),
                         }
@@ -582,7 +640,7 @@ impl Vm {
                     }
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
-                        match f(&self.heap, &self.regs[start..start + argc as usize]) {
+                        match f(&mut self.heap, &self.regs[start..start + argc as usize]) {
                             Ok(v) => ret!(v),
                             Err(msg) => throw!(msg),
                         }

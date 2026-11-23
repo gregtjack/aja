@@ -1,0 +1,149 @@
+// Standard input, output, and error.
+//
+//     import std::io;
+//
+//     fn main() -> Result<void, io::Error> {
+//         let out = io::stdout();
+//         out.write("What's your name? ")?;
+//         match io::stdin().read_line()? {
+//             Some(name) => out.write_line("Hello, " + name + "!"),
+//             None => out.write_line("Goodbye!"),
+//         }
+//     }
+//
+// Every operation that can fail returns a `Result`. I/O blocks the task
+// that does it; there is no separate asynchronous form. Writes to standard
+// output share a buffer with `print` and `println`, so they come out in the
+// order they were made, and reading standard input flushes standard output
+// first, so a prompt shows before the program waits.
+
+import std::native;
+
+// What kind of failure an `Error` is.
+pub enum ErrorKind {
+    NotFound,
+    PermissionDenied,
+    // The data wasn't valid, for example text that isn't UTF-8.
+    InvalidData,
+    // The other end of a pipe was closed.
+    BrokenPipe,
+    AlreadyExists,
+    Other,
+}
+
+// Why an I/O operation failed.
+pub struct Error {
+    pub kind: ErrorKind,
+    pub message: str,
+}
+
+// Somewhere to read text from.
+pub struct Reader {
+    fd: int,
+}
+
+// Somewhere to write text to.
+pub struct Writer {
+    fd: int,
+}
+
+// The program's standard input.
+pub fn stdin() -> Reader {
+    Reader { fd: 0 }
+}
+
+// The program's standard output, where `print` and `println` write.
+pub fn stdout() -> Writer {
+    Writer { fd: 1 }
+}
+
+// The program's standard error, for messages about problems.
+pub fn stderr() -> Writer {
+    Writer { fd: 2 }
+}
+
+impl Reader {
+    // The next line, without its line ending (`\n` or `\r\n`), or `None` at
+    // the end of the input.
+    pub fn read_line(self) -> Result<Option<str>, Error> {
+        let line = native::read_line(self.fd);
+        match native::status() {
+            0 => Ok(Some(line)),
+            1 => Ok(None),
+            code => Err(error(code)),
+        }
+    }
+
+    // Each line left, without its line ending. A read that fails gives its
+    // error as the last value.
+    //
+    //     for line in io::stdin().lines() {
+    //         let line = line?;
+    //         ...
+    //     }
+    pub fn lines(self) -> Iter<Result<str, Error>> {
+        var done = false;
+        Iter::new(fn() -> Option<Result<str, Error>> {
+            if done {
+                return None;
+            }
+            match self.read_line() {
+                Ok(Some(line)) => Some(Ok(line)),
+                Ok(None) => {
+                    done = true;
+                    None
+                }
+                Err(e) => {
+                    done = true;
+                    Some(Err(e))
+                }
+            }
+        })
+    }
+
+    // Everything left to read.
+    pub fn read_to_string(self) -> Result<str, Error> {
+        checked(native::read_all(self.fd))
+    }
+}
+
+impl Writer {
+    pub fn write(self, text: str) -> Result<void, Error> {
+        checked(native::write(self.fd, text))
+    }
+
+    // `text`, then a newline.
+    pub fn write_line(self, text: str) -> Result<void, Error> {
+        self.write(text + "\n")
+    }
+
+    // Write out anything still buffered. Standard error isn't buffered, and
+    // standard output is flushed at each newline and when the program ends,
+    // so this is for text without a newline that must show now.
+    pub fn flush(self) -> Result<void, Error> {
+        checked(native::flush(self.fd))
+    }
+}
+
+// `value`, the result of an intrinsic, or the error it recorded. The
+// intrinsic has run by the time this is called, since arguments are
+// evaluated first.
+fn checked<T>(value: T) -> Result<T, Error> {
+    match native::status() {
+        0 => Ok(value),
+        code => Err(error(code)),
+    }
+}
+
+// The error the last intrinsic recorded, with status `code`.
+fn error(code: int) -> Error {
+    let kind = match code {
+        2 => ErrorKind::NotFound,
+        3 => ErrorKind::PermissionDenied,
+        4 => ErrorKind::InvalidData,
+        5 => ErrorKind::BrokenPipe,
+        6 => ErrorKind::AlreadyExists,
+        _ => ErrorKind::Other,
+    };
+    Error { kind, message: native::error_message() }
+}

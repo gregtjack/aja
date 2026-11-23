@@ -52,6 +52,10 @@ pub enum Token {
     Pub,          // pub
     Var,          // var
     While,        // while
+    For,          // for
+    In,           // in
+    Break,        // break
+    Continue,     // continue
 }
 
 impl std::fmt::Display for Token {
@@ -108,6 +112,10 @@ impl std::fmt::Display for Token {
             Token::Import => "import",
             Token::Pub => "pub",
             Token::While => "while",
+            Token::For => "for",
+            Token::In => "in",
+            Token::Break => "break",
+            Token::Continue => "continue",
         };
         write!(f, "'{sym}'")
     }

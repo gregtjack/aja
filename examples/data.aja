@@ -11,9 +11,9 @@ enum Shape {
 }
 
 // A recursive type: a list is either empty or a value followed by a list.
-enum List {
+enum Chain {
     Nil,
-    Cons(int, List),
+    Cons(int, Chain),
 }
 
 fn area(s: Shape) -> int {
@@ -35,22 +35,22 @@ fn describe(p: Point) -> str {
     }
 }
 
-fn range(n: int) -> List {
+fn range(n: int) -> Chain {
     var n = n;
-    var list = List::Nil;
+    var list = Chain::Nil;
     while n > 0 {
         n = n - 1;
-        list = List::Cons(n, list);
+        list = Chain::Cons(n, list);
     }
     list
 }
 
 // The recursive call is in a match arm, a tail position, so this runs in
 // constant space however long the list is.
-fn sum(list: List, acc: int) -> int {
+fn sum(list: Chain, acc: int) -> int {
     match list {
-        List::Nil => acc,
-        List::Cons(head, tail) => sum(tail, acc + head),
+        Chain::Nil => acc,
+        Chain::Cons(head, tail) => sum(tail, acc + head),
     }
 }
 

@@ -48,7 +48,10 @@ pub fn definitions() -> Vec<Definition> {
         .definitions
 }
 
+/// The types the prelude defines.
+pub const TYPES: &[&str] = &["Option", "Result", "Iter", "List"];
+
 /// Whether `name` is a type the prelude defines.
 pub fn is_prelude_type(name: &str) -> bool {
-    VARIANTS.iter().any(|(_, e)| *e == name)
+    TYPES.contains(&name)
 }

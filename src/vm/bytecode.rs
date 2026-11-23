@@ -110,6 +110,19 @@ pub enum Op {
         obj: Reg,
         index: u16,
     },
+    /// Make a list of the `count` values in the registers from `start` on.
+    NewList {
+        dst: Reg,
+        start: Reg,
+        count: u32,
+    },
+    /// Read the value at `index` (an int) of the list in `list`, or stop
+    /// the program if there is none.
+    Index {
+        dst: Reg,
+        list: Reg,
+        index: Reg,
+    },
     /// Whether the enum value in `obj` is the variant numbered `tag`.
     TestTag {
         dst: Reg,

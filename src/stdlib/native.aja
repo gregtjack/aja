@@ -1,0 +1,27 @@
+// The standard library's intrinsics: the few operations it can't write in
+// Aja, which each backend implements. Only the standard library can import
+// this module.
+//
+// An intrinsic takes and returns only `int`, `float`, `bool`, `str`, and
+// `void`, so a backend can implement it without knowing how Aja's structs
+// and enums are laid out; the library builds those. One that can fail
+// records how it went, which `status` (and `error_message`) give straight
+// after the call.
+
+// How the last intrinsic that can fail went: 0 if it succeeded, 1 at the end
+// of input, or an error code (see `std::io::ErrorKind`).
+pub native fn status() -> int;
+
+// What went wrong in the last intrinsic that failed.
+pub native fn error_message() -> str;
+
+// A line from file descriptor `fd`, without its line ending.
+pub native fn read_line(fd: int) -> str;
+
+// Everything left to read from `fd`.
+pub native fn read_all(fd: int) -> str;
+
+pub native fn write(fd: int, text: str);
+
+// Write out anything buffered for `fd`.
+pub native fn flush(fd: int);

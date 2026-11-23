@@ -1,0 +1,67 @@
+// Lists: `[a, b, c]`, indexing, and the methods in the prelude.
+
+struct Score { name: str, points: int }
+
+// The highest-scoring entry, if there are any.
+fn best(scores: List<Score>) -> Option<Score> {
+    var best = scores.first()?;
+    for s in scores {
+        if s.points > best.points {
+            best = s;
+        }
+    }
+    Some(best)
+}
+
+// A list never changes, so "sorting" makes a new one: insertion sort, where
+// each value goes into place in the list built so far.
+fn sorted(xs: List<int>) -> List<int> {
+    var out = [];
+    for x in xs {
+        var i = 0;
+        while i < out.len() && out[i] < x {
+            i = i + 1;
+        }
+        out = out.slice(0, i).push(x).concat(out.slice(i, out.len()));
+    }
+    out
+}
+
+fn main() {
+    let primes = [2, 3, 5, 7, 11];
+    println("primes:", primes, "- the third is", primes[2]);
+
+    // `push` and `set` give a new list; `primes` is still the same.
+    let more = primes.push(13).set(0, 1);
+    println(more, primes);
+
+    // `get` is for an index that might be out of range; `xs[i]` would stop
+    // the program.
+    println("index 10?", primes.get(10), "the last?", primes.last());
+
+    println("squares:", primes.map(fn(p) { p * p }));
+    println("odd:", primes.filter(fn(p) { p % 2 == 1 }));
+    println("sum:", primes.fold(0, fn(a, b) { a + b }));
+    println("the first 5 multiples of 3:", (1..100).filter(fn(n) { n % 3 == 0 }).take(5).collect());
+
+    let scores = [
+        Score { name: "Ada", points: 92 },
+        Score { name: "Grace", points: 97 },
+        Score { name: "Alan", points: 88 },
+    ];
+    match best(scores) {
+        Some(s) => println("best:", s.name, "with", s.points),
+        None => println("no scores"),
+    }
+    println("best of none:", best([]));
+
+    println("sorted:", sorted([5, 3, 9, 1, 4, 1]));
+
+    // Building a list a value at a time is fast: each `push` shares almost
+    // everything with the list before it.
+    var squares = [];
+    for i in 0..100000 {
+        squares = squares.push(i * i);
+    }
+    println(squares.len(), "squares; the last is", squares[squares.len() - 1]);
+}

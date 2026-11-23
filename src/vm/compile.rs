@@ -52,6 +52,9 @@ pub struct Compiler {
     /// Functions compiled ahead of the next unit (the prelude's), to give
     /// the VM with it.
     new_functions: Vec<(u32, Rc<Proto>)>,
+    /// Native functions declared since the last unit was finished, with
+    /// their slots, for the VM to define.
+    new_natives: Vec<(u32, Id)>,
 }
 
 /// How a struct or enum is laid out at runtime.
@@ -73,7 +76,12 @@ enum DataDef {
 pub struct Compiled {
     pub functions: Vec<(u32, Rc<Proto>)>,
     pub main: u32,
+    /// Where `main` is named, if it returns a `Result`: an `Err` from it
+    /// is then an error.
+    pub main_result: Option<Span>,
     pub literals: Literals,
+    /// The native functions, with the global slot each belongs in.
+    pub natives: Vec<(u32, Id)>,
 }
 
 /// A compiled REPL input: a function that takes no arguments, and the string
@@ -84,6 +92,8 @@ pub struct ReplInput {
     /// Functions to define first, with their global slots: the prelude's,
     /// with the first input.
     pub functions: Vec<(u32, Rc<Proto>)>,
+    /// Likewise for native functions.
+    pub natives: Vec<(u32, Id)>,
 }
 
 impl Compiler {
@@ -96,6 +106,7 @@ impl Compiler {
             literals: HashMap::new(),
             new_literals: Vec::new(),
             new_functions: Vec::new(),
+            new_natives: Vec::new(),
         };
         for b in BUILTINS {
             compiler.define_global(b.name.into());
@@ -108,9 +119,20 @@ impl Compiler {
             compiler.define_data(def);
         }
         let methods = compiler.declare_methods(&prelude);
+        let methods = compiler.natives(methods);
         let functions = compiler.compile_methods(methods, &types);
         compiler.new_functions = functions;
         compiler
+    }
+
+    /// Give the native functions slots in `methods` to the VM, and return
+    /// the rest to compile.
+    fn natives<'d>(&mut self, methods: Vec<(u32, Id, &'d Method)>) -> Vec<(u32, Id, &'d Method)> {
+        let (native, compiled): (Vec<_>, Vec<_>) =
+            methods.into_iter().partition(|(_, _, m)| m.native);
+        self.new_natives
+            .extend(native.into_iter().map(|(slot, global, _)| (slot, global)));
+        compiled
     }
 
     /// Give every function in the impls of `defs` a global slot, named like
@@ -226,17 +248,24 @@ impl Compiler {
                     // a generic function compiles once, like any other.
                     type_params: _,
                     public: _,
+                    native,
                 } => {
                     let slot = self.define_global(name.clone());
-                    fns.push((slot, name, name_span, params, body, rtype));
+                    if *native {
+                        self.new_natives.push((slot, name.clone()));
+                    } else {
+                        fns.push((slot, name, name_span, params, body, rtype));
+                    }
                 }
                 Definition::Struct { .. } | Definition::Enum { .. } => self.define_data(def),
                 Definition::Impl { .. } => {}
             }
         }
         let methods = self.declare_methods(&program.definitions);
+        let methods = self.natives(methods);
 
         let mut main = None;
+        let mut main_result = None;
         let mut functions = Vec::new();
         for (slot, name, name_span, params, body, rtype) in fns {
             if name == "main" {
@@ -246,6 +275,9 @@ impl Compiler {
                         .with_help(Some("remove the parameters: `fn main() { ... }`".into())));
                 }
                 main = Some(slot);
+                if matches!(rtype, Some(Type::Named(n, ..)) if n == "Result") {
+                    main_result = Some(*name_span);
+                }
             }
             let captured = captured_locals(params, body, false);
             let mut fc = FnCompiler::new(self, types, &captured, false);
@@ -264,7 +296,9 @@ impl Compiler {
         Ok(Compiled {
             functions,
             main,
+            main_result,
             literals: std::mem::take(&mut self.new_literals),
+            natives: std::mem::take(&mut self.new_natives),
         })
     }
 
@@ -278,7 +312,20 @@ impl Compiler {
             proto,
             literals: std::mem::take(&mut self.new_literals),
             functions: std::mem::take(&mut self.new_functions),
+            natives: std::mem::take(&mut self.new_natives),
         }
+    }
+}
+
+/// `start` and `end` if `iter` is the range `start..end` (or
+/// `Iter::range(start, end)`), which a `for` loop counts through directly.
+fn range_bounds<'e>(iter: &'e Expr, types: &Types) -> Option<(&'e Expr, &'e Expr)> {
+    let Expression::Call(callee, args) = &iter.kind else {
+        return None;
+    };
+    match (types.function(callee), &args[..]) {
+        (Some(f), [start, end]) if f == "Iter::range" => Some((start, end)),
+        _ => None,
     }
 }
 
@@ -325,6 +372,18 @@ struct FnState {
     /// The function's name or the whole closure, for instructions that have
     /// no expression of their own.
     span: Span,
+    /// The loops being compiled, innermost last.
+    loops: Vec<Loop>,
+}
+
+/// A loop being compiled: where `continue` goes, and the jumps to patch.
+struct Loop {
+    /// The start of the next iteration, if it is already known.
+    next: Option<u32>,
+    /// Jumps for `continue` to patch once `next` is known.
+    continues: Vec<usize>,
+    /// Jumps for `break` to patch to just after the loop.
+    breaks: Vec<usize>,
 }
 
 struct FnCompiler<'a> {
@@ -378,6 +437,7 @@ impl<'a> FnCompiler<'a> {
             next: 0,
             max: 0,
             span,
+            loops: Vec::new(),
         });
 
         // Arguments arrive in the first registers. Parameters can't be
@@ -580,9 +640,43 @@ impl<'a> FnCompiler<'a> {
                 let c = self.expr_any(cond);
                 let exit = self.emit(Op::JumpIfFalse { cond: c, target: 0 }, cond.span);
                 self.release(mark);
-                self.stmt(body, None);
+                self.loop_body(Some(start), |fc| fc.stmt(body, None));
                 self.emit(Op::Jump { target: start }, cond.span);
                 self.patch(exit);
+                self.end_loop();
+                if let Some(dst) = dst {
+                    self.void(dst);
+                }
+            }
+            Statement::For { var, iter, body } => {
+                let mark = self.mark();
+                match range_bounds(iter, self.types) {
+                    Some((start, end)) => self.for_range(var, start, end, body),
+                    None if self.types.for_iter(iter).is_some_and(|f| f == "List::iter") => {
+                        self.for_list(var, iter, body)
+                    }
+                    None => self.for_iter(var, iter, body),
+                }
+                self.release(mark);
+                if let Some(dst) = dst {
+                    self.void(dst);
+                }
+            }
+            Statement::Break(span) | Statement::Continue(span) => {
+                let jump = self.emit(Op::Jump { target: 0 }, *span);
+                let is_break = matches!(stmt, Statement::Break(_));
+                let l = self
+                    .cur()
+                    .loops
+                    .last_mut()
+                    .expect("the checker rejects 'break' and 'continue' outside a loop");
+                match (is_break, l.next) {
+                    (true, _) => l.breaks.push(jump),
+                    (false, None) => l.continues.push(jump),
+                    (false, Some(next)) => {
+                        self.cur().code[jump] = Op::Jump { target: next };
+                    }
+                }
                 if let Some(dst) = dst {
                     self.void(dst);
                 }
@@ -602,6 +696,252 @@ impl<'a> FnCompiler<'a> {
                 self.release(mark);
             }
         }
+    }
+
+    /// Compile a loop's body with `continue` going to `next` (or, if it
+    /// isn't known yet, to wherever [`FnCompiler::continue_here`] is
+    /// called). [`FnCompiler::end_loop`] finishes the loop.
+    fn loop_body(&mut self, next: Option<u32>, body: impl FnOnce(&mut Self)) {
+        self.cur().loops.push(Loop {
+            next,
+            continues: Vec::new(),
+            breaks: Vec::new(),
+        });
+        body(self);
+    }
+
+    /// Point the innermost loop's `continue`s at the next instruction.
+    fn continue_here(&mut self) {
+        let continues = std::mem::take(&mut self.cur().loops.last_mut().unwrap().continues);
+        for at in continues {
+            self.patch(at);
+        }
+    }
+
+    /// Finish the innermost loop: its `break`s go to the next instruction.
+    fn end_loop(&mut self) {
+        let l = self.cur().loops.pop().expect("a loop is being compiled");
+        debug_assert!(l.continues.is_empty(), "every continue is patched");
+        for at in l.breaks {
+            self.patch(at);
+        }
+    }
+
+    /// `for var in start..end { body }`, as a loop that counts, without
+    /// making an `Iter`. `end` is evaluated once, before the first
+    /// iteration, as `Iter::range` would.
+    fn for_range(&mut self, var: &Variable, start: &Expr, end: &Expr, body: &Statement) {
+        let i = self.alloc();
+        self.expr(start, i);
+        let limit = self.alloc();
+        self.expr(end, limit);
+        let one = self.alloc();
+        let top = self.here();
+        let more = self.alloc();
+        self.emit(
+            Op::LtI {
+                dst: more,
+                a: i,
+                b: limit,
+            },
+            end.span,
+        );
+        let exit = self.emit(
+            Op::JumpIfFalse {
+                cond: more,
+                target: 0,
+            },
+            end.span,
+        );
+        // The loop variable is the count itself: it is immutable, so
+        // nothing in the body can change it, and a closure copies it.
+        self.cur().scopes.push(Vec::new());
+        self.declare(var.name.clone(), i, false);
+        self.loop_body(None, |fc| fc.stmt(body, None));
+        self.cur().scopes.pop();
+        self.continue_here();
+        // `i < limit`, so this can't overflow.
+        self.emit(Op::LoadInt { dst: one, value: 1 }, var.span);
+        self.emit(
+            Op::AddI {
+                dst: i,
+                a: i,
+                b: one,
+            },
+            var.span,
+        );
+        self.emit(Op::Jump { target: top }, var.span);
+        self.patch(exit);
+        self.end_loop();
+    }
+
+    /// `for var in list { body }`, as a loop over the list's indexes,
+    /// without making an `Iter`. A list never changes, so its length is
+    /// read once, and this goes over the same values `List::iter` would.
+    fn for_list(&mut self, var: &Variable, list: &Expr, body: &Statement) {
+        let l = self.alloc();
+        self.expr(list, l);
+        let len = self.alloc();
+        let index = self.compiler.globals[&Id::from("List::len")];
+        let arg = self.alloc();
+        self.emit(Op::GetGlobal { dst: len, index }, list.span);
+        self.emit(Op::Move { dst: arg, src: l }, list.span);
+        self.emit(
+            Op::Call {
+                dst: len,
+                callee: len,
+                argc: 1,
+            },
+            list.span,
+        );
+        self.release(arg);
+        let i = self.alloc();
+        self.emit(Op::LoadInt { dst: i, value: 0 }, list.span);
+        let one = self.alloc();
+        let more = self.alloc();
+        let x = self.alloc();
+        let top = self.here();
+        self.emit(
+            Op::LtI {
+                dst: more,
+                a: i,
+                b: len,
+            },
+            list.span,
+        );
+        let exit = self.emit(
+            Op::JumpIfFalse {
+                cond: more,
+                target: 0,
+            },
+            list.span,
+        );
+        self.emit(
+            Op::Index {
+                dst: x,
+                list: l,
+                index: i,
+            },
+            var.span,
+        );
+        self.cur().scopes.push(Vec::new());
+        self.declare(var.name.clone(), x, false);
+        self.loop_body(None, |fc| fc.stmt(body, None));
+        self.cur().scopes.pop();
+        self.continue_here();
+        self.emit(Op::LoadInt { dst: one, value: 1 }, var.span);
+        self.emit(
+            Op::AddI {
+                dst: i,
+                a: i,
+                b: one,
+            },
+            var.span,
+        );
+        self.emit(Op::Jump { target: top }, var.span);
+        self.patch(exit);
+        self.end_loop();
+    }
+
+    /// `for var in iter { body }`: call the `Iter`'s step function until
+    /// it gives `None`.
+    fn for_iter(&mut self, var: &Variable, iter: &Expr, body: &Statement) {
+        let it = self.alloc();
+        self.expr(iter, it);
+        if let Some(global) = self.types.for_iter(iter).cloned() {
+            // Get the `Iter` from the value's `iter` method.
+            let callee = self.alloc();
+            let index = self.compiler.globals[&global];
+            self.emit(Op::GetGlobal { dst: callee, index }, iter.span);
+            let arg = self.alloc();
+            self.emit(Op::Move { dst: arg, src: it }, iter.span);
+            let at = self.emit(
+                Op::Call {
+                    dst: it,
+                    callee,
+                    argc: 1,
+                },
+                iter.span,
+            );
+            self.cur().call_names.insert(at, global);
+            self.release(callee);
+        }
+        let (step_field, some_tag) = self.iter_layout();
+        let step = self.alloc();
+        self.emit(
+            Op::GetField {
+                dst: step,
+                obj: it,
+                index: step_field,
+            },
+            iter.span,
+        );
+        let item = self.alloc();
+        let more = self.alloc();
+        let callee = self.alloc();
+        let top = self.here();
+        self.emit(
+            Op::Move {
+                dst: callee,
+                src: step,
+            },
+            iter.span,
+        );
+        self.emit(
+            Op::Call {
+                dst: item,
+                callee,
+                argc: 0,
+            },
+            iter.span,
+        );
+        self.emit(
+            Op::TestTag {
+                dst: more,
+                obj: item,
+                tag: some_tag,
+            },
+            iter.span,
+        );
+        let exit = self.emit(
+            Op::JumpIfFalse {
+                cond: more,
+                target: 0,
+            },
+            iter.span,
+        );
+        let x = self.alloc();
+        self.emit(
+            Op::GetField {
+                dst: x,
+                obj: item,
+                index: 0,
+            },
+            var.span,
+        );
+        self.cur().scopes.push(Vec::new());
+        self.declare(var.name.clone(), x, false);
+        self.loop_body(Some(top), |fc| fc.stmt(body, None));
+        self.cur().scopes.pop();
+        self.emit(Op::Jump { target: top }, iter.span);
+        self.patch(exit);
+        self.end_loop();
+    }
+
+    /// The index of `Iter`'s field `step`, and the tag of `Option::Some`.
+    fn iter_layout(&self) -> (u16, u32) {
+        let step = match &self.compiler.data["Iter"] {
+            DataDef::Struct { fields, .. } => fields.iter().position(|f| f == "step"),
+            DataDef::Enum { .. } => None,
+        };
+        let some = match &self.compiler.data["Option"] {
+            DataDef::Enum { variants } => variants.iter().position(|(v, _)| v == "Some"),
+            DataDef::Struct { .. } => None,
+        };
+        (
+            step.expect("the prelude's Iter has a field 'step'") as u16,
+            some.expect("the prelude's Option has a variant 'Some'") as u32,
+        )
     }
 
     fn let_(&mut self, var: &Variable, value: &Expr, mutable: bool) {
@@ -902,6 +1242,36 @@ impl<'a> FnCompiler<'a> {
                     }
                     _ => {}
                 }
+            }
+            Expression::List(items) => {
+                let start = self.mark();
+                for x in items {
+                    let r = self.alloc();
+                    self.expr(x, r);
+                }
+                let count =
+                    u32::try_from(items.len()).expect("a list literal this long fits in memory");
+                self.emit(Op::NewList { dst, start, count }, span);
+            }
+            Expression::Index(list, index) => {
+                // Use the list variable's own register only if the index
+                // can't assign to it first.
+                let l = if is_simple(index) {
+                    self.expr_any(list)
+                } else {
+                    let r = self.alloc();
+                    self.expr(list, r);
+                    r
+                };
+                let i = self.expr_any(index);
+                self.emit(
+                    Op::Index {
+                        dst,
+                        list: l,
+                        index: i,
+                    },
+                    span,
+                );
             }
             Expression::Closure(params, rtype, body) => {
                 let proto = self.function(None, params, rtype.as_ref(), body, span);
@@ -1348,6 +1718,11 @@ impl CaptureFinder {
                 self.expr(cond);
                 self.stmt(body);
             }
+            Statement::For { var, iter, body } => {
+                self.expr(iter);
+                self.scope(vec![(var.name.clone(), decl_key(var))], |s| s.stmt(body));
+            }
+            Statement::Break(_) | Statement::Continue(_) => {}
             Statement::Return(value) => {
                 if let Some(e) = value {
                     self.expr(e);
@@ -1368,7 +1743,11 @@ impl CaptureFinder {
             | Expression::Unary(_, e)
             | Expression::Field(e, ..)
             | Expression::Try(e) => self.expr(e),
-            Expression::Error(es) => es.iter().for_each(|e| self.expr(e)),
+            Expression::Error(es) | Expression::List(es) => es.iter().for_each(|e| self.expr(e)),
+            Expression::Index(list, index) => {
+                self.expr(list);
+                self.expr(index);
+            }
             Expression::StructLit { fields, base, .. } => {
                 for f in fields {
                     self.expr(&f.value);

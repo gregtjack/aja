@@ -1,4 +1,5 @@
-// The prelude: definitions every Aja program can use without importing them.
+// The prelude: definitions every Aja program can use without importing them:
+// `Option`, `Result`, `Iter`, and `List`.
 // Their variants are in scope by themselves, so `Some(1)` means
 // `Option::Some(1)`, and `Some`, `None`, `Ok`, and `Err` can't be used as
 // other names.
@@ -55,6 +56,15 @@ impl<T> Option<T> {
         match self {
             Some(x) => Some(x),
             None => other,
+        }
+    }
+
+    // The value, if there is one, as an `Iter`, so `for x in opt { ... }`
+    // runs once or not at all.
+    pub fn iter(self) -> Iter<T> {
+        match self {
+            Some(x) => Iter::once(x),
+            None => Iter::empty(),
         }
     }
 
@@ -129,5 +139,316 @@ impl<T, E> Result<T, E> {
             Ok(x) => Some(x),
             Err(_) => None,
         }
+    }
+}
+
+// A sequence of values, produced one at a time: what a `for` loop goes
+// over. `for x in it { ... }` takes an `Iter`, or any value whose type has
+// a method `iter(self) -> Iter<T>`.
+//
+// An `Iter` is used up as it goes: each value comes out once, and a copy of
+// an `Iter` shares its position. Methods like `map` and `filter` make a new
+// `Iter` that draws from this one as it is used, so nothing is computed
+// until something asks for values.
+struct Iter<T> {
+    // Gives the next value, or `None` when there are no more.
+    step: () -> Option<T>,
+}
+
+impl<T> Iter<T> {
+    // An `Iter` that calls `next` for each value until it returns `None`.
+    // `next` usually captures a `var` to keep its place.
+    pub fn new(next: () -> Option<T>) -> Iter<T> {
+        Iter { step: next }
+    }
+
+    // The ints from `start` up to, but not including, `end`. `start..end`
+    // means the same.
+    pub fn range(start: int, end: int) -> Iter<int> {
+        var i = start;
+        Iter::new(fn() -> Option<int> {
+            if i < end {
+                i = i + 1;
+                Some(i - 1)
+            } else {
+                None
+            }
+        })
+    }
+
+    // An `Iter` with no values.
+    pub fn empty() -> Iter<T> {
+        Iter::new(fn() -> Option<T> { None })
+    }
+
+    // An `Iter` with one value.
+    pub fn once(value: T) -> Iter<T> {
+        var done = false;
+        Iter::new(fn() -> Option<T> {
+            if done {
+                None
+            } else {
+                done = true;
+                Some(value)
+            }
+        })
+    }
+
+    // The next value, or `None` if there are no more.
+    pub fn next(self) -> Option<T> {
+        self.step()
+    }
+
+    // `f` applied to each value.
+    pub fn map<U>(self, f: (T) -> U) -> Iter<U> {
+        Iter::new(fn() -> Option<U> { self.next().map(f) })
+    }
+
+    // The values for which `keep` is true.
+    pub fn filter(self, keep: (T) -> bool) -> Iter<T> {
+        Iter::new(fn() -> Option<T> {
+            for x in self {
+                if keep(x) {
+                    return Some(x);
+                }
+            }
+            None
+        })
+    }
+
+    // The first `n` values, or all of them if there are fewer.
+    pub fn take(self, n: int) -> Iter<T> {
+        var left = n;
+        Iter::new(fn() -> Option<T> {
+            if left <= 0 {
+                None
+            } else {
+                left = left - 1;
+                self.next()
+            }
+        })
+    }
+
+    // The values after the first `n`.
+    pub fn skip(self, n: int) -> Iter<T> {
+        var skipped = false;
+        Iter::new(fn() -> Option<T> {
+            if !skipped {
+                skipped = true;
+                for _ in 0..n {
+                    self.next();
+                }
+            }
+            self.next()
+        })
+    }
+
+    // This `Iter`'s values, then `other`'s.
+    pub fn chain(self, other: Iter<T>) -> Iter<T> {
+        Iter::new(fn() -> Option<T> {
+            match self.next() {
+                Some(x) => Some(x),
+                None => other.next(),
+            }
+        })
+    }
+
+    // Combine the values into one, starting from `initial`: `f(f(initial,
+    // a), b)` for the values `a` and `b`.
+    pub fn fold<A>(self, initial: A, f: (A, T) -> A) -> A {
+        var acc = initial;
+        for x in self {
+            acc = f(acc, x);
+        }
+        acc
+    }
+
+    // How many values there are.
+    pub fn count(self) -> int {
+        var n = 0;
+        for _ in self {
+            n = n + 1;
+        }
+        n
+    }
+
+    // The last value, or `None` if there are none.
+    pub fn last(self) -> Option<T> {
+        var last = None;
+        for x in self {
+            last = Some(x);
+        }
+        last
+    }
+
+    // The first value for which `pred` is true, if any.
+    pub fn find(self, pred: (T) -> bool) -> Option<T> {
+        for x in self {
+            if pred(x) {
+                return Some(x);
+            }
+        }
+        None
+    }
+
+    // Whether `pred` is true for some value. It stops at the first one.
+    pub fn any(self, pred: (T) -> bool) -> bool {
+        for x in self {
+            if pred(x) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // Whether `pred` is true for every value. It stops at the first that
+    // isn't.
+    pub fn all(self, pred: (T) -> bool) -> bool {
+        for x in self {
+            if !pred(x) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<T> Iter<T> {
+    // The values left, in a list.
+    pub fn collect(self) -> List<T> {
+        var list = [];
+        for x in self {
+            list = list.push(x);
+        }
+        list
+    }
+}
+
+// A sequence of values, all of one type: `[1, 2, 3]` is a `List<int>`.
+//
+// A list never changes. Methods like `push` and `set` give a new list and
+// leave the old one as it was, so a list can be passed around without
+// anything changing it underneath you. The new list shares most of its
+// memory with the old one, so making one costs about as much as changing a
+// value in place would: reading, replacing, or adding a value takes a
+// handful of steps whatever the list's length.
+//
+// `xs[i]` is the value at index `i`, counting from 0; it stops the program if
+// there is none, so use `xs.get(i)` when `i` might be out of range.
+native struct List<T>;
+
+impl<T> List<T> {
+    // How many values it holds.
+    pub native fn len(self) -> int;
+
+    // This list with `value` added at the end.
+    pub native fn push(self, value: T) -> List<T>;
+
+    // This list with the value at `index` replaced by `value`. Stops the
+    // program if `index` is out of range.
+    pub native fn set(self, index: int, value: T) -> List<T>;
+
+    // This list without its last value (or empty, if it is).
+    pub native fn drop_last(self) -> List<T>;
+
+    // This list's values, then `other`'s.
+    pub native fn concat(self, other: List<T>) -> List<T>;
+
+    // The values from index `start` up to, but not including, `end`. Stops
+    // the program unless `0 <= start <= end <= len`.
+    pub native fn slice(self, start: int, end: int) -> List<T>;
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    // The value at `index`, or `None` if it is out of range.
+    pub fn get(self, index: int) -> Option<T> {
+        if 0 <= index && index < self.len() {
+            Some(self[index])
+        } else {
+            None
+        }
+    }
+
+    pub fn first(self) -> Option<T> {
+        self.get(0)
+    }
+
+    pub fn last(self) -> Option<T> {
+        self.get(self.len() - 1)
+    }
+
+    // The values in order, for a `for` loop: `for x in xs { ... }`.
+    pub fn iter(self) -> Iter<T> {
+        var i = 0;
+        Iter::new(fn() -> Option<T> {
+            if i < self.len() {
+                i = i + 1;
+                Some(self[i - 1])
+            } else {
+                None
+            }
+        })
+    }
+
+    // `f` applied to each value.
+    pub fn map<U>(self, f: (T) -> U) -> List<U> {
+        var out = [];
+        for x in self {
+            out = out.push(f(x));
+        }
+        out
+    }
+
+    // The values for which `keep` is true.
+    pub fn filter(self, keep: (T) -> bool) -> List<T> {
+        var out = [];
+        for x in self {
+            if keep(x) {
+                out = out.push(x);
+            }
+        }
+        out
+    }
+
+    // Combine the values into one, starting from `initial` (see `Iter::fold`).
+    pub fn fold<A>(self, initial: A, f: (A, T) -> A) -> A {
+        self.iter().fold(initial, f)
+    }
+
+    // The first value for which `pred` is true, if any.
+    pub fn find(self, pred: (T) -> bool) -> Option<T> {
+        self.iter().find(pred)
+    }
+
+    // Whether `pred` is true for some value.
+    pub fn any(self, pred: (T) -> bool) -> bool {
+        self.iter().any(pred)
+    }
+
+    // Whether `pred` is true for every value.
+    pub fn all(self, pred: (T) -> bool) -> bool {
+        self.iter().all(pred)
+    }
+
+    // The values in the opposite order.
+    pub fn reverse(self) -> List<T> {
+        var out = [];
+        var i = self.len();
+        while i > 0 {
+            i = i - 1;
+            out = out.push(self[i]);
+        }
+        out
+    }
+
+    // A list of `count` copies of `value`.
+    pub fn repeat(value: T, count: int) -> List<T> {
+        var out = [];
+        for _ in 0..count {
+            out = out.push(value);
+        }
+        out
     }
 }

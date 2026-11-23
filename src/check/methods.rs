@@ -245,6 +245,9 @@ impl Checker {
     /// Check the bodies of methods declared by [`Checker::declare_impls`].
     pub(super) fn check_method_bodies(&mut self, bodies: Vec<MethodBody>) {
         for b in bodies {
+            if b.method.native {
+                continue;
+            }
             let ctx = FnContext {
                 name: Some(b.global.clone()),
                 ret: b.ret,
@@ -449,11 +452,87 @@ impl Checker {
         self.error(
             TypeError::new(format!("{what} '{name}' of '{type_name}' is private"), span).help(
                 format!(
-                    "only code in module '{}' can call it; mark it 'pub' there to call it here",
-                    super::data::module_of(type_name)
+                    "only code in {} can call it; mark it 'pub' there to call it here",
+                    super::data::owner(type_name, info.source)
                 ),
             ),
         );
+    }
+
+    /// The type of the values a `for` loop over a value of type `t` (at
+    /// `span`) goes over: `T` for an `Iter<T>`, or for a value whose type
+    /// has a method `iter(self) -> Iter<T>`, which the loop then calls.
+    pub(super) fn iter_item(&mut self, t: &Ty, span: Span) -> Ty {
+        const HELP: &str = "a for loop goes over an Iter, such as a range `0..n`, \
+                            or a value whose type has a method `iter(self) -> Iter<T>`";
+        match self.resolve(t) {
+            Ty::Named(n, args) if n == "Iter" => args[0].clone(),
+            Ty::Named(n, targs) => {
+                let Some(info) = self.method(&n, &Id::from("iter")).cloned() else {
+                    self.error(
+                        TypeError::new(format!("'{n}' can't be looped over"), span).help(format!(
+                            "give '{n}' a method `iter(self) -> Iter<...>`, or loop over an Iter"
+                        )),
+                    );
+                    return Ty::Error;
+                };
+                let map: HashMap<Id, Ty> = info
+                    .generics
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| {
+                        let t = if i < info.impl_params {
+                            targs[i].clone()
+                        } else {
+                            self.fresh(Class::Any)
+                        };
+                        (g.clone(), t)
+                    })
+                    .collect();
+                let Ty::Fn(params, ret) = Self::subst(&info.ty, &map) else {
+                    unreachable!("a method's type is a function type")
+                };
+                match self.resolve(&ret) {
+                    Ty::Named(r, item) if r == "Iter" && info.has_self && params.len() == 1 => {
+                        if !info.visible(span) {
+                            self.private_method(&n, &Id::from("iter"), &info, span);
+                        }
+                        self.for_iters.insert(key(span), info.global.clone());
+                        item[0].clone()
+                    }
+                    _ => {
+                        let shown = self.show(&info.ty);
+                        self.error(
+                            TypeError::new(format!("'{n}' can't be looped over"), span)
+                                .help(format!(
+                                    "for a for loop to use it, '{n}::iter' must be a method that takes only `self` and returns an Iter"
+                                ))
+                                .note(format!("'{}' has type {shown}", info.global)),
+                        );
+                        Ty::Error
+                    }
+                }
+            }
+            Ty::Error | Ty::Never => Ty::Error,
+            Ty::Var(_) => {
+                self.error(
+                    TypeError::new(
+                        "type annotations needed: the type of this value must be known to loop over it",
+                        span,
+                    )
+                    .help("annotate the variable or parameter it comes from"),
+                );
+                self.poison(&[t]);
+                Ty::Error
+            }
+            other => {
+                let shown = self.show(&other);
+                self.error(
+                    TypeError::new(format!("{shown} can't be looped over"), span).help(HELP),
+                );
+                Ty::Error
+            }
+        }
     }
 
     /// A help message for `obj.name` without a call when `name` is a method.

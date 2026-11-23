@@ -12,14 +12,21 @@
 //!
 //! Definitions in the file being run keep their names (`main`), since no
 //! other module can import it: any import of it would be a cycle.
+//!
+//! Paths that start with `std` are the standard library's, which is built
+//! into the binary (see [`stdlib`]), so a program can't have a module of its
+//! own called `std`.
 
 use std::collections::HashMap;
 
 use crate::{
     ast::{Id, Program, Source, Span},
+    check,
     diagnostic::{Diagnostic, Files},
     lexer::tokenize_source,
     parse::Parser,
+    stdlib,
+    vm::{Compiled, Compiler},
 };
 
 mod resolve;
@@ -43,6 +50,11 @@ impl Module {
         path_name(&self.path)
     }
 
+    /// Whether it is part of the standard library.
+    pub fn is_std(&self) -> bool {
+        self.path.len() > 1 && self.path[0] == "std"
+    }
+
     /// Whether it is the file being run.
     pub fn is_main(&self) -> bool {
         self.source == Source::MAIN
@@ -59,6 +71,31 @@ fn path_name(path: &[Id]) -> String {
 pub fn file_name(path: &[Id]) -> String {
     let segments: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
     format!("{}.aja", segments.join("/"))
+}
+
+/// Load `main` (a file in `root`) and the modules it imports, resolve their
+/// names, type-check them, and compile them, returning their files and the
+/// compiled program, or every error found. Names are type-checked even when
+/// some failed to resolve, so all of those errors are reported at once.
+pub fn build(root: &dyn Root, main: &str) -> (Files, Result<Compiled, Vec<Diagnostic>>) {
+    let (loaded, errors) = load(root, main);
+    if !errors.is_empty() {
+        return (loaded.files, Err(errors));
+    }
+    let (program, mut errors) = resolve(loaded.modules);
+    let types = check::check_program(&program);
+    if let Err(type_errors) = &types {
+        errors.extend(type_errors.iter().map(|e| e.to_diagnostic()));
+    }
+    if !errors.is_empty() {
+        errors.sort_by_key(Diagnostic::sort_key);
+        return (loaded.files, Err(errors));
+    }
+    let types = types.expect("there are no type errors");
+    let compiled = Compiler::new()
+        .program(&program, &types)
+        .map_err(|e| vec![e]);
+    (loaded.files, compiled)
 }
 
 /// Where a module's text comes from: the file system, or (in tests) a map.
@@ -122,7 +159,7 @@ pub fn load(root: &dyn Root, main: &str) -> (Loaded, Vec<Diagnostic>) {
     };
     match root.read(main) {
         Ok(Some(text)) => {
-            loader.add(main_path, main, text);
+            loader.add(main_path, root.display(main), text);
         }
         Ok(None) => loader.errors.push(Diagnostic::new(format!(
             "could not read '{}': no such file",
@@ -150,8 +187,8 @@ struct Loader<'r> {
 
 impl Loader<'_> {
     /// Parse a module from `text`, then load its imports.
-    fn add(&mut self, path: Vec<Id>, file: &str, text: String) -> Option<usize> {
-        let source = self.loaded.files.add(self.root.display(file), text);
+    fn add(&mut self, path: Vec<Id>, display: String, text: String) -> Option<usize> {
+        let source = self.loaded.files.add(display, text);
         let text = self.loaded.files.text(source).to_string();
         let parsed = tokenize_source(&text, source)
             .map_err(|e| e.to_diagnostic())
@@ -205,22 +242,21 @@ impl Loader<'_> {
         if self.ids.contains_key(&path) {
             return;
         }
+        if path[0] == "std" {
+            return self.import_std(path, span);
+        }
         let file = file_name(&path);
         match self.root.read(&file) {
             Ok(Some(text)) => {
-                self.add(path, &file, text);
+                self.add(path, self.root.display(&file), text);
             }
             Ok(None) => {
                 let name = path_name(&path);
-                let help = if path[0] == "std" {
-                    "the standard library doesn't exist yet".to_string()
-                } else {
-                    format!(
-                        "a module is a file, named by its path from the program's root; \
-                         '{name}' would be in '{}'",
-                        self.root.display(&file)
-                    )
-                };
+                let help = format!(
+                    "a module is a file, named by its path from the program's root; \
+                     '{name}' would be in '{}'",
+                    self.root.display(&file)
+                );
                 self.errors.push(
                     Diagnostic::new(format!("no module named '{name}'"))
                         .with_span(span.start, span.end)
@@ -235,6 +271,35 @@ impl Loader<'_> {
                         self.root.display(&file)
                     ))
                     .with_span(span.start, span.end),
+                );
+                self.ids.insert(path, None);
+            }
+        }
+    }
+
+    /// Load the standard library module `path` (`std::io`), which is built
+    /// into the binary. It imports only other standard library modules, so
+    /// it can't be in a cycle with the program's.
+    fn import_std(&mut self, path: Vec<Id>, span: Span) {
+        let name = path_name(&path[1..]);
+        match stdlib::source(&name) {
+            Some(text) => {
+                self.add(path, stdlib::display(&name), text.to_string());
+            }
+            None => {
+                let mut modules: Vec<String> = stdlib::MODULES
+                    .iter()
+                    .filter(|(m, _)| *m != stdlib::NATIVE)
+                    .map(|(m, _)| format!("std::{m}"))
+                    .collect();
+                modules.sort();
+                self.errors.push(
+                    Diagnostic::new(format!("no module named '{}'", path_name(&path)))
+                        .with_span(span.start, span.end)
+                        .with_help(Some(format!(
+                            "the standard library's modules are: {}",
+                            modules.join(", ")
+                        ))),
                 );
                 self.ids.insert(path, None);
             }

@@ -41,6 +41,8 @@ pub(super) struct StructInfo {
     pub private: HashSet<Id>,
     /// The file the struct is defined in.
     pub source: Source,
+    /// Whether it is `native`, with values only native functions make.
+    pub native: bool,
 }
 
 impl StructInfo {
@@ -56,9 +58,16 @@ impl StructInfo {
     }
 }
 
-/// The module a global name is in, as written (`geo` for `geo::Point`).
-pub(super) fn module_of(name: &str) -> &str {
-    name.rsplit_once("::").map_or(name, |(m, _)| m)
+/// Where something defined in `source` with the global name `name` is, for
+/// messages: "module 'geo'" for `geo::Point`, or "the prelude".
+pub(super) fn owner(name: &str, source: Source) -> String {
+    match source {
+        Source::Prelude => "the prelude".to_string(),
+        _ => format!(
+            "module '{}'",
+            name.rsplit_once("::").map_or(name, |(m, _)| m)
+        ),
+    }
 }
 
 /// An enum definition: its type parameters, and its variants in declaration
@@ -161,6 +170,7 @@ impl Checker {
                         fields: Vec::new(),
                         private: HashSet::new(),
                         source: span.start.source,
+                        native: matches!(def, Definition::Struct { native: true, .. }),
                     },
                 );
             } else {
@@ -204,8 +214,12 @@ impl Checker {
                         }
                         tys.push((f.name.clone(), t));
                     }
-                    let used: Vec<&Ty> = tys.iter().map(|(_, t)| t).collect();
-                    self.require_used(type_params, &used, &format!("struct '{name}'"));
+                    // A native struct's parameters are used by its native
+                    // representation, which has no fields to show it.
+                    if !matches!(def, Definition::Struct { native: true, .. }) {
+                        let used: Vec<&Ty> = tys.iter().map(|(_, t)| t).collect();
+                        self.require_used(type_params, &used, &format!("struct '{name}'"));
+                    }
                     let info = self.structs.get_mut(name).unwrap();
                     info.fields = tys;
                     info.private = private;
@@ -513,9 +527,22 @@ impl Checker {
                 span,
             )
             .help(format!(
-                "only code in module '{}' can use it; mark it 'pub' there to use it here",
-                module_of(struct_name)
+                "only code in {} can use it; mark it 'pub' there to use it here",
+                owner(struct_name, self.structs[struct_name].source)
             )),
+        );
+    }
+
+    /// Report a struct literal or pattern for a native struct.
+    fn native_struct(&mut self, name: &Id, span: Span) {
+        let help = if name == "List" {
+            "make a list with `[a, b, c]`, and look inside one with its methods or `xs[i]`"
+                .to_string()
+        } else {
+            format!("use the functions that make and take apart a '{name}'")
+        };
+        self.error(
+            TypeError::new(format!("'{name}' is built in, so it has no fields"), span).help(help),
         );
     }
 
@@ -562,6 +589,13 @@ impl Checker {
             return Ty::Error;
         };
 
+        if info.native {
+            for f in fields {
+                self.expr(&f.value);
+            }
+            self.native_struct(name, name_span);
+            return Ty::Error;
+        }
         if info.hides_fields(name_span) {
             let private: Vec<String> = info
                 .fields
@@ -572,8 +606,8 @@ impl Checker {
             self.error(
                 TypeError::new(
                     format!(
-                        "struct '{name}' has private fields, so it can only be built in module '{}'",
-                        module_of(name)
+                        "struct '{name}' has private fields, so it can only be built in {}",
+                        owner(name, info.source)
                     ),
                     name_span,
                 )
@@ -933,6 +967,11 @@ impl Checker {
                     self.bind_unchecked(fields.iter().map(|(_, _, f)| f), names);
                     return Pat::Wild;
                 };
+                if info.native {
+                    self.native_struct(name, *name_span);
+                    self.bind_unchecked(fields.iter().map(|(_, _, f)| f), names);
+                    return Pat::Wild;
+                }
                 let (args, map) = self.fresh_args(&info.params);
                 self.pattern_type(&Ty::Named(name.clone(), args), expected, p.span);
                 let mut subs = vec![Pat::Wild; info.fields.len()];
@@ -976,8 +1015,8 @@ impl Checker {
                             p.span,
                         )
                         .help(format!(
-                            "add '..' to skip the fields only module '{}' can see",
-                            module_of(name)
+                            "add '..' to skip the fields only {} can see",
+                            owner(name, info.source)
                         )),
                     );
                 }

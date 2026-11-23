@@ -18,6 +18,7 @@ mod lexer;
 mod module;
 mod parse;
 mod prelude;
+mod stdlib;
 mod token;
 mod vm;
 
@@ -46,31 +47,11 @@ fn main() -> ExitCode {
     let name = file
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let (loaded, errors) = module::load(&module::Dir(root), &name);
-    let files = loaded.files;
-    if !errors.is_empty() {
-        report_all(&errors, &files);
-        return ExitCode::FAILURE;
-    }
-
-    // Type-check even when names failed to resolve, so every error is
-    // reported at once.
-    let (ast, mut errors) = module::resolve(loaded.modules);
-    let types = check::check_program(&ast);
-    if let Err(type_errors) = &types {
-        errors.extend(type_errors.iter().map(|e| e.to_diagnostic()));
-    }
-    if !errors.is_empty() {
-        errors.sort_by_key(diagnostic::Diagnostic::sort_key);
-        report_all(&errors, &files);
-        return ExitCode::FAILURE;
-    }
-    let types = types.expect("there are no type errors");
-
-    let program = match Compiler::new().program(&ast, &types) {
+    let (files, program) = module::build(&module::Dir(root), &name);
+    let program = match program {
         Ok(program) => program,
-        Err(e) => {
-            report_all(&[e], &files);
+        Err(errors) => {
+            report_all(&errors, &files);
             return ExitCode::FAILURE;
         }
     };

@@ -1,0 +1,31 @@
+// Reading standard input and writing standard output with `std::io`:
+//
+//     printf 'Ada\nfirst\nsecond\n' | cargo run -- examples/io/greet.aja
+//
+// Run it without the pipe to type the lines yourself; end with Ctrl-D.
+import std::io;
+
+// `main` can return a `Result`: if it returns an `Err`, the program prints
+// the error and fails. That lets `?` pass on any I/O error.
+fn main() -> Result<void, io::Error> {
+    let stdin = io::stdin();
+    let out = io::stdout();
+
+    // Reading flushes standard output, so the prompt shows first.
+    out.write("What's your name? ")?;
+    let name = match stdin.read_line()? {
+        Some(name) => name,
+        None => {
+            return out.write_line("\nNo name, no greeting.");
+        }
+    };
+    out.write_line("Hello, " + name + "! Now some lines, please.")?;
+
+    var count = 0;
+    for line in stdin.lines() {
+        count = count + 1;
+        println(count, line?);
+    }
+    println("read", count, "lines");
+    io::stderr().write_line("(that went to standard error)")
+}

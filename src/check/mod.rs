@@ -171,6 +171,7 @@ pub struct Types {
     fields: HashMap<SpanKey, u16>,
     tries: HashMap<SpanKey, TryOn>,
     functions: HashMap<SpanKey, Id>,
+    for_iters: HashMap<SpanKey, Id>,
 }
 
 /// Identifies an expression by where it is in the source. Two operator
@@ -215,6 +216,12 @@ impl Types {
     pub fn function(&self, e: &Expr) -> Option<&Id> {
         self.functions.get(&key(e.span))
     }
+
+    /// The `iter` method, by the name it is compiled under, that a `for`
+    /// loop over `e` calls to get an `Iter`, or `None` if `e` is one.
+    pub fn for_iter(&self, e: &Expr) -> Option<&Id> {
+        self.for_iters.get(&key(e.span))
+    }
 }
 
 /// Type-check a whole program.
@@ -244,6 +251,8 @@ enum BindingKind {
     Param,
     /// A name bound by a `match` pattern.
     Pattern,
+    /// A `for` loop's variable.
+    Loop,
     /// A top-level function.
     Function,
     /// A variadic built-in such as `print`, which can only be called directly.
@@ -317,6 +326,11 @@ pub struct Checker {
     enums: HashMap<Id, EnumInfo>,
     /// The type parameters in scope: those of the definition being checked.
     type_params: Vec<Id>,
+    /// How many loops the statement being checked is in, within the
+    /// function or closure being checked.
+    loop_depth: usize,
+    /// The `iter` method each `for` loop calls, if it calls one.
+    for_iters: HashMap<SpanKey, Id>,
 }
 
 impl Checker {
@@ -354,6 +368,8 @@ impl Checker {
             structs: HashMap::new(),
             enums: HashMap::new(),
             type_params: Vec::new(),
+            loop_depth: 0,
+            for_iters: HashMap::new(),
         };
         for builtin in BUILTINS {
             let binding = match &builtin.params {
@@ -403,11 +419,13 @@ impl Checker {
             let fields = std::mem::take(&mut self.fields);
             let tries = std::mem::take(&mut self.tries);
             let functions = std::mem::take(&mut self.functions);
+            let for_iters = std::mem::take(&mut self.for_iters);
             return Ok(Types {
                 operands,
                 fields,
                 tries,
                 functions,
+                for_iters,
             });
         }
         errors.sort_by_key(|e| (e.span.start.source, e.span.start.line, e.span.start.col));
@@ -495,13 +513,18 @@ impl Checker {
                 params,
                 body,
                 rtype,
+                native,
                 ..
-            } => Some((name, name_span, params, body, rtype)),
+            } => Some((name, name_span, params, body, rtype, *native)),
             _ => None,
         });
-        for ((name, name_span, params, body, rtype), (param_tys, ret, generics)) in
+        for ((name, name_span, params, body, rtype, native), (param_tys, ret, generics)) in
             fns.clone().zip(&sigs)
         {
+            // A native function has only a signature to check.
+            if native {
+                continue;
+            }
             let ret = ret.clone();
             let ctx = FnContext {
                 name: Some(name.clone()),
@@ -520,7 +543,7 @@ impl Checker {
 
         // Signatures must be written out. Report missing parameter types last,
         // so the suggested annotation can use what the bodies revealed.
-        for ((name, _, params, _, _), (param_tys, _, _)) in fns.zip(&sigs) {
+        for ((name, _, params, _, _, _), (param_tys, _, _)) in fns.zip(&sigs) {
             for (p, t) in params.iter().zip(param_tys) {
                 if p.t.is_some() {
                     continue;
@@ -557,7 +580,10 @@ impl Checker {
         }
         let fallback = ctx.span;
         self.fns.push(ctx);
+        // A loop around a closure isn't one its body can leave.
+        let loops = std::mem::replace(&mut self.loop_depth, 0);
         let found = self.stmt(body);
+        self.loop_depth = loops;
         let span = Self::tail_span(body).unwrap_or(fallback);
         self.check_return(&found, span);
         self.fns.pop();
@@ -734,8 +760,40 @@ impl Checker {
             }
             Statement::While(cond, body) => {
                 self.condition(cond, "while");
+                self.loop_depth += 1;
                 self.stmt(body);
+                self.loop_depth -= 1;
                 Ty::Void
+            }
+            Statement::For { var, iter, body } => {
+                let t = self.expr(iter);
+                let item = self.iter_item(&t, iter.span);
+                self.scopes.push(HashMap::new());
+                self.define(var.name.clone(), item, BindingKind::Loop);
+                self.loop_depth += 1;
+                self.stmt(body);
+                self.loop_depth -= 1;
+                self.scopes.pop();
+                Ty::Void
+            }
+            Statement::Break(span) | Statement::Continue(span) => {
+                if self.loop_depth == 0 {
+                    let word = if matches!(stmt, Statement::Break(_)) {
+                        "break"
+                    } else {
+                        "continue"
+                    };
+                    let mut err = TypeError::new(format!("'{word}' outside a loop"), *span).help(
+                        format!("'{word}' can only be used in a 'while' or 'for' loop"),
+                    );
+                    if self.fns.last().is_some_and(|f| f.name.is_none()) {
+                        err = err.note(
+                            "a closure's body is a function of its own, so it can't leave a loop around it",
+                        );
+                    }
+                    self.error(err);
+                }
+                Ty::Never
             }
             Statement::Return(value) => {
                 let (found, span) = match value {
@@ -747,6 +805,38 @@ impl Checker {
                 };
                 self.check_return(&found, span);
                 Ty::Never
+            }
+        }
+    }
+
+    /// `list[index]`
+    fn index(&mut self, list: &Expr, index: &Expr) -> Ty {
+        let t = self.expr(list);
+        let i = self.expr(index);
+        self.expect(&Ty::Int, &i, index.span, |_, f| {
+            format!("mismatched types: a list's index is an int, found {f}")
+        });
+        match self.resolve(&t) {
+            Ty::Named(n, args) if n == "List" => args[0].clone(),
+            Ty::Error | Ty::Never => Ty::Error,
+            Ty::Var(_) => {
+                self.error(
+                    TypeError::new(
+                        "type annotations needed: the type of this value must be known to index it",
+                        list.span,
+                    )
+                    .help("annotate the variable or parameter it comes from, e.g. `xs: List<int>`"),
+                );
+                self.poison(&[&t]);
+                Ty::Error
+            }
+            other => {
+                let shown = self.show(&other);
+                self.error(
+                    TypeError::new(format!("{shown} can't be indexed"), list.span)
+                        .help("only lists can be indexed, as in `xs[0]`"),
+                );
+                Ty::Error
             }
         }
     }
@@ -846,7 +936,11 @@ impl Checker {
                     }
                     Some(Binding {
                         ty,
-                        kind: kind @ (BindingKind::Let | BindingKind::Param | BindingKind::Pattern),
+                        kind:
+                            kind @ (BindingKind::Let
+                            | BindingKind::Param
+                            | BindingKind::Pattern
+                            | BindingKind::Loop),
                         ..
                     }) => {
                         let (why, help) = match kind {
@@ -858,6 +952,12 @@ impl Checker {
                             ),
                             BindingKind::Param => (
                                 "it is a parameter",
+                                format!(
+                                    "copy it into a mutable variable first: `var {name} = {name};`"
+                                ),
+                            ),
+                            BindingKind::Loop => (
+                                "it is a loop variable",
                                 format!(
                                     "copy it into a mutable variable first: `var {name} = {name};`"
                                 ),
@@ -924,6 +1024,17 @@ impl Checker {
                 Ty::Fn(param_tys, Box::new(ret))
             }
             Expression::Field(obj, name, name_span) => self.field(obj, name, *name_span, span),
+            Expression::List(items) => {
+                let item = self.fresh(Class::Any);
+                for x in items {
+                    let t = self.expr(x);
+                    self.expect(&item, &t, x.span, |e, f| {
+                        format!("mismatched types: this list's values are {e}, but this one is {f}")
+                    });
+                }
+                Ty::Named("List".into(), vec![item])
+            }
+            Expression::Index(list, index) => self.index(list, index),
             Expression::Path(type_name, name) => match self.associated(type_name, name, span) {
                 Some(t) => t,
                 None => self.variant_value(type_name, name, span),

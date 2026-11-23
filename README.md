@@ -84,6 +84,7 @@ parameters. Its return value is not printed; use `println` for output.
 | `str`   | `"hi\n"`                | Escapes: `\n`, `\t`, `\r`, `\\`; join with `+` |
 | `void`  | —                       | Result of statements / no value      |
 | `(int, str) -> bool` | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
+| `List<T>` | `[1, 2, 3]`, `[]`        | Immutable; see [Lists](#lists)       |
 | structs and enums | `Point { x: 1, y: 2 }`, `Shape::Circle(p, 3)` | Defined at the top level; see below |
 
 ### Structs, enums, and `match`
@@ -221,6 +222,76 @@ The prelude gives both types methods:
 | `unwrap_or(default)` | `unwrap_or(default)` |
 | `map(f)`, `and_then(f)` | `map(f)`, `and_then(f)`, `map_err(f)` |
 | `or(other)`, `ok_or(error)` | `ok()` |
+
+### Lists
+
+```rust
+let primes = [2, 3, 5, 7];
+let more = primes.push(11).set(0, 1);   // [1, 3, 5, 7, 11]; primes is unchanged
+println(primes[2], primes.get(10), primes.len());   // 5 None 4
+
+var squares = [];
+for i in 0..10 {
+    squares = squares.push(i * i);
+}
+```
+
+- **A list never changes.** `push`, `set`, `drop_last`, `concat`, and
+  `slice` give a new list and leave the old one as it was, like a struct
+  update. A `var` holding a list can be given the new one:
+  `xs = xs.push(x)`. There is no `xs[i] = v`; write `xs = xs.set(i, v)`.
+- **That's cheap.** A list is a persistent vector (as in Clojure): a tree
+  with 32 values per node, which a new list shares almost all of. Reading,
+  replacing, or adding a value takes a handful of steps whatever the
+  length, so building a list a value at a time is fast.
+- **`xs[i]`** is the value at index `i`, from 0. Out of range, it stops the
+  program, like a division by zero: an index that might be out of range is
+  what `xs.get(i)`, which returns an `Option`, is for.
+- **Methods:** `len`, `is_empty`, `get`, `first`, `last`, `push`, `set`,
+  `drop_last`, `concat`, `slice`, `reverse`, `map`, `filter`, `fold`,
+  `find`, `any`, `all`, `iter`, and `List::repeat(value, count)`.
+  `iter.collect()` makes a list from an `Iter`.
+- `for x in xs` goes over a list's values (directly, without making an
+  `Iter`). Lists compare with `==` value by value, and print as `[1, 2, 3]`.
+- Every value in a list has the same type. An empty `[]` gets its type from
+  how it is used, or from an annotation: `let xs: List<str> = [];`.
+
+### Loops and iterators
+
+```rust
+for i in 0..10 {                 // 0, 1, ..., 9
+    if i % 2 == 0 { continue; }
+    if i > 7 { break; }
+    println(i);
+}
+
+let squares = (1..11).map(fn(n) { n * n });
+println(squares.filter(fn(n) { n % 2 == 0 }).fold(0, fn(a, b) { a + b }));
+```
+
+- **`for x in values { ... }`** runs its body once for each value. `values`
+  is an **`Iter<T>`**, from the prelude, or a value whose type has a method
+  `iter(self) -> Iter<T>`, which the loop calls: that is how a type of your
+  own (or `Option`) can be looped over. `x` is immutable, and a new
+  variable for each value, so closures made in the loop each keep their own.
+- **`a..b`** is the `Iter<int>` from `a` up to, but not including, `b`
+  (`Iter::range(a, b)`). `b` is evaluated once. A `for` loop over a range
+  counts directly, without making an `Iter`.
+- **An `Iter`** wraps a function that gives the next value, or `None` when
+  there are no more: `Iter::new(fn() -> Option<T> { ... })`, keeping its
+  place in a captured `var`. Its methods are `next`, `map`, `filter`,
+  `take`, `skip`, `chain`, `fold`, `count`, `last`, `find`, `any`, and `all`,
+  and `Iter::empty()` and `Iter::once(x)` make small ones. The methods that
+  make a new `Iter` are lazy, so an endless `Iter` is fine as long as
+  something stops it. An `Iter` is used up as it goes, and a copy of it
+  shares its position.
+- In the head of a `for`, as of an `if` or `while`, a struct literal needs
+  parentheses: `for p in (Path { ... }) { ... }`.
+
+There are no traits yet, so `Iter<T>` is a struct rather than a trait, and
+"has a method `iter`" is checked by name. When traits arrive, the loop can
+take any type that implements an iterator trait, and these programs keep
+working.
 
 ### Methods
 
@@ -374,10 +445,14 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 - **`if`:** `if cond { ... } else { ... }` is an expression; `if` without
   `else` is a statement.
 - **`while`:** `while cond { ... }`.
+- **`for`:** `for x in values { ... }` (see [Loops and iterators](#loops-and-iterators)).
+  `break` leaves the innermost `while` or `for` loop, and `continue` starts
+  its next iteration.
 - **Operators** (lowest to highest precedence):
-  `=` → `==` `!=` → `||` → `&&` → `<` `<=` `>` `>=` → `+` `-` → `*` `/` `%`
-  → unary `!` `-` → calls `f(x)(y)`, field access `p.x`, and `?`.
-  `&&` and `||` short-circuit. Integer division or modulo by zero is a
+  `=` → `..` → `||` → `&&` → `==` `!=` → `<` `<=` `>` `>=` → `+` `-` → `*` `/` `%`
+  → unary `!` `-` → calls `f(x)(y)`, field access `p.x`, indexing `xs[i]`,
+  and `?`. As in C and Rust, `a == b && c < d` means
+  `(a == b) && (c < d)`. `&&` and `||` short-circuit. Integer division or modulo by zero is a
   runtime error.
   Arithmetic and comparison require both operands to be the same numeric
   type (no implicit int/float conversion).
@@ -396,7 +471,63 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 To add a built-in, declare its name and signature in `BUILTINS`
 (`src/builtins.rs`), which the type checker reads, and implement it in each
 backend (for the VM, `src/vm/native.rs`). A built-in without an
-implementation fails the tests and stops the VM at startup.
+implementation fails the tests and stops the VM at startup. Built-ins named
+`std::native::...` are the standard library's intrinsics (see below).
+
+### The standard library
+
+The standard library is written in Aja (`src/stdlib/`), built into the
+binary, and imported like any module, by paths starting with `std`. So far
+it has one module, `std::io`:
+
+```rust
+import std::io;
+
+fn main() -> Result<void, io::Error> {
+    let out = io::stdout();
+    out.write("What's your name? ")?;
+    match io::stdin().read_line()? {
+        Some(name) => out.write_line("Hello, " + name + "!"),
+        None => out.write_line("Goodbye!"),
+    }
+}
+```
+
+| `std::io`                          | Does |
+|------------------------------------|------|
+| `stdin()`, `stdout()`, `stderr()`  | A `Reader` or `Writer` for the standard streams |
+| `reader.read_line()`               | `Result<Option<str>, Error>`: the next line without its `\n` or `\r\n`, or `None` at the end of input |
+| `reader.lines()`                   | `Iter<Result<str, Error>>`: each line left, for a `for` loop; a failed read is the last value |
+| `reader.read_to_string()`          | `Result<str, Error>`: everything left |
+| `writer.write(text)`, `writer.write_line(text)` | `Result<void, Error>` |
+| `writer.flush()`                   | Write out buffered output now |
+| `Error { kind, message }`, `ErrorKind` | Why an operation failed: `NotFound`, `PermissionDenied`, `InvalidData`, `BrokenPipe`, `AlreadyExists`, or `Other` |
+
+- Everything that can fail returns a `Result`. **`main` can return a
+  `Result`**, so `?` works there: if it returns an `Err`, the program prints
+  `error: main returned an error: ...` and exits with a failure status.
+- `stdout()` shares its buffer with `print` and `println`, so output comes
+  out in order. Reading standard input flushes standard output first, so a
+  prompt written without a newline shows before the program waits.
+- I/O blocks. There will be no separate asynchronous API; concurrency is to
+  come from green threads.
+- Underneath, the library calls a few **intrinsics** in the module
+  `std::native` (`read_line`, `write`, `flush`, ...), in
+  `src/stdlib/native.aja`. Only the standard library can import it.
+  Intrinsics take and return only `int`, `float`, `bool`, `str`, and
+  `void`, so a backend implements them without knowing Aja's types; one
+  that can fail records a status, which the library turns into a `Result`.
+- **Native code is declared in Aja.** The prelude and standard library can
+  declare `native fn len(self) -> int;` (a function with no body, which each
+  backend implements, in `src/vm/native.rs` for the VM, under the name it
+  is compiled as, such as `List::len`) and `native struct List<T>;` (a type
+  whose values only native functions make). A test checks that the VM
+  implements every one. Programs can't declare either.
+- To add a module, write `src/stdlib/<name>.aja` and list it in `MODULES`
+  in `src/stdlib/mod.rs`.
+
+There are no conversions to strings yet (`int` has no `to_str`), so
+`println` is still the way to show a number.
 
 ## Architecture
 
@@ -414,13 +545,15 @@ files ──► Loader ──► Lexer ──► Parser ──► Resolver ─�
 | `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
 | `src/module/`         | Modules: the loader reads the file being run and every module it imports, rejecting cycles; `resolve.rs` gives each definition a module-qualified name (`geo::shapes::area`), rewrites every use to it, and checks that items used across modules are `pub`. The result is one program for the checker and backends |
 | `src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness, and `methods.rs` checks `impl` blocks and method calls |
-| `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends |
+| `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends, including the standard library's intrinsics (`std::native`) |
+| `src/stdlib/`         | The standard library, written in Aja and built into the binary (`io.aja` is `std::io`) |
 | `src/prelude.aja`, `src/prelude.rs` | The prelude (`Option`, `Result`, and their methods), written in Aja and built into the binary. Locations in it are marked as the prelude's, so errors in code it calls point at the right file |
 | `src/vm/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
 | `src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
 | `src/vm/mod.rs`       | The VM: call frames, the dispatch loop, runtime errors |
 | `src/vm/value.rs`     | Runtime values |
-| `src/vm/heap.rs`      | Garbage-collected heap for closures and cells |
+| `src/vm/heap.rs`      | Garbage-collected heap for closures, cells, strings, struct and enum values, and lists |
+| `src/vm/list.rs`      | Lists: persistent vectors that share structure between versions |
 | `src/vm/native.rs`    | Built-in implementations |
 | `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color), and the source files each location can point into |
 
@@ -467,12 +600,15 @@ the VM forgets to keep reachable is caught.
 **Working:** ints, floats, bools, strings; immutable `let` and mutable
 `var` with lexical scoping; functions and first-class closures; `if`/`else` expressions;
 `while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
+`for` loops over iterators, ranges, `break` and `continue`; immutable lists
+with indexing;
 structs, enums with data, and exhaustive `match`; generic functions, structs, and enums; `Option` and `Result` in the prelude, and `?`; methods and associated functions in `impl` blocks;
-modules, with `import` and `pub`; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
+modules, with `import` and `pub`; the start of the standard library
+(`std::io`); static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 
 **Reserved or partially present, not yet usable:**
-- `<-`, `[` `]` are lexed but have no grammar.
+- `<-` is lexed but has no grammar.
 - There is no native code backend yet; one using Cranelift is planned (see
   [DESIGN.md](DESIGN.md)).
 

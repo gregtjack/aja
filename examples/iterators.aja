@@ -1,0 +1,86 @@
+// `for` loops, ranges, and the prelude's `Iter`.
+
+// A type can be looped over by giving it a method `iter(self) -> Iter<T>`.
+enum Tree {
+    Leaf,
+    Node(Tree, int, Tree),
+}
+
+impl Tree {
+    fn insert(self, x: int) -> Tree {
+        match self {
+            Tree::Leaf => Tree::Node(Tree::Leaf, x, Tree::Leaf),
+            Tree::Node(l, v, r) if x < v => Tree::Node(l.insert(x), v, r),
+            Tree::Node(l, v, r) => Tree::Node(l, v, r.insert(x)),
+        }
+    }
+
+    // The values in order: the left subtree's, this node's, then the right
+    // subtree's.
+    fn iter(self) -> Iter<int> {
+        match self {
+            Tree::Leaf => Iter::empty(),
+            Tree::Node(l, v, r) => l.iter().chain(Iter::once(v)).chain(r.iter()),
+        }
+    }
+}
+
+// The Fibonacci numbers, forever: an `Iter` doesn't have to end.
+fn fibonacci() -> Iter<int> {
+    var a = 0;
+    var b = 1;
+    Iter::new(fn() -> Option<int> {
+        let next = a;
+        a = b;
+        b = next + b;
+        Some(next)
+    })
+}
+
+fn main() {
+    // `a..b` counts from `a` up to, but not including, `b`.
+    for i in 1..4 {
+        print(i, "");
+    }
+    println();
+
+    // `continue` skips to the next value, `break` leaves the loop.
+    for i in 0..100 {
+        if i % 3 != 0 {
+            continue;
+        }
+        if i > 12 {
+            break;
+        }
+        print(i, "");
+    }
+    println();
+
+    // Methods make new iterators lazily: nothing is computed until the loop
+    // asks for it, so an endless one is fine as long as something stops it.
+    let even_fibs = fibonacci().filter(fn(n) { n % 2 == 0 }).take(6);
+    for n in even_fibs {
+        print(n, "");
+    }
+    println();
+
+    let squares = (1..11).map(fn(n) { n * n });
+    println("sum of the first ten squares:", squares.fold(0, fn(a, b) { a + b }));
+    println("first square over 50:", (1..100).map(fn(n) { n * n }).find(fn(n) { n > 50 }));
+    println("any multiple of 7 in 50..55?", (50..55).any(fn(n) { n % 7 == 0 }));
+
+    var tree = Tree::Leaf;
+    for x in (0..10).map(fn(i) { (i * 7) % 10 }) {
+        tree = tree.insert(x);
+    }
+    print("sorted:");
+    for x in tree {
+        print("", x);
+    }
+    println();
+
+    // An `Option` can be looped over too: once if it has a value.
+    for x in Some("found it") {
+        println(x);
+    }
+}

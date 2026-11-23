@@ -5,9 +5,9 @@
 
 struct Pair<A, B> { first: A, second: B }
 
-enum List<T> {
+enum Chain<T> {
     Nil,
-    Cons(T, List<T>),
+    Cons(T, Chain<T>),
 }
 
 // A generic function works for every type its caller chooses. Its body
@@ -16,25 +16,25 @@ fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> {
     Pair { first: p.second, second: p.first }
 }
 
-fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
+fn map<T, U>(xs: Chain<T>, f: (T) -> U) -> Chain<U> {
     match xs {
-        List::Nil => List::Nil,
-        List::Cons(x, rest) => List::Cons(f(x), map(rest, f)),
+        Chain::Nil => Chain::Nil,
+        Chain::Cons(x, rest) => Chain::Cons(f(x), map(rest, f)),
     }
 }
 
-fn fold<T, A>(xs: List<T>, acc: A, f: (A, T) -> A) -> A {
+fn fold<T, A>(xs: Chain<T>, acc: A, f: (A, T) -> A) -> A {
     match xs {
-        List::Nil => acc,
-        List::Cons(x, rest) => fold(rest, f(acc, x), f),
+        Chain::Nil => acc,
+        Chain::Cons(x, rest) => fold(rest, f(acc, x), f),
     }
 }
 
-fn find<T>(xs: List<T>, wanted: (T) -> bool) -> Option<T> {
+fn find<T>(xs: Chain<T>, wanted: (T) -> bool) -> Option<T> {
     match xs {
-        List::Nil => None,
-        List::Cons(x, _) if wanted(x) => Some(x),
-        List::Cons(_, rest) => find(rest, wanted),
+        Chain::Nil => None,
+        Chain::Cons(x, _) if wanted(x) => Some(x),
+        Chain::Cons(_, rest) => find(rest, wanted),
     }
 }
 
@@ -49,7 +49,7 @@ fn main() {
     let p = swap(Pair { first: 1, second: "one" });
     println(p.first, p.second);
 
-    let xs = List::Cons(1, List::Cons(2, List::Cons(3, List::Cons(4, List::Nil))));
+    let xs = Chain::Cons(1, Chain::Cons(2, Chain::Cons(3, Chain::Cons(4, Chain::Nil))));
     let squares = map(xs, fn(x) { x * x });
     println("sum of squares:", fold(squares, 0, fn(acc, x) { acc + x }));
     let words = map(xs, fn(x: int) -> str { if x % 2 == 0 { "even" } else { "odd" } });

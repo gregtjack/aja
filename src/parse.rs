@@ -164,6 +164,46 @@ mod tests {
         }
     }
 
+    /// An expression with its grouping shown by parentheses.
+    fn grouped(src: &str) -> String {
+        fn show(e: &Expr) -> String {
+            match &e.kind {
+                Expression::BinOp(l, op, r) => format!("({} {op} {})", show(l), show(r)),
+                Expression::Unary(crate::ast::Op1::Not, x) => format!("!{}", show(x)),
+                Expression::Unary(crate::ast::Op1::Negate, x) => format!("-{}", show(x)),
+                Expression::Var(v) => v.to_string(),
+                Expression::Int(i) => i.to_string(),
+                Expression::Call(callee, args) => {
+                    let args: Vec<String> = args.iter().map(show).collect();
+                    match &callee.kind {
+                        Expression::Path(t, f) => format!("{t}::{f}({})", args.join(", ")),
+                        _ => format!("{}({})", show(callee), args.join(", ")),
+                    }
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        show(&create_parser(src).parse_expr_only().unwrap())
+    }
+
+    #[test]
+    fn test_operator_precedence() {
+        // Comparisons bind tighter than `&&` and `||`, as in C and Rust.
+        assert_eq!(grouped("a == b && c != d"), "((a == b) && (c != d))");
+        assert_eq!(grouped("a || b && c == d"), "(a || (b && (c == d)))");
+        assert_eq!(grouped("a == b || c < d"), "((a == b) || (c < d))");
+        assert_eq!(grouped("a < b == c > d"), "((a < b) == (c > d))");
+        assert_eq!(grouped("a + b * c == d - e"), "((a + (b * c)) == (d - e))");
+        assert_eq!(grouped("!a == b && -c < d"), "((!a == b) && (-c < d))");
+        // Each level groups from the left.
+        assert_eq!(grouped("a - b - c"), "((a - b) - c)");
+        assert_eq!(grouped("a == b == c"), "((a == b) == c)");
+        assert_eq!(grouped("a && b && c || d"), "(((a && b) && c) || d)");
+        // `..` is the loosest.
+        assert_eq!(grouped("0..n + 1"), "Iter::range(0, (n + 1))");
+        assert_eq!(grouped("a || b..c"), "Iter::range((a || b), c)");
+    }
+
     #[test]
     fn test_parse_assignment() {
         let mut parser = create_parser("x = 42");
@@ -508,6 +548,66 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_for_loops_and_ranges() {
+        let tokens = crate::lexer::tokenize("0..10 1.5 x..y").unwrap();
+        let kinds: Vec<Token> = tokens.into_iter().map(|(_, t, _)| t).collect();
+        assert_eq!(
+            kinds,
+            [
+                Token::Int(0),
+                Token::DotDot,
+                Token::Int(10),
+                Token::Float(1.5),
+                Token::Ident("x".into()),
+                Token::DotDot,
+                Token::Ident("y".into()),
+                Token::Eof
+            ]
+        );
+
+        let mut parser = create_parser("for i in 0..n + 1 { break; continue; }");
+        let Statement::For { var, iter, body } = parser.parse_stmt_only().unwrap() else {
+            panic!("expected a for loop");
+        };
+        assert_eq!(var.name, "i");
+        // `a..b` is a call of `Iter::range`, with the end's arithmetic inside it.
+        let Expression::Call(callee, args) = &iter.kind else {
+            panic!("expected a call, got {iter:?}")
+        };
+        assert!(matches!(&callee.kind, Expression::Path(t, f) if t == "Iter" && f == "range"));
+        assert!(matches!(args[1].kind, Expression::BinOp(..)));
+        assert!(matches!(
+            *body,
+            Statement::Block(ref s, None) if matches!(s[..], [Statement::Break(_), Statement::Continue(_)])
+        ));
+
+        // A for loop needs no ';' after it.
+        assert!(create_parser("fn main() { for i in 0..3 { } let x = 1; }")
+            .parse()
+            .is_ok());
+
+        let err = |src: &str| create_parser(src).parse().unwrap_err();
+        assert!(err("fn main() { for i 0..3 { } }")
+            .help
+            .unwrap()
+            .contains("for i in"));
+        assert_eq!(
+            err("fn main() { for i: int in 0..3 { } }").message,
+            "a loop variable has no type annotation"
+        );
+        assert!(err("fn main() { for i in 0.. { } }")
+            .message
+            .contains("the end of the range"));
+        assert_eq!(
+            err("fn main() { let r = 0..1..2; }").message,
+            "ranges can't be chained"
+        );
+        assert!(err("fn main() { for None in 0..3 { } }")
+            .message
+            .contains("variant"));
+    }
+
+    #[test]
     fn test_parse_empty_program() {
         let mut parser = create_parser("");
         let result = parser.parse().unwrap();
@@ -695,7 +795,8 @@ where
             } else if tok_matches!(
                 self,
                 Token::Fn | Token::Struct | Token::Enum | Token::Impl | Token::Pub
-            ) {
+            ) || self.at_native()
+            {
                 ds.push(self.parse_defn()?);
             } else {
                 break;
@@ -789,6 +890,23 @@ where
         Ok(items)
     }
 
+    /// Whether the next token is `native`. It is a keyword only where a
+    /// definition starts, where a name couldn't be, so it can still be used
+    /// as a name (as in `import std::native;`).
+    fn at_native(&mut self) -> bool {
+        tok_matches!(self, Token::Ident(ref n) if n == "native")
+    }
+
+    /// `native` before a definition or a function in an impl, if it is
+    /// there.
+    fn parse_native(&mut self) -> bool {
+        let native = self.at_native();
+        if native {
+            self.next();
+        }
+        native
+    }
+
     /// `pub` before a definition, a function in an impl, or a field, if it
     /// is there.
     fn parse_pub(&mut self) -> bool {
@@ -809,8 +927,12 @@ where
 
     fn parse_defn(&mut self) -> ParseResult<Definition> {
         let public = self.parse_pub();
+        let native = self.parse_native();
         match self.next() {
-            Some((_, Token::Fn, _)) => self.parse_fn_defn(public),
+            Some((_, Token::Fn, _)) => self.parse_fn_defn(public, native),
+            Some((_, Token::Struct, _)) if native => self.parse_native_struct(public),
+            Some(tok) if native => Err(self
+                .error(Some(tok), "expected 'fn' or 'struct' after 'native'".to_string())),
             Some((_, Token::Struct, _)) => self.parse_struct_defn(public),
             Some((_, Token::Enum, _)) => self.parse_enum_defn(public),
             Some(tok @ (_, Token::Impl, _)) if public => Err(self
@@ -825,10 +947,11 @@ where
         }
     }
 
-    fn parse_fn_defn(&mut self, public: bool) -> ParseResult<Definition> {
-        let m = self.parse_fn(false, public)?;
+    fn parse_fn_defn(&mut self, public: bool, native: bool) -> ParseResult<Definition> {
+        let m = self.parse_fn(false, public, native)?;
         Ok(Definition::Function {
             public,
+            native,
             name: m.name,
             name_span: m.name_span,
             type_params: m.type_params,
@@ -839,7 +962,7 @@ where
     }
 
     /// A function after `fn`; in an `impl` (`in_impl`), it may take `self`.
-    fn parse_fn(&mut self, in_impl: bool, public: bool) -> ParseResult<Method> {
+    fn parse_fn(&mut self, in_impl: bool, public: bool, native: bool) -> ParseResult<Method> {
         if !tok_matches!(self, Token::Ident(_)) {
             return Err(self.expected("a function name after 'fn'"));
         }
@@ -854,10 +977,22 @@ where
         let type_params = self.parse_type_params()?;
         let (params, has_self) = self.parse_params(in_impl)?;
         let rtype = self.parse_fn_return_type_annotation()?;
-        let body = self.parse_block()?;
+        let body = if native {
+            // Implemented by each backend, so it has no body.
+            if !tok_matches!(self, Token::Semicolon) {
+                return Err(self
+                    .expected("';'")
+                    .help("a native function has no body: `native fn len(self) -> int;`"));
+            }
+            self.next();
+            Statement::Block(Vec::new(), None)
+        } else {
+            self.parse_block()?
+        };
 
         Ok(Method {
             public,
+            native,
             name: ident,
             name_span,
             type_params,
@@ -882,13 +1017,14 @@ where
         }
         self.consume(Token::LeftBrace)?;
         let mut methods = Vec::new();
-        while tok_matches!(self, Token::Fn | Token::Pub) {
+        while tok_matches!(self, Token::Fn | Token::Pub) || self.at_native() {
             let public = self.parse_pub();
+            let native = self.parse_native();
             if !tok_matches!(self, Token::Fn) {
-                return Err(self.expected("'fn' after 'pub'"));
+                return Err(self.expected("'fn'"));
             }
             self.next();
-            methods.push(self.parse_fn(true, public)?);
+            methods.push(self.parse_fn(true, public, native)?);
         }
         if !tok_matches!(self, Token::RightBrace) {
             return Err(self
@@ -951,6 +1087,26 @@ where
         Ok(params)
     }
 
+    /// `native struct List<T>;`, after `native struct`.
+    fn parse_native_struct(&mut self, public: bool) -> ParseResult<Definition> {
+        let (name, name_span) = self.parse_type_def_name("struct")?;
+        let type_params = self.parse_type_params()?;
+        if !tok_matches!(self, Token::Semicolon) {
+            return Err(self.expected("';'").help(format!(
+                "a native struct has no fields: `native struct {name};`"
+            )));
+        }
+        self.next();
+        Ok(Definition::Struct {
+            public,
+            native: true,
+            name,
+            name_span,
+            type_params,
+            fields: Vec::new(),
+        })
+    }
+
     /// `struct Name { field: type, ... }`
     fn parse_struct_defn(&mut self, public: bool) -> ParseResult<Definition> {
         let (name, name_span) = self.parse_type_def_name("struct")?;
@@ -993,6 +1149,7 @@ where
         self.consume(Token::RightBrace)?;
         Ok(Definition::Struct {
             public,
+            native: false,
             name,
             name_span,
             type_params,
@@ -1161,6 +1318,16 @@ where
             Token::Return => self.parse_return(),
             Token::If => self.parse_if_stmt(),
             Token::While => self.parse_while(),
+            Token::For => self.parse_for(),
+            Token::Break | Token::Continue => {
+                let (start, tok, end) = self.next().unwrap();
+                let span = Span::new(start, end);
+                Ok(if tok == Token::Break {
+                    Statement::Break(span)
+                } else {
+                    Statement::Continue(span)
+                })
+            }
             _ => self.parse_stmt_expr(),
         }
     }
@@ -1195,6 +1362,10 @@ where
                 match self.peek() {
                     Some((_, tt, _)) if *tt == sep => {
                         self.next();
+                        // A trailing separator: `[1, 2,]`.
+                        if self.matches(vec![close.clone()]) {
+                            break;
+                        }
                     }
                     _ => break,
                 }
@@ -1266,6 +1437,7 @@ where
                     })
                     | Statement::If(..)
                     | Statement::While(..)
+                    | Statement::For { .. }
                     | Statement::Block(..) => stmts.push(stmt),
                     _ => return Err(self.missing_semicolon()),
                 };
@@ -1312,6 +1484,43 @@ where
         Ok(Statement::While(e, Box::new(s1)))
     }
 
+    /// `for x in iter { ... }`
+    fn parse_for(&mut self) -> ParseResult<Statement> {
+        self.consume(Token::For)?;
+        let tok = self.peek().cloned();
+        let var = match tok.clone() {
+            Some((start, Token::Ident(name), end)) => {
+                self.next();
+                self.check_new_name(tok, &name, "a loop variable")?;
+                Variable::new(name, None, Span::new(start, end))
+            }
+            _ => {
+                return Err(self
+                    .expected("a name after 'for'")
+                    .help("a for loop names each value: `for x in 0..10 { ... }`"))
+            }
+        };
+        if tok_matches!(self, Token::Colon) {
+            let tok = self.peek().cloned();
+            return Err(self
+                .error(tok, "a loop variable has no type annotation".to_string())
+                .help("its type is the type of the values being looped over"));
+        }
+        if !tok_matches!(self, Token::In) {
+            return Err(self
+                .expected("'in'")
+                .help(format!("write `for {} in values {{ ... }}`", var.name)));
+        }
+        self.next();
+        let iter = self.parse_head()?;
+        let body = self.parse_body()?;
+        Ok(Statement::For {
+            var,
+            iter,
+            body: Box::new(body),
+        })
+    }
+
     fn parse_if_expr(&mut self) -> ParseResult<Expr> {
         let (start, _, _) = self.consume(Token::If)?;
         let e1 = self.parse_head()?;
@@ -1325,8 +1534,13 @@ where
         ))
     }
 
+    // Binary operators, from the loosest to the tightest: `..`, `||`, `&&`,
+    // `==` and `!=`, the orderings, `+` and `-`, then `*`, `/`, and `%`. So
+    // `a == b && c < d + 1` means `(a == b) && (c < (d + 1))`, as in C,
+    // Rust, Go, and Swift.
+
     fn parse_assignment(&mut self) -> ParseResult<Expr> {
-        let expr = self.parse_equality()?;
+        let expr = self.parse_range()?;
 
         if tok_matches!(self, Token::Equal) {
             self.consume(Token::Equal)?;
@@ -1337,6 +1551,14 @@ where
                 Expression::Var(v) => {
                     let span = expr.span.to(value.span);
                     return Ok(Expr::new(Expression::Assign(v, Box::new(value)), span));
+                }
+                Expression::Index(list, index) => {
+                    let (l, i) = (snippet(&list), snippet(&index));
+                    return Err(self
+                        .error(equals.clone(), "cannot assign to an element of a list".to_string())
+                        .help(format!(
+                            "lists can't be changed; make a new one instead: `{l} = {l}.set({i}, ...)`"
+                        )));
                 }
                 Expression::Field(..) => {
                     return Err(self
@@ -1357,12 +1579,47 @@ where
         Ok(expr)
     }
 
+    /// `start..end`, which means `Iter::range(start, end)`: the ints from
+    /// `start` up to, but not including, `end`.
+    fn parse_range(&mut self) -> ParseResult<Expr> {
+        let start = self.parse_logical_or()?;
+        if !tok_matches!(self, Token::DotDot) {
+            return Ok(start);
+        }
+        let (dots_start, _, dots_end) = self.next().unwrap();
+        if tok_matches!(
+            self,
+            Token::LeftBrace | Token::RightParen | Token::Semicolon | Token::Comma
+        ) {
+            return Err(self
+                .expected("the end of the range")
+                .help("a range has a start and an end: `0..n`"));
+        }
+        let end = self.parse_logical_or()?;
+        if tok_matches!(self, Token::DotDot) {
+            let tok = self.peek().cloned();
+            return Err(self
+                .error(tok, "ranges can't be chained".to_string())
+                .help("write one range, `a..b`"));
+        }
+        let span = start.span.to(end.span);
+        // The callee's span is the `..`, which no other expression has.
+        let callee = Expr::new(
+            Expression::Path("Iter".into(), "range".into()),
+            Span::new(dots_start, dots_end),
+        );
+        Ok(Expr::new(
+            Expression::Call(Box::new(callee), vec![start, end]),
+            span,
+        ))
+    }
+
     fn parse_equality(&mut self) -> ParseResult<Expr> {
-        let mut expr = self.parse_logical_or()?;
+        let mut expr = self.parse_comparison()?;
 
         while self.matches(vec![Token::EqualEqual, Token::BangEqual]) {
             let op = self.next().unwrap();
-            let right = self.parse_logical_or()?;
+            let right = self.parse_comparison()?;
             expr = Self::binop(expr, op.1, right)
         }
 
@@ -1382,11 +1639,11 @@ where
     }
 
     fn parse_logical_and(&mut self) -> ParseResult<Expr> {
-        let mut expr = self.parse_comparison()?;
+        let mut expr = self.parse_equality()?;
 
         while tok_matches!(self, Token::And) {
             let op = self.next().unwrap();
-            let right = self.parse_comparison()?;
+            let right = self.parse_equality()?;
             expr = Self::binop(expr, op.1, right)
         }
 
@@ -1482,6 +1739,12 @@ where
                 self.next();
                 let span = Span::new(expr.span.start, self.last_end());
                 expr = Expr::new(Expression::Try(Box::new(expr)), span);
+            } else if tok_matches!(self, Token::LeftBracket) {
+                self.next();
+                let index = self.with_structs(true, |p| p.parse_expr())?;
+                self.consume(Token::RightBracket)?;
+                let span = Span::new(expr.span.start, self.last_end());
+                expr = Expr::new(Expression::Index(Box::new(expr), Box::new(index)), span);
             } else {
                 break;
             }
@@ -1540,6 +1803,11 @@ where
                     }
                     _ => Expression::Var(var),
                 }
+            }
+            Token::LeftBracket => {
+                let items =
+                    self.parse_expr_seq(Token::LeftBracket, Token::Comma, Token::RightBracket)?;
+                Expression::List(items)
             }
             Token::LeftParen => {
                 self.next();
@@ -2057,5 +2325,15 @@ where
         err.start = err.end;
         err.end.col += 1;
         err.help("add ';' at the end of the statement")
+    }
+}
+
+/// How a simple expression is written, for suggestions: a variable's name
+/// or a literal, and `...` for anything else.
+fn snippet(e: &Expr) -> String {
+    match &e.kind {
+        Expression::Var(name) => name.to_string(),
+        Expression::Int(i) => i.to_string(),
+        _ => "...".to_string(),
     }
 }

@@ -1,7 +1,5 @@
 use std::fmt;
 
-use crate::builtins::Builtin;
-
 use super::{heap::Gc, native::NativeFn};
 
 /// A value in a register, global, or cell.
@@ -21,8 +19,12 @@ pub enum Value {
     Fn(Gc),
     /// A struct or enum value on the heap.
     Data(Gc),
-    /// A built-in: its signature and the VM's implementation.
-    Native(&'static Builtin, NativeFn),
+    /// A list on the heap.
+    List(Gc),
+    /// A function implemented by the VM: a built-in, or one declared
+    /// `native` in the prelude or standard library. Its name, and its
+    /// implementation.
+    Native(&'static str, NativeFn),
     /// A local variable captured by a closure, as a cell on the heap. Cells
     /// only appear in the registers of the function that declared the
     /// variable; programs never see them as values.
@@ -33,7 +35,11 @@ impl Value {
     /// The heap object this value refers to, if any.
     pub fn handle(&self) -> Option<Gc> {
         match self {
-            Value::Str(gc) | Value::Fn(gc) | Value::Cell(gc) | Value::Data(gc) => Some(*gc),
+            Value::Str(gc)
+            | Value::Fn(gc)
+            | Value::Cell(gc)
+            | Value::Data(gc)
+            | Value::List(gc) => Some(*gc),
             _ => None,
         }
     }
@@ -49,7 +55,8 @@ impl fmt::Debug for Value {
             Value::Str(gc) => write!(f, "Str({gc})"),
             Value::Fn(gc) => write!(f, "Fn({gc})"),
             Value::Data(gc) => write!(f, "Data({gc})"),
-            Value::Native(b, _) => write!(f, "Native({})", b.name),
+            Value::List(gc) => write!(f, "List({gc})"),
+            Value::Native(name, _) => write!(f, "Native({name})"),
             Value::Cell(gc) => write!(f, "Cell({gc})"),
         }
     }

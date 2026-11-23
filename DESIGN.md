@@ -166,7 +166,7 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
   to be a file or an item. A module is used through the last name of its
   path, so two modules imported whole can't share a last name; import
   what's needed from one of them by name instead. (Rules 5, 10)
-- **A small prelude.** `Option`, `Result`, `Some`, `None`, `Ok`, `Err`, `List`,
+- **A small prelude.** `Option`, `Result`, `Iter`, `Some`, `None`, `Ok`, `Err`, `List`,
   `print`, `println`, `assert`, and `panic` are in scope everywhere. Everything
   else needs an `import`.
 - **One package layout.** A package is a directory with an `aja.toml` and a
@@ -186,10 +186,22 @@ errors as values.
   operations Aja can't express) is implemented natively, and each backend
   implements just that set. This keeps the VM and the Cranelift backend in
   step, and makes the library the largest test of the language.
+  The intrinsics are declared in Aja, as `native fn`s with no body, in the
+  module `std::native`, which only the standard library can import.
+  They take and return only `int`, `float`, `bool`, `str`, and `void`, so a
+  backend implements them without knowing how Aja lays out structs and
+  enums. One that can fail records a status and message, which the library
+  reads straight after the call (`std::native::status`) and turns into a
+  `Result`. That status is per thread today and must be per task once green
+  threads arrive. The prelude declares its own `native fn`s (the methods of
+  `List`) and `native struct`s (`List`), whose values a backend represents
+  however it likes; programs can declare neither.
 - **Embedded in the compiler.** The library is built into the `aja` binary and
   versioned with it, so it works with nothing to install.
 - **Fallible functions return `Result`.** Functions that panic on bad input are
   for bugs, and say so in their names (`unwrap`, `expect`). (Rule 3)
+  `main` may return a `Result` too, so `?` works there, and an `Err` from
+  it fails the program with the error.
 - **I/O is blocking.** Concurrency comes from green threads, so `fs::read`
   simply blocks its task. No API has a separate async form, and none needs to
   change when the scheduler arrives. (Rule 8)
@@ -210,12 +222,13 @@ The library grows in layers:
 
 Before most of this can be written, the language needs:
 
-1. **Generics** ✅, for `Option<T>`, `Result<T, E>`, `List<T>`, and `Map<K, V>`.
+1. **Generics** ✅, for `Option<T>`, `Result<T, E>`, `List<T>` ✅, and `Map<K, V>`.
 2. **Methods** ✅ (`impl` blocks), so that `s.trim().split(",")` reads left to
    right and editors and agents can discover an API by typing `.`.
 3. **A few traits**: `Eq`, `Hash`, `Ord`, and `Show`, which map keys, sorting,
    and printing need.
-4. **A `for` loop** over an `Iter` trait.
+4. **A `for` loop** ✅ over an `Iter` (for now a prelude struct wrapping a
+   "next value" function, until there are traits; see the open question).
 
 `int` is 64-bit, so lengths, file sizes, and millisecond timestamps all fit
 in it, and library signatures use `int` for them. `float` is 64-bit too
@@ -247,7 +260,8 @@ by a number with a fractional part.
    doubled. String literals are allocated once and kept as roots; strings
    built at runtime (with `+`) are collected. Nothing is reference-counted.
 5. **Language features for libraries.** Generics ✅, methods ✅, the core traits,
-   and `for` loops (see [The standard library](#the-standard-library)).
+   and `for` loops ✅ with `break` and `continue` (see
+   [The standard library](#the-standard-library)).
 6. **Modules and packages.** `import` ✅, `pub` ✅ (on functions, types,
    methods, and fields), cycle errors ✅, the prelude, `aja.toml`, and the
    `aja` tool (see [Modules and packages](#modules-and-packages)). For now
@@ -258,6 +272,8 @@ by a number with a fractional part.
    against its imports' signatures, for incremental and parallel checking,
    can replace that without changing the language.
 7. **Standard library**, layer by layer, starting with the prelude and core.
+   Started: the library is embedded and imported as `std::...` ✅, the
+   intrinsics layer ✅, and `std::io` (standard input, output, and error) ✅.
 8. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
    server.
 9. **Green threads and structured concurrency** in the VM.
@@ -269,11 +285,19 @@ by a number with a fractional part.
 - **Sized integers.** `int` is 64-bit. Do sized types (`i8` … `u64`) arrive
   as well, for binary formats and interop, and how do conversions between
   them look without being implicit (rule 4)?
-- **Indexing.** `[` is lexed but has no grammar. Does `xs[i]` exist, and if so
-  does it panic when out of range (with `xs.get(i)` returning `Option`)?
+- **Indexing** (decided). `xs[i]` exists for lists and stops the program
+  when `i` is out of range, as division by zero does: an index that might be
+  out of range is a job for `xs.get(i)`, which returns an `Option`. Lists
+  are immutable, so there is no `xs[i] = v`.
 - **String interpolation.** `"x = {x}"` is much easier to write than
   concatenation, but it calls `Show` implicitly. Is that hidden control flow
   (rule 4), or acceptable because `Show` is meant to have no side effects?
+- **`Iter` as a trait.** A `for` loop takes an `Iter<T>`, a struct around a
+  closure, or a value with a method `iter(self) -> Iter<T>`, found by name.
+  With traits, should the loop take anything implementing an `Iter` trait
+  (so iterators can be structs with their own state and no closure), and
+  does the `iter` method become an `IntoIter` trait? Programs written today
+  would keep working either way.
 - **User-defined traits.** Do traits start as a fixed built-in set (`Eq`,
   `Hash`, `Ord`, `Show`, `Iter`), or can programs define their own from the
   start?
@@ -286,8 +310,11 @@ by a number with a fractional part.
   (`none::<int>()`) ever needed, and does it fit "one way to do it"?
 - **Methods on built-in types.** `s.len()` and `n.abs()` need `impl str` and
   `impl int` in the prelude, and bodies for some of them that only the
-  runtime can provide. How does the prelude declare a natively implemented
-  function (the thin native layer the standard library sits on), so each
-  backend knows to supply it?
+  runtime can provide. The prelude can now declare `native fn`s, so the
+  bodies are solved; what's left is how an `impl int` is allowed there when
+  impls must be next to their type.
+- **A `void` value.** `Ok(...)` of a `Result<void, E>` can only be written
+  by calling a `void` function (`Ok(write(...))`); there is no literal for
+  "nothing". Does `void` get one, and what is it written as?
 - **Strings.** UTF-8 everywhere, and is indexing by byte, by code point, or not
   allowed at all?

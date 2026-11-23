@@ -22,7 +22,7 @@ use crate::{
     },
     builtins::BUILTINS,
     diagnostic::{closest_match, Diagnostic},
-    prelude,
+    prelude, stdlib,
 };
 
 /// A function, struct, or enum defined at the top level of a module.
@@ -221,6 +221,24 @@ impl<'a> Resolver<'a> {
             let Some(&target) = self.index.get(&path) else {
                 continue;
             };
+            if path.len() == 2 && path[0] == "std" && path[1] == stdlib::NATIVE && !module.is_std()
+            {
+                self.error(
+                    format!(
+                        "module '{}' is internal to the standard library",
+                        super::path_name(&path)
+                    ),
+                    import.path_span(),
+                    "use the standard library modules built on it, such as `std::io`",
+                );
+                match &import.items {
+                    None => {
+                        self.poisoned.insert(path[1].clone());
+                    }
+                    Some(items) => self.poisoned.extend(items.iter().map(|(n, _)| n.clone())),
+                }
+                continue;
+            }
             match &import.items {
                 None => {
                     let (alias, span) = import.path.last().expect("an import names a module");
@@ -417,6 +435,7 @@ impl<'a> Resolver<'a> {
                     .cloned()
                     .unwrap_or_else(|| name.clone()),
             ),
+            [module, _] if self.poisoned.contains(module) => None,
             [module, item] => match self.aliases.get(module).copied() {
                 Some(m) => self.module_item(m, &item.into(), true, span),
                 // `Shape::Circle` where a type is expected: the checker
@@ -510,7 +529,33 @@ impl<'a> Resolver<'a> {
 
     // ---- Definitions -------------------------------------------------------------
 
+    /// Report a `native` definition outside the standard library.
+    fn native_here(&mut self, native: bool, span: Span) {
+        let path = &self.paths[self.this];
+        if native && !(path.len() > 1 && path[0] == "std") {
+            self.error(
+                "only the standard library can declare native functions and types",
+                span,
+                "write the function in Aja, with a body",
+            );
+        }
+    }
+
     fn definition(&mut self, def: &mut Definition) {
+        match def {
+            Definition::Function {
+                native, name_span, ..
+            }
+            | Definition::Struct {
+                native, name_span, ..
+            } => self.native_here(*native, *name_span),
+            Definition::Impl { methods, .. } => {
+                for m in methods.iter() {
+                    self.native_here(m.native, m.name_span);
+                }
+            }
+            Definition::Enum { .. } => {}
+        }
         match def {
             Definition::Function {
                 name,
@@ -658,6 +703,14 @@ impl<'a> Resolver<'a> {
                     self.expr(e);
                 }
             }
+            Statement::For { var, iter, body } => {
+                self.expr(iter);
+                self.scoped(|r| {
+                    r.bind(&var.name);
+                    r.stmt(body);
+                });
+            }
+            Statement::Break(_) | Statement::Continue(_) => {}
         }
     }
 
@@ -722,6 +775,15 @@ impl<'a> Resolver<'a> {
                 });
             }
             Expression::Field(obj, _, _) => self.expr(obj),
+            Expression::List(items) => {
+                for x in items {
+                    self.expr(x);
+                }
+            }
+            Expression::Index(list, index) => {
+                self.expr(list);
+                self.expr(index);
+            }
             Expression::Path(prefix, last) => {
                 if let Some(kind) = self.path(prefix, last, span) {
                     e.kind = kind;

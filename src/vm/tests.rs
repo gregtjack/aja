@@ -88,17 +88,17 @@ fn comparisons() {
         "Bool(false)"
     );
     assert_eq!(main_value("bool", "1.5 < 2.5 && 2.5 > 1.5"), "Bool(true)");
-    assert_eq!(main_value("bool", "(1 == 1) && (1 != 2)"), "Bool(true)");
+    assert_eq!(main_value("bool", "1 == 1 && 1 != 2"), "Bool(true)");
     assert_eq!(
-        main_value("bool", "(1.5 == 1.5) && (1.5 != 2.5)"),
+        main_value("bool", "1.5 == 1.5 && 1.5 != 2.5"),
         "Bool(true)"
     );
     assert_eq!(
-        main_value("bool", "(true == true) && (true != false)"),
+        main_value("bool", "true == true && true != false"),
         "Bool(true)"
     );
     assert_eq!(
-        main_value("bool", "(\"ab\" == \"ab\") && (\"ab\" != \"b\")"),
+        main_value("bool", "\"ab\" == \"ab\" && \"ab\" != \"b\""),
         "Bool(true)"
     );
     assert_eq!(main_value("bool", "!(1 == 2)"), "Bool(true)");
@@ -304,7 +304,7 @@ fn each_counter_has_its_own_variable() {
 }
 
 /// How many `NewCell` instructions a program compiles to, in all its
-/// functions and the closures in them.
+/// functions and the closures in them (not counting the prelude's).
 fn cells_made(src: &str) -> usize {
     fn count(p: &Proto) -> usize {
         let here = p
@@ -319,7 +319,16 @@ fn cells_made(src: &str) -> usize {
         .unwrap();
     let types = check::check_program(&ast).unwrap();
     let program = Compiler::new().program(&ast, &types).unwrap();
-    program.functions.iter().map(|(_, p)| count(p)).sum()
+    program
+        .functions
+        .iter()
+        .filter(|(_, p)| {
+            p.spans
+                .first()
+                .is_some_and(|s| s.start.source != crate::ast::Source::Prelude)
+        })
+        .map(|(_, p)| count(p))
+        .sum()
 }
 
 #[test]
@@ -702,8 +711,8 @@ fn collection_runs_without_stress_mode() {
 const DATA: &str = "
 struct Point { x: int, y: int }
 enum Shape { Circle(Point, int), Rect(Point, Point), Empty }
-enum List { Nil, Cons(int, List) }
-fn range(n: int) -> List { var n = n; var l = List::Nil; while n > 0 { n = n - 1; l = List::Cons(n, l); } l }
+enum Seq { Nil, Cons(int, Seq) }
+fn range(n: int) -> Seq { var n = n; var l = Seq::Nil; while n > 0 { n = n - 1; l = Seq::Cons(n, l); } l }
 ";
 
 /// The value `main` returns, shown as `print` shows it, with the
@@ -771,8 +780,8 @@ fn enums_are_built_and_shown() {
         "Shape::Rect(Point { x: 0, y: 0 }, Point { x: 2, y: 3 })"
     );
     assert_eq!(
-        data_value("List", "range(3)"),
-        "List::Cons(0, List::Cons(1, List::Cons(2, List::Nil)))"
+        data_value("Seq", "range(3)"),
+        "Seq::Cons(0, Seq::Cons(1, Seq::Cons(2, Seq::Nil)))"
     );
     // Strings inside a value are quoted, so `\"1\"` and `1` look different.
     let src = "enum E { S(str) } fn main() -> E { E::S(\"hi\") }";
@@ -839,14 +848,14 @@ fn match_on_literals() {
 
 #[test]
 fn nested_patterns() {
-    let src = "fn second(l: List) -> int {
+    let src = "fn second(l: Seq) -> int {
                    match l {
-                       List::Cons(_, List::Cons(x, _)) => x,
-                       List::Cons(x, List::Nil) => -x,
-                       List::Nil => -100,
+                       Seq::Cons(_, Seq::Cons(x, _)) => x,
+                       Seq::Cons(x, Seq::Nil) => -x,
+                       Seq::Nil => -100,
                    }
                }
-               fn main() -> int { second(range(5)) * 100 + second(List::Cons(7, List::Nil)) * 10 + second(List::Nil) }";
+               fn main() -> int { second(range(5)) * 100 + second(Seq::Cons(7, Seq::Nil)) * 10 + second(Seq::Nil) }";
     assert_eq!(value(&format!("{DATA} {src}")), "Int(-70)");
 }
 
@@ -874,14 +883,14 @@ fn match_is_an_expression_and_a_statement() {
 
 #[test]
 fn guards_see_bindings_and_fall_through() {
-    let src = "fn classify(l: List) -> int {
+    let src = "fn classify(l: Seq) -> int {
                    match l {
-                       List::Cons(n, _) if n > 10 => 2,
-                       List::Cons(n, _) if n > 0 => 1,
+                       Seq::Cons(n, _) if n > 10 => 2,
+                       Seq::Cons(n, _) if n > 0 => 1,
                        _ => 0,
                    }
                }
-               fn main() -> int { classify(List::Cons(50, List::Nil)) * 100 + classify(List::Cons(5, List::Nil)) * 10 + classify(List::Cons(-1, List::Nil)) }";
+               fn main() -> int { classify(Seq::Cons(50, Seq::Nil)) * 100 + classify(Seq::Cons(5, Seq::Nil)) * 10 + classify(Seq::Cons(-1, Seq::Nil)) }";
     assert_eq!(value(&format!("{DATA} {src}")), "Int(210)");
     // A guard that changes the value matched on doesn't change what later arms see.
     let src = "fn main() -> int {
@@ -894,16 +903,16 @@ fn guards_see_bindings_and_fall_through() {
 
 #[test]
 fn closures_capture_pattern_bindings() {
-    let src = "fn adder(l: List) -> (int) -> int {
-                   match l { List::Cons(n, _) => fn(x) { x + n }, List::Nil => fn(x) { x } }
+    let src = "fn adder(l: Seq) -> (int) -> int {
+                   match l { Seq::Cons(n, _) => fn(x) { x + n }, Seq::Nil => fn(x) { x } }
                }
-               fn main() -> int { let f = adder(List::Cons(40, List::Nil)); f(2) }";
+               fn main() -> int { let f = adder(Seq::Cons(40, Seq::Nil)); f(2) }";
     assert_eq!(value(&format!("{DATA} {src}")), "Int(42)");
 }
 
 #[test]
 fn match_arms_are_tail_positions() {
-    let src = "fn len(l: List, acc: int) -> int { match l { List::Nil => acc, List::Cons(_, t) => len(t, acc + 1) } }
+    let src = "fn len(l: Seq, acc: int) -> int { match l { Seq::Nil => acc, Seq::Cons(_, t) => len(t, acc + 1) } }
                fn main() -> int { len(range(100000), 0) }";
     assert_eq!(
         format!("{:?}", run_limited(&format!("{DATA} {src}"), 4096).unwrap()),
@@ -948,12 +957,9 @@ fn long_lists_are_compared_and_shown_without_deep_recursion() {
         let v = vm.run_program(&program).unwrap();
         vm.heap.display(&v)
     };
-    let shown = run("List", "range(200000)");
-    assert!(shown.starts_with("List::Cons(0, List::Cons(1, "));
-    assert!(shown.ends_with(&format!(
-        "List::Cons(199999, List::Nil{}",
-        ")".repeat(200000)
-    )));
+    let shown = run("Seq", "range(200000)");
+    assert!(shown.starts_with("Seq::Cons(0, Seq::Cons(1, "));
+    assert!(shown.ends_with(&format!("Seq::Cons(199999, Seq::Nil{}", ")".repeat(200000))));
     assert_eq!(run("bool", "range(200000) == range(200000)"), "true");
 }
 
@@ -965,8 +971,8 @@ fn struct_and_enum_values_are_collected() {
         "{DATA} fn main() {{
              var i = 0;
              var keep = range(10);
-             while i < 20 {{ range(50); keep = List::Cons(i, keep); i = i + 1; }}
-             assert(keep != List::Nil);
+             while i < 20 {{ range(50); keep = Seq::Cons(i, keep); i = i + 1; }}
+             assert(keep != Seq::Nil);
          }}"
     );
     let idle = format!("{DATA} fn main() {{ }}");
@@ -1000,18 +1006,14 @@ fn if_expressions_can_be_assigned() {
     );
 }
 
-/// Run an Aja source file through every stage, returning the messages of
-/// the errors that stopped it.
+/// Run an Aja source file through every stage, as `main` does (so it can
+/// import the standard library), returning the messages of the errors that
+/// stopped it.
 fn run_source(src: &str) -> Result<(), Vec<String>> {
-    let tokens = tokenize(src).map_err(|e| vec![e.to_diagnostic().message])?;
-    let ast = Parser::new(tokens.into_iter())
-        .parse()
-        .map_err(|e| vec![e.to_diagnostic().message])?;
-    let types = check::check_program(&ast)
-        .map_err(|errors| errors.into_iter().map(|e| e.message).collect::<Vec<_>>())?;
-    let program = Compiler::new()
-        .program(&ast, &types)
-        .map_err(|d| vec![d.message])?;
+    let root: std::collections::HashMap<String, String> =
+        [("main.aja".to_string(), src.to_string())].into();
+    let (_, program) = crate::module::build(&root, "main.aja");
+    let program = program.map_err(|es| es.into_iter().map(|e| e.message).collect::<Vec<_>>())?;
     Vm::new()
         .run_program(&program)
         .map_err(|e| vec![e.message])?;
@@ -1211,18 +1213,18 @@ fn repl_literals_are_kept_and_renumbered_after_a_failed_input() {
 
 #[test]
 fn generic_code_runs() {
-    let types = "enum List<T> { Nil, Cons(T, List<T>) }
+    let types = "enum Seq<T> { Nil, Cons(T, Seq<T>) }
                  struct Pair<A, B> { first: A, second: B }
-                 fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
-                     match xs { List::Nil => List::Nil, List::Cons(x, rest) => List::Cons(f(x), map(rest, f)) }
+                 fn map<T, U>(xs: Seq<T>, f: (T) -> U) -> Seq<U> {
+                     match xs { Seq::Nil => Seq::Nil, Seq::Cons(x, rest) => Seq::Cons(f(x), map(rest, f)) }
                  }
-                 fn fold<T, A>(xs: List<T>, acc: A, f: (A, T) -> A) -> A {
-                     match xs { List::Nil => acc, List::Cons(x, rest) => fold(rest, f(acc, x), f) }
+                 fn fold<T, A>(xs: Seq<T>, acc: A, f: (A, T) -> A) -> A {
+                     match xs { Seq::Nil => acc, Seq::Cons(x, rest) => fold(rest, f(acc, x), f) }
                  }
                  fn get<T>(o: Option<T>, d: T) -> T { match o { Some(x) => x, None => d } }";
     let main = |ret: &str, body: &str| value(&format!("{types} fn main() -> {ret} {{ {body} }}"));
 
-    let xs = "List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))";
+    let xs = "Seq::Cons(1, Seq::Cons(2, Seq::Cons(3, Seq::Nil)))";
     assert_eq!(
         main(
             "int",
@@ -1249,9 +1251,9 @@ fn generic_code_runs() {
     assert_eq!(main("bool", "Some(1) == None"), "Bool(false)");
     // Generic recursion in tail position runs in constant space.
     let src = format!(
-        "{types} fn count<T>(xs: List<T>, n: int) -> int {{ match xs {{ List::Nil => n, List::Cons(_, t) => count(t, n + 1) }} }}
-         fn build(n: int, acc: List<bool>) -> List<bool> {{ if n == 0 {{ acc }} else {{ build(n - 1, List::Cons(true, acc)) }} }}
-         fn main() -> int {{ count(build(100000, List::Nil), 0) }}"
+        "{types} fn count<T>(xs: Seq<T>, n: int) -> int {{ match xs {{ Seq::Nil => n, Seq::Cons(_, t) => count(t, n + 1) }} }}
+         fn build(n: int, acc: Seq<bool>) -> Seq<bool> {{ if n == 0 {{ acc }} else {{ build(n - 1, Seq::Cons(true, acc)) }} }}
+         fn main() -> int {{ count(build(100000, Seq::Nil), 0) }}"
     );
     assert_eq!(
         format!("{:?}", run_limited(&src, 4096).unwrap()),
@@ -1279,7 +1281,7 @@ fn question_mark_returns_early() {
     assert_eq!(
         main(
             "bool",
-            "(first(Some(4)) == Some(40)) && (first(None) == None)"
+            "first(Some(4)) == Some(40) && first(None) == None"
         ),
         "Bool(true)"
     );
@@ -1308,13 +1310,13 @@ fn methods_run() {
                    fn add(self, o: Point) -> Point { Point { x: self.x + o.x, y: self.y + o.y } }
                    fn sum(self) -> int { self.x + self.y }
                }
-               enum List<T> { Nil, Cons(T, List<T>) }
-               impl<T> List<T> {
+               enum Seq<T> { Nil, Cons(T, Seq<T>) }
+               impl<T> Seq<T> {
                    fn len(self) -> int { self.count(0) }
-                   fn count(self, n: int) -> int { match self { List::Nil => n, List::Cons(_, t) => t.count(n + 1) } }
-                   fn push(self, x: T) -> List<T> { List::Cons(x, self) }
+                   fn count(self, n: int) -> int { match self { Seq::Nil => n, Seq::Cons(_, t) => t.count(n + 1) } }
+                   fn push(self, x: T) -> Seq<T> { Seq::Cons(x, self) }
                }
-               fn build(n: int, acc: List<int>) -> List<int> { if n == 0 { acc } else { build(n - 1, acc.push(n)) } }";
+               fn build(n: int, acc: Seq<int>) -> Seq<int> { if n == 0 { acc } else { build(n - 1, acc.push(n)) } }";
     let main = |ret: &str, body: &str| value(&format!("{src} fn main() -> {ret} {{ {body} }}"));
     assert_eq!(
         main(
@@ -1330,7 +1332,7 @@ fn methods_run() {
         "Int(12)"
     );
     // A method calling itself in tail position runs in constant space.
-    let deep = format!("{src} fn main() -> int {{ build(100000, List::Nil).len() }}");
+    let deep = format!("{src} fn main() -> int {{ build(100000, Seq::Nil).len() }}");
     assert_eq!(
         format!("{:?}", run_limited(&deep, 4096).unwrap()),
         "Int(100000)"
@@ -1348,7 +1350,7 @@ fn prelude_methods_run() {
         "Int(42)"
     );
     assert_eq!(
-        main("bool", "Some(1).is_some() && (None.or(Some(2)) == Some(2))"),
+        main("bool", "Some(1).is_some() && None.or(Some(2)) == Some(2)"),
         "Bool(true)"
     );
     let parse =
@@ -1374,5 +1376,398 @@ fn errors_in_closures_called_by_the_prelude_say_so() {
     assert_eq!(
         notes[1],
         "in function 'Option::map', called at line 1, column 21"
+    );
+}
+
+// ---- Loops and iterators ---------------------------------------------------------
+
+#[test]
+fn for_loops_count_through_ranges() {
+    assert_eq!(
+        main_value("int", "var s = 0; for i in 0..5 { s = s * 10 + i; } s"),
+        "Int(1234)"
+    );
+    assert_eq!(
+        main_value(
+            "int",
+            "var n = 0; for i in 5..5 { n = n + 1; } for i in 3..-2 { n = n + 1; } n"
+        ),
+        "Int(0)"
+    );
+    assert_eq!(
+        main_value("int", "var s = 0; for i in -3..0 { s = s + i; } s"),
+        "Int(-6)"
+    );
+    // The end is evaluated once.
+    assert_eq!(
+        main_value(
+            "int",
+            "var calls = 0; let end = fn() -> int { calls = calls + 1; 3 };
+             for i in 0..end() { } calls"
+        ),
+        "Int(1)"
+    );
+    // A range is an Iter like any other.
+    assert_eq!(main_value("int", "let r = 2..6; r.count()"), "Int(4)");
+}
+
+#[test]
+fn break_and_continue() {
+    assert_eq!(
+        main_value(
+            "int",
+            "var s = 0;
+             for i in 0..100 { if i % 2 == 0 { continue; } if i > 9 { break; } s = s + i; }
+             s"
+        ),
+        "Int(25)"
+    );
+    assert_eq!(
+        main_value(
+            "int",
+            "var s = 0;
+             for x in (0..100).map(fn(x) { x * 2 }) { if x == 4 { continue; } if x > 8 { break; } s = s + x; }
+             s"
+        ),
+        "Int(16)"
+    );
+    assert_eq!(
+        main_value(
+            "int",
+            "var i = 0; var s = 0;
+             while true { i = i + 1; if i == 3 { continue; } if i > 5 { break; } s = s + i; }
+             s"
+        ),
+        "Int(12)"
+    );
+    // `break` leaves only the innermost loop.
+    assert_eq!(
+        main_value(
+            "int",
+            "var n = 0; for i in 0..4 { for j in 0..4 { if j == i { break; } n = n + 1; } } n"
+        ),
+        "Int(6)"
+    );
+}
+
+#[test]
+fn return_leaves_a_loop() {
+    assert_eq!(
+        value(
+            "fn first_square_over(n: int) -> int { for i in 0..n { if i * i > n { return i; } } -1 }
+             fn main() -> int { first_square_over(50) * 100 + first_square_over(0) }"
+        ),
+        "Int(799)"
+    );
+}
+
+#[test]
+fn each_iteration_has_its_own_variable() {
+    // Closures made in a loop each keep that iteration's value.
+    assert_eq!(
+        main_value(
+            "int",
+            "let fs = (0..3).map(fn(i) { fn() -> int { i } });
+             var s = 0; for f in fs { s = s * 10 + f() + 1; } s"
+        ),
+        "Int(123)"
+    );
+    assert_eq!(
+        main_value(
+            "int",
+            "var last = fn() -> int { 0 };
+             for i in 0..3 { let j = i * 2; last = fn() -> int { i + j }; }
+             last()"
+        ),
+        "Int(6)"
+    );
+}
+
+#[test]
+fn iterators_are_lazy_and_used_up() {
+    // `map` runs only as values are taken.
+    assert_eq!(
+        main_value(
+            "int",
+            "var calls = 0;
+             let it = (0..1000).map(fn(x) { calls = calls + 1; x });
+             let first = it.take(3).count();
+             calls * 10 + first"
+        ),
+        "Int(33)"
+    );
+    // A copy of an Iter shares its position.
+    assert_eq!(
+        main_value(
+            "int",
+            "let it = 0..10; let same = it; same.next(); same.next(); it.next().unwrap_or(-1)"
+        ),
+        "Int(2)"
+    );
+}
+
+#[test]
+fn iter_methods() {
+    let cases = [
+        (
+            "Iter<int>",
+            "(0..10).filter(fn(x) { x % 3 == 0 })",
+            "0 3 6 9",
+        ),
+        ("Iter<int>", "(0..10).skip(7)", "7 8 9"),
+        ("Iter<int>", "(0..2).chain(5..7)", "0 1 5 6"),
+        ("Iter<int>", "Iter::empty()", ""),
+        ("Iter<str>", "Iter::once(\"x\")", "x"),
+        ("Iter<int>", "Some(4).iter()", "4"),
+        ("Iter<int>", "None.iter()", ""),
+    ];
+    for (t, iter, expected) in cases {
+        // There's no way to turn values into strings yet, so count them.
+        let count = expected.split_whitespace().count();
+        let src = format!("fn main() -> int {{ let it: {t} = {iter}; it.count() }}");
+        assert_eq!(value(&src), format!("Int({count})"), "{iter}");
+    }
+    assert_eq!(
+        main_value("int", "(1..5).fold(1, fn(a, b) { a * b })"),
+        "Int(24)"
+    );
+    assert_eq!(main_value("bool", "(1..5).last() == Some(4)"), "Bool(true)");
+    assert_eq!(main_value("bool", "(1..1).last() == None"), "Bool(true)");
+    assert_eq!(
+        main_value("bool", "(1..50).find(fn(x) { x * x > 30 }) == Some(6)"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "(1..5).any(fn(x) { x == 4 })"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "(1..5).all(fn(x) { x < 4 })"),
+        "Bool(false)"
+    );
+    assert_eq!(
+        main_value(
+            "int",
+            "(0..10).filter(fn(x) { x % 2 == 1 }).map(fn(x) { x * x }).fold(0, fn(a, b) { a + b })"
+        ),
+        "Int(165)"
+    );
+}
+
+#[test]
+fn types_can_be_looped_over_through_iter() {
+    assert_eq!(
+        value(
+            "enum Seq { Nil, Cons(int, Seq) }
+             impl Seq {
+                 fn iter(self) -> Iter<int> {
+                     var rest = self;
+                     Iter::new(fn() -> Option<int> {
+                         match rest {
+                             Seq::Cons(x, more) => { rest = more; Some(x) }
+                             Seq::Nil => None,
+                         }
+                     })
+                 }
+             }
+             fn main() -> int {
+                 let xs = Seq::Cons(1, Seq::Cons(2, Seq::Cons(3, Seq::Nil)));
+                 var s = 0; for x in xs { s = s * 10 + x; } s
+             }"
+        ),
+        "Int(123)"
+    );
+}
+
+#[test]
+fn errors_in_loops_point_at_their_cause() {
+    let (text, notes) = located("fn main() { for x in (0..3).map(fn(x) { 10 / (x - 1) }) { } }");
+    assert_eq!(text, "10 / (x - 1)");
+    assert!(
+        notes.iter().any(|n| n.contains("in the prelude")),
+        "{notes:#?}"
+    );
+}
+
+#[test]
+fn long_loops_run_in_constant_space() {
+    // Neither kind of loop grows the call stack.
+    assert_eq!(
+        main_value("int", "var s = 0; for i in 0..2000 { s = s + i; } s"),
+        "Int(1999000)"
+    );
+    assert_eq!(
+        main_value(
+            "int",
+            "(0..2000).map(fn(x) { x }).fold(0, fn(a, b) { a + b })"
+        ),
+        "Int(1999000)"
+    );
+}
+
+#[test]
+fn logical_operators_combine_comparisons() {
+    // `false && (false == false)`, not `(false && false) == false`.
+    assert_eq!(main_value("bool", "false && false == false"), "Bool(false)");
+    assert_eq!(main_value("bool", "true || 1 == 2"), "Bool(true)");
+    assert_eq!(
+        main_value("int", "var n = 0; for i in 0..20 { if i % 2 == 0 && i % 3 == 0 || i == 7 { n = n + 1; } } n"),
+        "Int(5)"
+    );
+}
+
+// ---- Lists ---------------------------------------------------------------------
+
+#[test]
+fn lists_are_values() {
+    let shown = |body: &str| {
+        let (vm, result) = run_vm(&format!("fn main() -> List<int> {{ {body} }}"));
+        vm.heap.repr(&result.unwrap())
+    };
+    assert_eq!(shown("[1, 2, 3]"), "[1, 2, 3]");
+    assert_eq!(shown("[]"), "[]");
+    assert_eq!(shown("[1, 2,]"), "[1, 2]");
+    // Changing a list makes a new one; the old one stays as it was.
+    assert_eq!(
+        shown("let a = [1, 2]; let b = a.push(3).set(0, 9); a.concat(b)"),
+        "[1, 2, 9, 2, 3]"
+    );
+    assert_eq!(shown("[1, 2, 3, 4].slice(1, 3)"), "[2, 3]");
+    assert_eq!(
+        shown("[1, 2, 3].drop_last().drop_last().drop_last().drop_last()"),
+        "[]"
+    );
+    assert_eq!(shown("[3, 1, 2].reverse()"), "[2, 1, 3]");
+    assert_eq!(shown("List::repeat(7, 3)"), "[7, 7, 7]");
+    assert_eq!(shown("(0..4).collect()"), "[0, 1, 2, 3]");
+    assert_eq!(
+        shown("[1, 2, 3, 4].map(fn(x) { x * x }).filter(fn(x) { x > 2 })"),
+        "[4, 9, 16]"
+    );
+    let (vm, result) = run_vm("fn main() -> List<List<str>> { [[\"a\"], [], [\"b\", \"c\"]] }");
+    assert_eq!(
+        vm.heap.repr(&result.unwrap()),
+        "[[\"a\"], [], [\"b\", \"c\"]]"
+    );
+}
+
+#[test]
+fn list_queries() {
+    assert_eq!(
+        main_value("int", "let xs = [10, 20, 30]; xs[0] + xs[2] + xs.len()"),
+        "Int(43)"
+    );
+    assert_eq!(
+        main_value(
+            "bool",
+            "[1, 2].get(1) == Some(2) && [1, 2].get(2) == None && [1].get(-1) == None"
+        ),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value(
+            "bool",
+            "[5, 6].first() == Some(5) && [5, 6].last() == Some(6) && [].first() == None"
+        ),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "[].is_empty() && ![1].is_empty()"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("int", "[1, 2, 3, 4].fold(0, fn(a, b) { a * 10 + b })"),
+        "Int(1234)"
+    );
+    assert_eq!(
+        main_value(
+            "bool",
+            "[1, 2, 3].any(fn(x) { x == 2 }) && ![1, 2].all(fn(x) { x == 2 })"
+        ),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "[1, 5, 9].find(fn(x) { x > 3 }) == Some(5)"),
+        "Bool(true)"
+    );
+}
+
+#[test]
+fn lists_compare_by_their_values() {
+    assert_eq!(
+        main_value(
+            "bool",
+            "[1, 2] == [1, 2] && [1, 2] != [2, 1] && [1] != [1, 1]"
+        ),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "[[1], [2, 3]] == [[1], [2].push(3)]"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        main_value("bool", "[Some(\"a\")] == [Some(\"a\")]"),
+        "Bool(true)"
+    );
+}
+
+#[test]
+fn for_loops_go_over_lists() {
+    assert_eq!(
+        main_value("int", "var s = 0; for x in [1, 2, 3] { s = s * 10 + x; } s"),
+        "Int(123)"
+    );
+    assert_eq!(
+        main_value("int", "var s = 0; for x in [1, 2, 3, 4, 5] { if x == 2 { continue; } if x == 5 { break; } s = s + x; } s"),
+        "Int(8)"
+    );
+    // The loop goes over the list as it was, even if the variable changes.
+    assert_eq!(main_value("int", "var xs = [1, 2, 3]; var n = 0; for x in xs { xs = xs.push(x); n = n + 1; } n * 10 + xs.len()"), "Int(36)");
+    assert_eq!(
+        main_value("int", "var n = 0; for x in [] { n = n + 1; } n"),
+        "Int(0)"
+    );
+}
+
+#[test]
+fn long_lists() {
+    // Past one 32-wide leaf, one full branch, and into a third level, with
+    // the collector running before every allocation.
+    let n = 32 * 32 + 50;
+    assert_eq!(
+        main_value(
+            "int",
+            &format!(
+                "var xs = []; for i in 0..{n} {{ xs = xs.push(i); }}
+                 var ys = xs; for i in 0..{n} {{ ys = ys.set(i, ys[i] * 2); }}
+                 var s = 0; for y in ys {{ s = s + y; }}
+                 s - 2 * xs.fold(0, fn(a, b) {{ a + b }}) + xs[{n} - 1]"
+            )
+        ),
+        format!("Int({})", n - 1)
+    );
+}
+
+#[test]
+fn out_of_range_is_an_error() {
+    assert_eq!(
+        located("fn main() -> int { let xs = [1, 2, 3]; xs[3] }").0,
+        "xs[3]"
+    );
+    assert_eq!(
+        run("fn main() -> int { [1, 2, 3][-1] }")
+            .unwrap_err()
+            .message,
+        "index -1 is out of range for a list of length 3"
+    );
+    assert_eq!(
+        run("fn main() { [1].set(1, 2); }").unwrap_err().message,
+        "index 1 is out of range for a list of length 1"
+    );
+    assert_eq!(
+        run("fn main() { [1, 2].slice(1, 3); }")
+            .unwrap_err()
+            .message,
+        "slice 1..3 is out of range for a list of length 2"
     );
 }

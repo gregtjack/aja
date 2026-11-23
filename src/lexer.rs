@@ -62,6 +62,9 @@ where
     col: u32,
     eof: bool,
     source: Source,
+    /// A token already read, to give before reading more: the `..` that
+    /// ends a number, as in `0..10`.
+    pending: Option<SrcSpan>,
 }
 
 impl<T> Lexer<T>
@@ -76,11 +79,15 @@ where
             col: 1,
             eof: false,
             source: Source::MAIN,
+            pending: None,
         }
     }
 
     /// Process one token.
     pub fn token(&mut self) -> LexResult {
+        if let Some(t) = self.pending.take() {
+            return Ok(t);
+        }
         let mut start = self.get_location();
         while let Some(c) = self.inner_next() {
             match c {
@@ -340,10 +347,18 @@ where
                     num_str.push(*c);
                     self.inner_next();
                 }
+                '.' if is_float => break,
                 '.' => {
-                    num_str.push(*c);
-                    is_float = true;
+                    let dot = self.get_location();
                     self.inner_next();
+                    if self.inner_peek() == Some(&'.') {
+                        // `0..10`: the number ends, and a `..` follows.
+                        self.inner_next();
+                        self.pending = Some((dot, Token::DotDot, self.get_location()));
+                        break;
+                    }
+                    num_str.push('.');
+                    is_float = true;
                 }
                 '_' => {
                     self.inner_next();
@@ -397,6 +412,10 @@ where
             "fn" => Some(Token::Fn),
             "if" => Some(Token::If),
             "while" => Some(Token::While),
+            "for" => Some(Token::For),
+            "in" => Some(Token::In),
+            "break" => Some(Token::Break),
+            "continue" => Some(Token::Continue),
             "else" => Some(Token::Else),
             "match" => Some(Token::Match),
             "return" => Some(Token::Return),

@@ -161,8 +161,12 @@ impl Import {
 #[derive(Debug, Clone)]
 pub enum Definition {
     /// A function, which is `public` when marked `pub`; so are the others.
+    /// A `native` function has no body (`body` is an empty block): each
+    /// backend implements it. Only the prelude and the standard library
+    /// can declare one.
     Function {
         public: bool,
+        native: bool,
         name: Id,
         /// Where the function's name appears.
         name_span: Span,
@@ -174,8 +178,12 @@ pub enum Definition {
     },
     /// `struct Point { x: int, y: int }`, or `struct Pair<A, B> { ... }`.
     /// Every field's `t` is `Some`.
+    /// A `native` struct (`native struct List<T>;`) has no fields: its
+    /// values are made and used only by native functions, and each backend
+    /// decides how they are represented.
     Struct {
         public: bool,
+        native: bool,
         name: Id,
         name_span: Span,
         type_params: Vec<TypeParam>,
@@ -208,6 +216,8 @@ pub enum Definition {
 pub struct Method {
     /// Whether it is marked `pub`, so code in other modules can call it.
     pub public: bool,
+    /// Whether it is `native`, with no body (see [`Definition::Function`]).
+    pub native: bool,
     pub name: Id,
     pub name_span: Span,
     pub type_params: Vec<TypeParam>,
@@ -306,6 +316,19 @@ pub enum Statement {
     },
     If(Expr, Box<Statement>),
     While(Expr, Box<Statement>),
+    /// `for var in iter { body }`: `body` once for each value of `iter`,
+    /// an `Iter<T>` or a value whose type has a method
+    /// `iter(self) -> Iter<T>`, bound to `var` (immutable, and new for each
+    /// value).
+    For {
+        var: Variable,
+        iter: Expr,
+        body: Box<Statement>,
+    },
+    /// `break`, which leaves the innermost loop, at the given span.
+    Break(Span),
+    /// `continue`, which starts the innermost loop's next iteration.
+    Continue(Span),
     Return(Option<Expr>),
 }
 
@@ -345,6 +368,10 @@ pub enum Expression {
     /// `value?`: the value inside an `Ok` or `Some`, or else return the
     /// `Err` or `None` from the enclosing function.
     Try(Box<Expr>),
+    /// `[a, b, c]`: a `List`.
+    List(Vec<Expr>),
+    /// `list[index]`, which stops the program if `index` is out of range.
+    Index(Box<Expr>, Box<Expr>),
     /// An expression whose error has already been reported (by the module
     /// resolver), holding the expressions inside it that can still be
     /// checked. The checker gives it a type that fits anywhere; it never

@@ -21,6 +21,7 @@ use std::rc::Rc;
 
 use super::{
     bytecode::{Layout, Proto},
+    list::List,
     value::Value,
 };
 
@@ -49,6 +50,9 @@ enum Obj {
     Data(Rc<Layout>, Box<[Value]>),
     /// A string. Its contents never change after it is made.
     Str(Box<str>),
+    /// A list. It never changes after it is made, but shares parts with
+    /// the lists made from it.
+    List(List),
 }
 
 impl Obj {
@@ -60,6 +64,8 @@ impl Obj {
                 Obj::Cell(_) => 0,
                 Obj::Data(_, fields) => fields.len() * size_of::<Value>(),
                 Obj::Str(s) => s.len(),
+                // Parts shared with other lists are counted for each.
+                Obj::List(l) => l.len() * size_of::<Value>(),
             }
     }
 }
@@ -136,6 +142,10 @@ impl Heap {
         self.alloc(Obj::Str(s))
     }
 
+    pub fn alloc_list(&mut self, list: List) -> Gc {
+        self.alloc(Obj::List(list))
+    }
+
     fn alloc(&mut self, obj: Obj) -> Gc {
         self.live += 1;
         self.bytes += obj.size();
@@ -189,6 +199,13 @@ impl Heap {
         }
     }
 
+    pub fn list(&self, gc: Gc) -> &List {
+        match self.get(gc) {
+            Obj::List(l) => l,
+            _ => panic!("internal error: object {gc} is not a list"),
+        }
+    }
+
     /// Whether two values of the same type are equal, comparing structs and
     /// enums field by field. Iterative, so long lists can't overflow the stack.
     pub fn equal(&self, a: &Value, b: &Value) -> bool {
@@ -208,6 +225,15 @@ impl Heap {
                 (Value::Float(x), Value::Float(y)) => x == y,
                 (Value::Bool(x), Value::Bool(y)) => x == y,
                 (Value::Str(x), Value::Str(y)) => x == y || self.str(*x) == self.str(*y),
+                (Value::List(x), Value::List(y)) if x == y => true,
+                (Value::List(x), Value::List(y)) => {
+                    let (lx, ly) = (self.list(*x), self.list(*y));
+                    if lx.len() != ly.len() {
+                        return false;
+                    }
+                    work.extend(lx.iter().cloned().zip(ly.iter().cloned()));
+                    true
+                }
                 (Value::Void, Value::Void) => true,
                 // The type checker only allows `==` on types made of the above.
                 _ => panic!("internal error: comparing {a:?} with {b:?}"),
@@ -257,6 +283,7 @@ impl Heap {
                 Obj::Cell(v) => work.extend(v.handle()),
                 Obj::Data(_, fields) => work.extend(fields.iter().filter_map(Value::handle)),
                 Obj::Str(_) => {}
+                Obj::List(l) => l.for_each(|v| work.extend(v.handle())),
             }
         }
 
@@ -340,6 +367,19 @@ impl Heap {
                         stack.extend(items.into_iter().rev());
                         continue;
                     }
+                    Value::List(gc) => {
+                        let list = self.list(*gc);
+                        let mut items = vec![Item::Text("[")];
+                        for (i, v) in list.iter().enumerate() {
+                            if i > 0 {
+                                items.push(Item::Text(", "));
+                            }
+                            items.push(Item::Value(v, true));
+                        }
+                        items.push(Item::Text("]"));
+                        stack.extend(items.into_iter().rev());
+                        continue;
+                    }
                     Value::Void => "()".to_string(),
                     Value::Int(i) => i.to_string(),
                     Value::Float(n) => format!("{n:?}"),
@@ -349,7 +389,7 @@ impl Heap {
                         continue;
                     }
                     Value::Fn(gc) => format!("<fn {}>", self.closure(*gc).proto.signature),
-                    Value::Native(builtin, _) => format!("<native fn: {}>", builtin.name),
+                    Value::Native(name, _) => format!("<native fn: {name}>"),
                 },
             };
             out.push_str(&value);
