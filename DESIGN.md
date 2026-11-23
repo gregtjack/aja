@@ -280,8 +280,31 @@ by a number with a fractional part.
    intrinsics layer ✅, `std::io` (standard input, output, and error) ✅,
    `std::fs` (whole-file reads and writes, directories) ✅, and methods on
    `str`, `int`, `float`, and `bool` in the prelude, with template strings ✅.
-8. **Tooling.** Formatter, JSON diagnostics, and a test runner; then a language
-   server.
+8. **Tooling**, in four parts. The first three are independent; the
+   language server builds on all of them.
+   1. **Formatter** (`aja fmt`). One style with no options (rule 10),
+      printing from the AST so its output doesn't depend on how the input
+      was laid out. Comments must survive, so the lexer keeps them (with
+      their positions) instead of dropping them. Formatting twice gives
+      the same result as formatting once, and every example and standard
+      library file is formatted by it, checked in the tests.
+   2. **JSON diagnostics** (`aja check --json`). Every error and warning as
+      one JSON object per line: message, severity, file, start and end
+      line and column, help, and notes, the same data the rustc-like
+      rendering shows. A `check` command that stops after type checking,
+      for editors and CI, comes with it.
+   3. **Test runner** (`aja test`). Functions marked as tests (syntax to
+      decide: an attribute, or a `test` block) are found in a program's
+      modules and run one by one, each failure reported with its
+      assertion and call trace, and a summary at the end. `assert` gains
+      `assert_eq`, which shows both values. Doc comment examples run as
+      tests later (see "Documented with examples that run").
+   4. **Language server** (`aja lsp`). Diagnostics as you type from the
+      checker, then hover (a value's type), go to definition, completion
+      of methods and fields, and formatting through the formatter. It needs
+      the checker to keep the types and definitions it finds by position,
+      and to check a file whose imports are already checked without
+      checking them again.
 9. **Green threads and structured concurrency** in the VM, first with every
    task on one OS thread (see [the plan](plans/green-threads.md)). A
    library, not syntax: `task::scope(fn(s) { s.spawn(fn() { ... }).join() })`.

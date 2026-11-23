@@ -22,9 +22,9 @@ fn run(job: Job, start: int) -> str {
 
 fn main() {
     let jobs = [
-        Job { name: "boil the kettle", ms: 1000 },
-        Job { name: "toast the bread", ms: 1000 },
-        Job { name: "fetch the paper", ms: 1000 },
+        Job { name: "boil the kettle", ms: 150 },
+        Job { name: "toast the bread", ms: 100 },
+        Job { name: "fetch the paper", ms: 50 },
     ];
 
     println("one after another:");
