@@ -656,12 +656,34 @@ impl<T: Ord> List<T> {
 //
 // A string can hold expressions, which are turned into strings and put in
 // its place: `"{name} is {age} years old"`. Write `\{` for a literal brace.
+//
+// `a + b` copies both, so building a long string with `s = s + piece` in a
+// loop takes time in the square of its length. Push the pieces onto a list
+// and `join` them once instead.
 impl str {
     // How many characters it holds.
     pub native fn len(self) -> int;
 
     // How many bytes its UTF-8 encoding takes.
     pub native fn byte_len(self) -> int;
+
+    // Its UTF-8 encoding, each byte an int from 0 to 255: `"é".bytes()` is
+    // `[195, 169]`.
+    pub native fn bytes(self) -> List<int>;
+
+    // The string whose UTF-8 encoding is `bytes`, or `None` if they aren't
+    // UTF-8 (or one isn't from 0 to 255): `str::from_utf8([104, 105])` is
+    // `Some("hi")`.
+    pub fn from_utf8(bytes: List<int>) -> Option<str> {
+        if str::is_utf8(bytes) {
+            Some(str::from_utf8_unchecked(bytes))
+        } else {
+            None
+        }
+    }
+
+    native fn is_utf8(bytes: List<int>) -> bool;
+    native fn from_utf8_unchecked(bytes: List<int>) -> str;
 
     pub fn is_empty(self) -> bool {
         self == ""
@@ -768,6 +790,19 @@ impl str {
 impl int {
     // It in decimal, as `println` shows it: `-42`.
     pub native fn to_str(self) -> str;
+
+    // The character with this Unicode code point, as a string, or `None`
+    // if there is none: `233.to_char()` is `Some("é")`.
+    pub fn to_char(self) -> Option<str> {
+        if self.is_char() {
+            Some(self.to_char_unchecked())
+        } else {
+            None
+        }
+    }
+
+    native fn is_char(self) -> bool;
+    native fn to_char_unchecked(self) -> str;
 
     // It as a float, as near as a float can be.
     pub native fn to_float(self) -> float;

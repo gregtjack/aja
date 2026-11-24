@@ -15,12 +15,23 @@ From writing [examples/net/http_server.aja](../examples/net/http_server.aja).
 
 - [x] `stream.read(n)`: read exactly `n` bytes, for `Content-Length`
       bodies (today only lines or everything to the end)
-- [ ] Bytes, or a character from a code point, so `%C3%A9` can be decoded
-- [ ] Reading text that isn't UTF-8 ends the connection; no way to answer 400
-- [ ] Command-line arguments and environment variables
-- [ ] Socket timeouts
-- [ ] A string builder, or a warning in the docs: `s = s + x` in a loop is
-      quadratic (20k appends: 411 ms, against 44 ms for push + join)
+- [x] Bytes, or a character from a code point, so `%C3%A9` can be decoded:
+      `s.bytes()`, `str::from_utf8(bytes)`, `n.to_char()`
+- [x] Reading text that isn't UTF-8 ends the connection; no way to answer 400
+      (it already took the bad bytes off the stream; the server now answers)
+- [x] Command-line arguments and environment variables: `std::env`
+- [x] Socket timeouts: `set_timeout` on listeners and streams (not connect)
+- [x] A string builder, or a warning in the docs: `s = s + x` in a loop is
+      quadratic (20k appends: 411 ms, against 44 ms for push + join).
+      Documented; a real builder or a faster `+` is still to do
+
+## Found since
+
+- [ ] No hex literals: `0x1F600` doesn't lex
+- [ ] `var` is a keyword, so `std::env` has `get` where Rust has `var`
+- [ ] `return`/`break`/`continue` still can't be operands outside a match
+      arm (`x.unwrap_or(return 0)`)
+- [ ] Connecting has no timeout
 
 ## Tooling
 

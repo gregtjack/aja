@@ -122,14 +122,31 @@ Strings have methods (defined in the prelude):
 | `replace(from, to)`, `repeat(n)` | A new string |
 | `sep.join(parts)` | The strings in `parts`, with `sep` between each two |
 | `parse_int()`, `parse_float()` | `Option<int>`, `Option<float>` |
+| `bytes()`, `str::from_utf8(bytes)` | `List<int>`, its UTF-8 encoding; `Option<str>` from one |
 | `to_str()` | Itself |
+
+**Building a long string a piece at a time:** push the pieces onto a list
+and `join` them once. `s = s + piece` in a loop copies all of `s` each
+time, so it takes time in the square of the length (20,000 short pieces:
+about 400 ms, against 40 ms for a list and `join`).
+
+```rust
+var parts = [];
+for line in lines { parts = parts.push(line.trim()); }
+let text = "\n".join(parts);
+```
+
+**Bytes:** `s.bytes()` is a string's UTF-8 encoding as a `List<int>`, and
+`str::from_utf8(bytes)` turns one back, giving `None` if the bytes aren't
+UTF-8. `n.to_char()` is the character with code point `n` as a string
+(`233.to_char()` is `Some("é")`), or `None`.
 
 **Positions count characters** (Unicode code points), not bytes:
 `"héllo".len()` is 5 and `"héllo".slice(1, 2)` is `"é"`. Finding a
 position takes time in proportion to it, so to go through a string a
 character at a time, loop over `chars()`.
 
-Numbers and bools have methods too: `n.to_str()`, `n.to_float()`, `n.abs()`,
+Numbers and bools have methods too: `n.to_str()`, `n.to_char()`, `n.to_float()`, `n.abs()`,
 `n.min(m)`, `n.max(m)`, `n.clamp(lo, hi)`, and `n.pow(e)` for `int`; `x.to_str()`,
 `x.to_int()` (rounding towards zero), `floor`, `ceil`, `round`, `sqrt`,
 `abs`, `min`, `max`, and `is_nan` for `float`; and `b.to_str()` for `bool`.
@@ -615,7 +632,7 @@ implementation fails the tests and stops the VM at startup. Built-ins named
 
 The standard library is written in Aja (`src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
-it has `std::channel`, `std::collections`, `std::io`, `std::fs`, `std::net`, `std::task`, and `std::time`.
+it has `std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::net`, `std::task`, and `std::time`.
 
 #### `std::channel`
 
@@ -660,6 +677,28 @@ fn main() {
   otherwise. Values that never change are shared, not copied, however big.
 - Sometimes the type of the values can't be told from the first use; then
   write it: `let (tx, rx): (channel::Sender<str>, channel::Receiver<str>) = channel::new(8);`.
+
+#### `std::env`
+
+```rust
+import std::env;
+
+fn main() {
+    // aja serve.aja 9000  ->  port 9000
+    let port = env::args().first().and_then(fn(a) { a.parse_int() }).unwrap_or(8080);
+    let host = env::get("HOST").unwrap_or("127.0.0.1");
+    println("{host}:{port}");
+}
+```
+
+| `std::env` | Does |
+|------------|------|
+| `args()` | `List<str>`: the arguments after the file being run; `aja serve.aja 9000 -v` gives `["9000", "-v"]` |
+| `get(name)` | `Option<str>`: the environment variable `name`, or `None` if it isn't set or isn't UTF-8 |
+
+- Everything after the file belongs to the program, flags included, so
+  `aja` never reads them as its own.
+- It's `get`, not `var`, since `var` is a keyword.
 
 #### `std::collections`
 
@@ -856,6 +895,7 @@ fn main() -> Result<void, io::Error> {
 | `stream.read(n)` | `Result<str, io::Error>`: the next `n` bytes, waiting for all of them (fewer only if the other end finishes, `""` at the end), for a length known in advance such as an HTTP `Content-Length` |
 | `stream.write(text)`, `stream.write_line(text)` | `Result<void, io::Error>`, returning once all of it is sent |
 | `stream.close_write()` | Tell the other end nothing more is coming, while still reading |
+| `set_timeout(Option<Duration>)` | On both: the longest each accept, read, or write may wait; past it, it fails with `TimedOut` |
 | `local_addr()`, `stream.peer_addr()`, `close()` | On both; addresses are `str`s like `"127.0.0.1:7000"` |
 
 - **Each operation blocks only its task.** Sockets are non-blocking
@@ -865,14 +905,22 @@ fn main() -> Result<void, io::Error> {
   Connecting runs on a thread of its own, since it can't be done without
   blocking.
 - **Streams carry text**, which must be UTF-8. Reads are buffered, so a
-  line or character that arrives in pieces comes out whole. Bytes wait for
-  a bytes type.
+  line or character that arrives in pieces comes out whole. Text that
+  isn't UTF-8 fails with `InvalidData`, but is taken off the stream all
+  the same, so the connection can still be used (to answer with an
+  error, say). Bytes wait for a bytes type.
 - Errors are `io::Error`s naming the address, with the kinds
   `ConnectionRefused`, `ConnectionReset`, `AddrInUse`, `AddrNotAvailable`,
-  and `NotConnected` (a closed socket). Closing a socket wakes any task
-  waiting on it, with `NotConnected`.
-- Sockets stay open until closed, or until the program ends. There are no
-  timeouts yet. See [plans/net.md](plans/net.md) for what comes next.
+  `NotConnected` (a closed socket), and `TimedOut`. Closing a socket wakes
+  any task waiting on it, with `NotConnected`.
+- **Timeouts:** `s.set_timeout(Some(Duration::from_secs(10)))` limits how
+  long each accept, read, or write on `s` may take (`None` removes the
+  limit). The limit is on the whole call, so a `read_line` must have its
+  whole line in time, and a client sending a byte at a time can't keep it
+  waiting forever. A call that takes longer fails with `TimedOut`; what
+  did arrive stays to be read. Connecting has no timeout yet.
+- Sockets stay open until closed, or until the program ends. See
+  [plans/net.md](plans/net.md) for what comes next.
 
 #### `std::task`
 

@@ -90,6 +90,15 @@ pub native fn tcp_accept(id: int) -> int;
 // A connection to `addr`, which may need resolving: "localhost:80".
 pub native fn tcp_connect(addr: str) -> int;
 
+// The program's arguments, after the file being run.
+pub native fn args() -> List<str>;
+
+// Whether the environment variable `name` is set (to UTF-8 text).
+pub native fn has_env(name: str) -> bool;
+
+// The environment variable `name`, or "" if it isn't set.
+pub native fn env_var(name: str) -> str;
+
 // The next line from stream `id`, without its line ending. At the end of
 // the stream the status is 1.
 pub native fn tcp_read_line(id: int) -> str;
@@ -111,5 +120,10 @@ pub native fn tcp_close_write(id: int);
 pub native fn tcp_close(id: int);
 
 pub native fn tcp_local_addr(id: int) -> str;
+
+// Limit how long each accept, read, or write on socket `id` may wait, to
+// `nanos` (none if it is 0 or less). One that waits longer fails with
+// status 16 (timed out).
+pub native fn tcp_set_timeout(id: int, nanos: int);
 
 pub native fn tcp_peer_addr(id: int) -> str;

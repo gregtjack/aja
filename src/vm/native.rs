@@ -45,6 +45,16 @@ const CONNECTION_RESET: i64 = 12;
 const ADDR_IN_USE: i64 = 13;
 const ADDR_NOT_AVAILABLE: i64 = 14;
 pub(super) const NOT_CONNECTED: i64 = 15;
+pub(super) const TIMED_OUT: i64 = 16;
+
+/// The arguments the program was run with, after its file, for
+/// `std::env::args`. Unset (no arguments) in the REPL and in tests.
+static ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Give the program its arguments. Only the first call counts.
+pub fn set_args(args: Vec<String>) {
+    let _ = ARGS.set(args);
+}
 
 thread_local! {
     /// The status of the last intrinsic that can fail, and its message.
@@ -262,6 +272,38 @@ fn float_op(name: &str, args: &[Value], f: fn(f64) -> f64) -> Result<Value, Stri
 }
 
 /// A list of strings for a native function to return.
+/// The environment variable `name`, if it is set to UTF-8 text. A name
+/// that can't be one (empty, or with `=` or NUL in it) is never set.
+fn env_var(name: &str) -> Option<String> {
+    if name.is_empty() || name.contains(['=', '\0']) {
+        return None;
+    }
+    std::env::var(name).ok()
+}
+
+/// The character with code point `n`, if there is one.
+fn code_point(n: i64) -> Option<char> {
+    u32::try_from(n).ok().and_then(char::from_u32)
+}
+
+/// A `List<int>` argument as bytes, or `None` if a value isn't from 0 to 255.
+fn byte_list(heap: &Heap, name: &str, args: &[Value]) -> Result<Option<Vec<u8>>, String> {
+    let [Value::List(list)] = args else {
+        return Err(bad_args(name, args));
+    };
+    let mut bytes = Vec::new();
+    for v in heap.list(*list).iter() {
+        match v {
+            Value::Int(n) => match u8::try_from(*n) {
+                Ok(b) => bytes.push(b),
+                Err(_) => return Ok(None),
+            },
+            _ => return Err(bad_args(name, args)),
+        }
+    }
+    Ok(Some(bytes))
+}
+
 fn str_list(heap: &mut Heap, items: Vec<String>) -> Value {
     let list: super::list::List = items.into_iter().map(|s| str_value(heap, s)).collect();
     Value::List(heap.alloc_list(list))
@@ -400,6 +442,19 @@ static NATIVES: &[(&str, NativeFn)] = &[
         let message = STATUS.with(|s| s.borrow().1.clone());
         Ok(str_value(heap, message))
     }),
+    ("std::native::args", |heap, _| {
+        let args = ARGS.get().cloned().unwrap_or_default();
+        Ok(str_list(heap, args))
+    }),
+    ("std::native::has_env", |heap, args| {
+        let name = str_arg(heap, "has_env", args)?;
+        Ok(Value::Bool(env_var(name).is_some()))
+    }),
+    ("std::native::env_var", |heap, args| {
+        let name = str_arg(heap, "env_var", args)?;
+        let value = env_var(name).unwrap_or_default();
+        Ok(str_value(heap, value))
+    }),
     ("std::native::read_line", |heap, args| {
         let [Value::Int(fd)] = args else {
             return Err(bad_args("read_line", args));
@@ -530,6 +585,24 @@ static NATIVES: &[(&str, NativeFn)] = &[
     ("str::byte_len", |heap, args| {
         let s = str_arg(heap, "byte_len", args)?;
         Ok(Value::Int(s.len() as i64))
+    }),
+    ("str::bytes", |heap, args| {
+        let s = str_arg(heap, "bytes", args)?;
+        let list: super::list::List = s.bytes().map(|b| Value::Int(b as i64)).collect();
+        Ok(Value::List(heap.alloc_list(list)))
+    }),
+    ("str::is_utf8", |heap, args| {
+        Ok(Value::Bool(
+            byte_list(heap, "str::is_utf8", args)?
+                .is_some_and(|bytes| std::str::from_utf8(&bytes).is_ok()),
+        ))
+    }),
+    ("str::from_utf8_unchecked", |heap, args| {
+        let bytes = byte_list(heap, "str::from_utf8_unchecked", args)?;
+        match bytes.map(String::from_utf8) {
+            Some(Ok(s)) => Ok(str_value(heap, s)),
+            _ => Err("str::from_utf8_unchecked: the bytes aren't UTF-8".to_string()),
+        }
     }),
     ("str::contains", |heap, args| {
         let (s, part) = two_strs(heap, "contains", args)?;
@@ -677,6 +750,21 @@ static NATIVES: &[(&str, NativeFn)] = &[
             return Err(bad_args("int::to_float", args));
         };
         Ok(Value::Float(*n as f64))
+    }),
+    ("int::is_char", |_, args| {
+        let [Value::Int(n)] = args else {
+            return Err(bad_args("int::is_char", args));
+        };
+        Ok(Value::Bool(code_point(*n).is_some()))
+    }),
+    ("int::to_char_unchecked", |heap, args| {
+        let [Value::Int(n)] = args else {
+            return Err(bad_args("int::to_char_unchecked", args));
+        };
+        match code_point(*n) {
+            Some(c) => Ok(str_value(heap, c.to_string())),
+            None => Err(format!("int::to_char_unchecked: {n} isn't a code point")),
+        }
     }),
     ("int::pow", |_, args| {
         let [Value::Int(base), Value::Int(exp)] = args else {

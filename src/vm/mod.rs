@@ -26,7 +26,7 @@ pub mod heap;
 pub mod list;
 mod native;
 mod net;
-pub use native::OUTPUT_CLOSED;
+pub use native::{set_args, OUTPUT_CLOSED};
 mod scheduler;
 pub mod sorted;
 pub mod value;

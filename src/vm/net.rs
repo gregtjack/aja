@@ -20,14 +20,14 @@ use std::{
         mpsc::{self, Receiver, Sender},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use polling::{Event, Events, Poller};
 
 use super::{
     heap::Heap,
-    native::{record_as, set_status, str_value, END_OF_INPUT, NOT_CONNECTED, OK},
+    native::{record_as, set_status, str_value, END_OF_INPUT, NOT_CONNECTED, OK, TIMED_OUT},
     scheduler::{Outcome, TaskId},
     value::Value,
 };
@@ -47,10 +47,11 @@ pub enum Op {
     Close,
     LocalAddr,
     PeerAddr,
+    SetTimeout,
 }
 
 impl Op {
-    pub const ALL: [(Op, &'static str); 11] = [
+    pub const ALL: [(Op, &'static str); 12] = [
         (Op::Listen, "std::native::tcp_listen"),
         (Op::Accept, "std::native::tcp_accept"),
         (Op::Connect, "std::native::tcp_connect"),
@@ -62,12 +63,13 @@ impl Op {
         (Op::Close, "std::native::tcp_close"),
         (Op::LocalAddr, "std::native::tcp_local_addr"),
         (Op::PeerAddr, "std::native::tcp_peer_addr"),
+        (Op::SetTimeout, "std::native::tcp_set_timeout"),
     ];
 
     /// How many arguments it takes.
     pub fn arity(self) -> usize {
         match self {
-            Op::Write | Op::Read => 2,
+            Op::Write | Op::Read | Op::SetTimeout => 2,
             _ => 1,
         }
     }
@@ -93,6 +95,9 @@ struct Socket {
     /// a connection), and writable.
     readers: Vec<TaskId>,
     writers: Vec<TaskId>,
+    /// How long one accept, read, or write on it may wait, if there is a
+    /// limit.
+    timeout: Option<Duration>,
 }
 
 impl Socket {
@@ -148,6 +153,11 @@ pub struct Net {
     woken: Vec<TaskId>,
     /// How many connects have been started.
     tickets: u64,
+    /// When the call each task is waiting in times out, for calls on a
+    /// socket with a timeout: the socket, and the moment. Set when the
+    /// call first waits, and kept while it runs again, so the limit is on
+    /// the whole call.
+    deadlines: HashMap<TaskId, (i64, Instant)>,
 }
 
 impl Net {
@@ -162,6 +172,7 @@ impl Net {
             waiting: 0,
             woken: Vec::new(),
             tickets: 0,
+            deadlines: HashMap::new(),
         }
     }
 
@@ -178,6 +189,30 @@ impl Net {
         if let Some(Pending::Connect { result: None, .. }) = self.pending.remove(&task) {
             self.waiting -= 1;
         }
+        self.deadlines.remove(&task);
+    }
+
+    /// Stop the tasks whose calls have timed out waiting, and give them, so
+    /// they run again and find out. Their deadlines stay until then.
+    fn expired(&mut self) -> Vec<TaskId> {
+        let now = Instant::now();
+        let mut woken = Vec::new();
+        for (&task, &(id, at)) in &self.deadlines {
+            if at > now {
+                continue;
+            }
+            if let Some(socket) = self.sockets.get_mut(&id) {
+                for list in [&mut socket.readers, &mut socket.writers] {
+                    let before = list.len();
+                    list.retain(|&t| t != task);
+                    if list.len() < before {
+                        self.waiting -= before - list.len();
+                        woken.push(task);
+                    }
+                }
+            }
+        }
+        woken
     }
 
     /// The tasks woken by the last operation, which can now run.
@@ -199,6 +234,12 @@ impl Net {
             return woken;
         };
         self.events.clear();
+        // Wait no longer than the first deadline.
+        let first = self.deadlines.values().map(|&(_, at)| at).min();
+        let timeout = match first.map(|at| at.saturating_duration_since(Instant::now())) {
+            Some(d) => Some(timeout.map_or(d, |t| t.min(d))),
+            None => timeout,
+        };
         if let Err(e) = poller.wait(&mut self.events, timeout) {
             if e.kind() != io::ErrorKind::Interrupted {
                 panic!("could not wait for sockets: {e}");
@@ -236,6 +277,8 @@ impl Net {
             }
         }
         self.waiting -= woken.len();
+        // `expired` counts the tasks it stops waiting itself.
+        woken.append(&mut self.expired());
         woken
     }
 
@@ -260,7 +303,10 @@ impl Net {
             }
             Op::Accept => match self.accept(int(0)) {
                 Step::Done(id) => Done::Int(id),
-                Step::Wait => return self.wait_on(task, int(0), true),
+                Step::Wait => match self.wait_on(task, int(0), true) {
+                    Some(wait) => return wait,
+                    None => Done::Int(0),
+                },
             },
             Op::ReadLine | Op::ReadAll | Op::Read => {
                 let until = match op {
@@ -270,7 +316,10 @@ impl Net {
                 };
                 match self.read(int(0), until) {
                     Step::Done(text) => Done::Str(text),
-                    Step::Wait => return self.wait_on(task, int(0), true),
+                    Step::Wait => match self.wait_on(task, int(0), true) {
+                        Some(wait) => return wait,
+                        None => Done::Str(String::new()),
+                    },
                 }
             }
             Op::Write => {
@@ -278,7 +327,14 @@ impl Net {
                 let data = || text(heap, 1).into_bytes();
                 match self.write(task, id, data) {
                     Step::Done(()) => Done::Void,
-                    Step::Wait => return self.wait_on(task, id, false),
+                    Step::Wait => match self.wait_on(task, id, false) {
+                        Some(wait) => return wait,
+                        None => {
+                            // What it had left to send isn't sent.
+                            self.pending.remove(&task);
+                            Done::Void
+                        }
+                    },
                 }
             }
             Op::CloseWrite => {
@@ -293,7 +349,20 @@ impl Net {
             }
             Op::LocalAddr => Done::Str(self.addr(int(0), true)),
             Op::PeerAddr => Done::Str(self.addr(int(0), false)),
+            Op::SetTimeout => {
+                match self.sockets.get_mut(&int(0)) {
+                    Some(socket) => {
+                        let nanos = int(1);
+                        socket.timeout = (nanos > 0).then(|| Duration::from_nanos(nanos as u64));
+                        set_status(OK, String::new());
+                    }
+                    None => not_connected::<()>("set the timeout of"),
+                }
+                Done::Void
+            }
         };
+        // The call is over, so its deadline is too.
+        self.deadlines.remove(&task);
         Outcome::Value(match result {
             Done::Int(n) => Value::Int(n),
             Done::Str(s) => str_value(heap, s),
@@ -307,10 +376,34 @@ impl Net {
         Outcome::Wait
     }
 
-    /// Make `task` wait for socket `id` to be readable, or writable.
-    fn wait_on(&mut self, task: TaskId, id: i64, read: bool) -> Outcome {
+    /// Make `task` wait for socket `id` to be readable, or writable. If
+    /// the socket has a timeout and this call has waited that long already,
+    /// it doesn't wait: the status says so, and this gives `None`.
+    fn wait_on(&mut self, task: TaskId, id: i64, read: bool) -> Option<Outcome> {
         let poller = self.poller.clone().expect("a socket has been made");
         let socket = self.sockets.get_mut(&id).expect("only a socket can block");
+        let now = Instant::now();
+        match self.deadlines.get(&task) {
+            Some(&(_, at)) if at <= now => {
+                self.deadlines.remove(&task);
+                let what = match (&socket.kind, read) {
+                    (Kind::Listener(_), _) => "waiting for a connection on",
+                    (_, true) => "reading from",
+                    (_, false) => "writing to",
+                };
+                set_status(
+                    TIMED_OUT,
+                    format!("timed out {what} '{}'", socket.name),
+                );
+                return None;
+            }
+            Some(_) => {}
+            None => {
+                if let Some(limit) = socket.timeout {
+                    self.deadlines.insert(task, (id, now + limit));
+                }
+            }
+        }
         if read {
             socket.readers.push(task);
         } else {
@@ -319,7 +412,7 @@ impl Net {
         let interest = socket.interest(id);
         rearm(&poller, socket, interest);
         self.waiting += 1;
-        Outcome::Wait
+        Some(Outcome::Wait)
     }
 
     fn poller(&mut self) -> io::Result<Arc<Poller>> {
@@ -352,6 +445,7 @@ impl Net {
             name,
             readers: Vec::new(),
             writers: Vec::new(),
+            timeout: None,
         };
         self.sockets.insert(id, socket);
         Ok(id)

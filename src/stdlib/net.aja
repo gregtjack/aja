@@ -41,6 +41,7 @@
 
 import std::io;
 import std::native;
+import std::time::{Duration};
 
 // Waits for connections at an address.
 pub struct TcpListener {
@@ -76,6 +77,12 @@ impl TcpListener {
     // The address it listens at, with the port filled in: "127.0.0.1:53412".
     pub fn local_addr(self) -> str {
         native::tcp_local_addr(self.id)
+    }
+
+    // Limit how long each `accept` may wait for a connection, or remove the
+    // limit with `None`. One that waits longer fails with `TimedOut`.
+    pub fn set_timeout(self, timeout: Option<Duration>) -> Result<void, io::Error> {
+        io::checked(native::tcp_set_timeout(self.id, nanos(timeout)))
     }
 
     // Stop listening. Tasks waiting in `accept` get a `NotConnected` error.
@@ -159,9 +166,28 @@ impl TcpStream {
         native::tcp_peer_addr(self.id)
     }
 
+    // Limit how long each read or write may take, or remove the limit with
+    // `None`. The limit is on the whole call: a `read_line` must have its
+    // whole line by then, however it arrives, so a client that sends a
+    // byte at a time can't keep it waiting forever. One that takes longer
+    // fails with `TimedOut`, and a write that times out may have sent some
+    // of its text. Connecting has no timeout yet.
+    pub fn set_timeout(self, timeout: Option<Duration>) -> Result<void, io::Error> {
+        io::checked(native::tcp_set_timeout(self.id, nanos(timeout)))
+    }
+
     // Close the connection. Tasks waiting to read from it or write to it
     // get a `NotConnected` error.
     pub fn close(self) {
         native::tcp_close(self.id);
+    }
+}
+
+// A timeout in nanoseconds, as `tcp_set_timeout` takes it: 0 for none. A
+// zero or negative duration would time out at once, so it is a nanosecond.
+fn nanos(timeout: Option<Duration>) -> int {
+    match timeout {
+        Some(d) => d.as_nanos().max(1),
+        None => 0,
     }
 }

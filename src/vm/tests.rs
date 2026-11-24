@@ -1161,6 +1161,24 @@ fn error_examples_fail_as_described() {
 // ---- Strings ------------------------------------------------------------------
 
 #[test]
+fn strings_go_to_and_from_bytes() {
+    assert_eq!(
+        main_value("bool", "\"h\u{e9}!\".bytes() == [104, 195, 169, 33]"),
+        "Bool(true)"
+    );
+    assert_eq!(
+        std_value(
+            "fn main() -> List<Option<str>> {
+                 [str::from_utf8([104, 195, 169]), str::from_utf8([]), str::from_utf8([195]),
+                  str::from_utf8([256]), str::from_utf8([-1]),
+                  233.to_char(), 128512.to_char(), 55296.to_char(), (-1).to_char()]
+             }"
+        ),
+        "[Some(\"h\u{e9}\"), Some(\"\"), None, None, None, Some(\"\u{e9}\"), Some(\"\u{1f600}\"), None, None]"
+    );
+}
+
+#[test]
 fn strings_concatenate() {
     assert_eq!(main_value("str", "\"foo\" + \"bar\""), "Str(\"foobar\")");
     assert_eq!(
@@ -3056,6 +3074,55 @@ fn tcp_reads_a_number_of_bytes() {
              }"
         ),
         "[\"POST\", \"ab\\r\\n\", \"cd\u{e9}\", \"xyz\", \"\"]"
+    );
+}
+
+#[test]
+fn tcp_timeouts_stop_calls_that_wait_too_long() {
+    // A client that trickles bytes without a newline can't hold a read
+    // forever: the limit is on the whole call. What did arrive isn't lost,
+    // and other calls get the time again.
+    assert_eq!(
+        std_value(
+            "import std::io;
+             import std::net;
+             import std::task;
+             import std::time::{Duration};
+             fn kind(e: io::Error) -> str {
+                 if e.kind == io::ErrorKind::TimedOut { \"timed out\" } else { e.message }
+             }
+             fn main() -> List<str> {
+                 let listener = match net::listen(\"127.0.0.1:0\") { Ok(l) => l, Err(e) => { return [e.message]; } };
+                 let _ = listener.set_timeout(Some(Duration::from_millis(20)));
+                 let accepted = match listener.accept() { Ok(_) => \"accepted\", Err(e) => kind(e) };
+                 let _ = listener.set_timeout(None);
+                 task::scope(fn(s) {
+                     s.spawn(fn() {
+                         match net::connect(listener.local_addr()) {
+                             Ok(c) => {
+                                 for _ in 0..5 { let _ = c.write(\"x\"); sleep(10); }
+                                 let _ = c.read_line();
+                                 c.close();
+                             }
+                             Err(e) => println(e.message),
+                         }
+                     });
+                     match listener.accept() {
+                         Ok(conn) => {
+                             let _ = conn.set_timeout(Some(Duration::from_millis(30)));
+                             let line = match conn.read_line() { Ok(_) => \"line\", Err(e) => kind(e) };
+                             let _ = conn.set_timeout(None);
+                             let rest = match conn.read(5) { Ok(t) => t, Err(e) => kind(e) };
+                             let _ = conn.write_line(\"bye\");
+                             conn.close();
+                             [accepted, line, rest]
+                         }
+                         Err(e) => [e.message],
+                     }
+                 })
+             }"
+        ),
+        "[\"timed out\", \"timed out\", \"xxxxx\"]"
     );
 }
 

@@ -27,11 +27,15 @@ mod vm;
 struct Cli {
     /// Source file
     file: Option<PathBuf>,
+    /// Arguments for the program, which `std::env::args` gives it
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 fn main() -> ExitCode {
     let cli = <Cli as clap::Parser>::parse();
 
+    vm::set_args(cli.args);
     let Some(file) = cli.file else {
         // REPL mode
         run_repl();

@@ -44,6 +44,8 @@ pub enum ErrorKind {
     AddrNotAvailable,
     // The socket has been closed.
     NotConnected,
+    // A socket's timeout passed before the operation could finish.
+    TimedOut,
     Other,
 }
 
@@ -167,6 +169,7 @@ fn error(code: int) -> Error {
         13 => ErrorKind::AddrInUse,
         14 => ErrorKind::AddrNotAvailable,
         15 => ErrorKind::NotConnected,
+        16 => ErrorKind::TimedOut,
         _ => ErrorKind::Other,
     };
     Error { kind, message: native::error_message() }
