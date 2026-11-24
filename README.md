@@ -82,7 +82,7 @@ parameters. Its return value is not printed; use `println` for output.
 | `float` | `3.14`, `-0.5`          | 64-bit float                         |
 | `bool`  | `true`, `false`         |                                      |
 | `str`   | `"hi\n"`, `"x is {x}"` | UTF-8; see [Strings](#strings). Escapes: `\n`, `\t`, `\r`, `\\`, `\"`, `\{`, `\}` |
-| `void`  | —                       | Result of statements / no value      |
+| `void`  | `void`                  | No value: what statements and functions without `-> T` give; `Ok(void)` for a `Result<void, E>` |
 | `(int, str) -> bool` | `fn(x: int) -> int { x + 1 }` | First-class; closures capture their scope |
 | `List<T>` | `[1, 2, 3]`, `[]`        | Immutable; see [Lists](#lists)       |
 | structs and enums | `Point { x: 1, y: 2 }`, `Shape::Circle(p, 3)` | Defined at the top level; see below |
@@ -746,19 +746,21 @@ fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
     for line in conn.lines() {
         conn.write_line(line?)?;
     }
-    Ok(conn.close())
+    conn.close();
+    Ok(void)
 }
 
 fn main() -> Result<void, io::Error> {
     let listener = net::listen("127.0.0.1:7000")?;
-    Ok(task::scope(fn(s) {
+    task::scope(fn(s) {
         while true {
             match listener.accept() {
                 Ok(conn) => { s.spawn(fn() { echo(conn) }); }
                 Err(e) => println(e.message),
             }
         }
-    }))
+    });
+    Ok(void)
 }
 ```
 

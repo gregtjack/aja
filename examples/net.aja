@@ -17,7 +17,8 @@ fn shout(conn: net::TcpStream) -> Result<void, io::Error> {
     for line in conn.lines() {
         conn.write_line(line?.to_upper())?;
     }
-    Ok(conn.close())
+    conn.close();
+    Ok(void)
 }
 
 // Connect to `addr`, send two lines, and give the reply.
@@ -59,6 +60,6 @@ fn main() -> Result<void, io::Error> {
         Ok(_) => "the listener is still open",
         Err(e) => e.message,
     };
-    // `println` returns `void`, which is what `main`'s `Ok` holds.
-    Ok(println(refused))
+    println(refused);
+    Ok(void)
 }

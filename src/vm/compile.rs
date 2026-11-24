@@ -1172,6 +1172,9 @@ impl<'a> FnCompiler<'a> {
                 let value = matches!(e.kind, Expression::True);
                 self.emit(Op::LoadBool { dst, value }, span);
             }
+            Expression::Void => {
+                self.emit(Op::LoadVoid { dst }, span);
+            }
             Expression::String(s) => {
                 let index = self.compiler.literal(s);
                 self.emit(Op::LoadStr { dst, index }, span);
@@ -1603,7 +1606,8 @@ impl FnCompiler<'_> {
     /// for each check that fails, and bind the names in `p`.
     fn pattern(&mut self, p: &Pattern, value: Reg, fails: &mut Vec<usize>) {
         match &p.kind {
-            PatternKind::Wildcard => {}
+            // `void` is its type's only value, so it always matches.
+            PatternKind::Wildcard | PatternKind::Void => {}
             PatternKind::Or(alternatives) => self.or_pattern(alternatives, value, fails),
             PatternKind::Error(_) => {
                 unreachable!("the checker reports errors before anything is compiled")
@@ -1808,6 +1812,7 @@ fn is_simple(e: &Expr) -> bool {
         | Expression::String(_)
         | Expression::True
         | Expression::False
+        | Expression::Void
         | Expression::Var(_)
         | Expression::Path(..) => true,
         Expression::Grouping(e) | Expression::Unary(_, e) | Expression::Field(e, ..) => {
@@ -1952,6 +1957,7 @@ impl CaptureFinder {
             | Expression::String(_)
             | Expression::True
             | Expression::False
+            | Expression::Void
             | Expression::Path(..) => {}
             Expression::Grouping(e)
             | Expression::Unary(_, e)
@@ -2041,6 +2047,7 @@ fn pattern_bindings(p: &Pattern, out: &mut Vec<(Id, DeclKey)>) {
         PatternKind::Wildcard
         | PatternKind::Int(_)
         | PatternKind::Str(_)
-        | PatternKind::Bool(_) => {}
+        | PatternKind::Bool(_)
+        | PatternKind::Void => {}
     }
 }

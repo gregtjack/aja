@@ -36,14 +36,15 @@ fn main() -> Result<void, io::Error> {
             }
         }
     });
-    Ok(println("done"))
+    Ok(void)
 }
 
 fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
     for line in conn.lines() {
         conn.write_line(line?)?;
     }
-    Ok(conn.close())
+    conn.close();
+    Ok(void)
 }
 ```
 
@@ -92,9 +93,9 @@ fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
    the next timer, when no task can run. Closing a socket wakes the tasks
    waiting on it, whose calls then fail with `NotConnected`. Loopback
    buffers hold megabytes, so the test that a write waits for its reader
-   sends eight. Found on the way: there is no way to write a `void` value,
-   so `Ok(())` can't be written; code ends with a call that returns `void`
-   instead, `Ok(conn.close())`.
+   sends eight. Found on the way: there was no way to write a `void` value,
+   so `Ok(...)` of a `Result<void, E>` had to wrap a call; the literal
+   `void` came next.
 2. **Timeouts.** `stream.set_timeout(d: Duration)` (with `std::time`),
    failing a read or write that waits longer with `TimedOut`. Timers and
    poller waits already live in one loop.

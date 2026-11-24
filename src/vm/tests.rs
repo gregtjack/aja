@@ -455,7 +455,7 @@ fn values_display_like_print() {
         shown("fn main() -> () -> int { clock }"),
         "<native fn: clock>"
     );
-    assert_eq!(shown("fn main() { }"), "()");
+    assert_eq!(shown("fn main() { }"), "void");
 }
 
 #[test]
@@ -3012,5 +3012,25 @@ fn tcp_errors_say_what_went_wrong() {
              }"
         ),
         "[\"in use\", \"woken\", \"true\"]"
+    );
+}
+
+#[test]
+fn void_compares_hashes_and_matches() {
+    assert_eq!(
+        std_value(
+            "import std::collections::{Set, SortedSet};
+             fn f(fail: bool) -> Result<void, str> { if fail { Err(\"no\") } else { Ok(void) } }
+             fn main() -> (bool, bool, bool, bool, int, int, str) {
+                 let shown = match f(false) { Ok(void) => \"ok\", Err(e) => e };
+                 (f(false) == Ok(void), f(true) == Ok(void), void < void, void <= void,
+                  Set::from([void, void]).len(), SortedSet::from([void, void]).len(), shown)
+             }"
+        ),
+        "(true, false, false, true, 1, 1, \"ok\")"
+    );
+    assert_eq!(
+        std_value("fn main() -> Result<void, str> { Ok(void) }"),
+        "Ok(void)"
     );
 }

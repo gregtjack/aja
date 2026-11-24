@@ -1127,6 +1127,11 @@ impl Checker {
                 self.pattern_type(&Ty::Bool, expected, p.span);
                 Pat::Ctor(Ctor::Bool(*b), vec![])
             }
+            // The type's only value, so it matches whatever a `_` would.
+            PatternKind::Void => {
+                self.pattern_type(&Ty::Void, expected, p.span);
+                Pat::Wild
+            }
             PatternKind::Variant {
                 enum_name,
                 variant,
@@ -1716,6 +1721,7 @@ pub(super) fn pattern_text(p: &Pattern) -> String {
         PatternKind::Int(i) => i.to_string(),
         PatternKind::Str(s) => format!("{s:?}"),
         PatternKind::Bool(b) => b.to_string(),
+        PatternKind::Void => "void".to_string(),
         PatternKind::Tuple(items) => format!("({})", list(items)),
         PatternKind::Or(alternatives) => alternatives
             .iter()

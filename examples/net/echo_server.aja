@@ -17,7 +17,8 @@ fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
         conn.write_line(line?)?;
     }
     println("{who} left");
-    Ok(conn.close())
+    conn.close();
+    Ok(void)
 }
 
 fn serve(listener: net::TcpListener) {
@@ -43,5 +44,6 @@ fn serve(listener: net::TcpListener) {
 fn main() -> Result<void, io::Error> {
     let listener = net::listen("127.0.0.1:7000")?;
     println("listening on {listener.local_addr()}");
-    Ok(serve(listener))
+    serve(listener);
+    Ok(void)
 }

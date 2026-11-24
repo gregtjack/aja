@@ -460,7 +460,7 @@ fn main() -> Result<void, io::Error> {
     out.flush()?;
     stderr().write(\"\")
 }";
-    assert_eq!(value(&[("main.aja", main)]), "Ok(())");
+    assert_eq!(value(&[("main.aja", main)]), "Ok(void)");
 }
 
 #[test]

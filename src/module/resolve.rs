@@ -745,7 +745,8 @@ impl<'a> Resolver<'a> {
             | Expression::Float(_)
             | Expression::String(_)
             | Expression::True
-            | Expression::False => {}
+            | Expression::False
+            | Expression::Void => {}
             Expression::Unary(_, x) | Expression::Grouping(x) | Expression::Try(x) => self.expr(x),
             Expression::BinOp(a, _, b) => {
                 self.expr(a);
@@ -898,7 +899,8 @@ impl<'a> Resolver<'a> {
             PatternKind::Wildcard
             | PatternKind::Int(_)
             | PatternKind::Str(_)
-            | PatternKind::Bool(_) => {}
+            | PatternKind::Bool(_)
+            | PatternKind::Void => {}
             PatternKind::Binding(var) => self.bind(&var.name),
             PatternKind::Variant {
                 enum_name,

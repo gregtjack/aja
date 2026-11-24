@@ -764,7 +764,7 @@ impl Heap {
                         stack.extend(items.into_iter().rev());
                         continue;
                     }
-                    Value::Void => "()".to_string(),
+                    Value::Void => "void".to_string(),
                     Value::Int(i) => i.to_string(),
                     Value::Float(n) => format!("{n:?}"),
                     Value::Bool(b) => b.to_string(),

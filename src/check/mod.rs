@@ -186,7 +186,7 @@ impl Class {
             Ty::Never | Ty::Error => return true,
             Ty::Int => Class(u8::MAX),
             Ty::Float => Class(Class::EQ.0 | Class::ADD.0 | Class::NUM.0 | Class::CMP.0),
-            Ty::Bool => Class(Class::TRAITS.0 | Class::CMP.0),
+            Ty::Bool | Ty::Void => Class(Class::TRAITS.0 | Class::CMP.0),
             Ty::Str => Class(Class::TRAITS.0 | Class::ADD.0 | Class::CMP.0),
             _ => Class::ANY,
         };
@@ -537,8 +537,9 @@ impl Checker {
                         Ty::Bool => OperandType::Bool,
                         Ty::Str => OperandType::Str,
                         // A type parameter's values are compared as
-                        // whatever they turn out to be.
-                        Ty::Named(..) | Ty::Tuple(_) | Ty::Param(_) => OperandType::Data,
+                        // whatever they turn out to be, and `void`, which
+                        // has one value, as the heap compares it.
+                        Ty::Named(..) | Ty::Tuple(_) | Ty::Param(_) | Ty::Void => OperandType::Data,
                         // `never` operands are in code that can't run, and
                         // anything still unknown has been reported.
                         _ => OperandType::Int,
@@ -1034,6 +1035,7 @@ impl Checker {
             Expression::Float(_) => Ty::Float,
             Expression::String(_) => Ty::Str,
             Expression::True | Expression::False => Ty::Bool,
+            Expression::Void => Ty::Void,
             Expression::Grouping(e) => self.expr(e),
             Expression::Unary(op, e) => {
                 let t = self.expr(e);

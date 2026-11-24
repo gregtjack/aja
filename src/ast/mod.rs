@@ -285,6 +285,8 @@ pub enum PatternKind {
     Int(i64),
     Str(EcoString),
     Bool(bool),
+    /// `void`, which matches the one value of type `void`.
+    Void,
     /// `Shape::Circle(r)`, or `Shape::Empty` (with `fields` empty and
     /// `parens` false).
     Variant {
@@ -367,6 +369,8 @@ pub enum Expression {
     String(EcoString),
     True,
     False,
+    /// `void`, the one value of type `void`.
+    Void,
     Unary(Op1, Box<Expr>),
     BinOp(Box<Expr>, Op2, Box<Expr>),
     Grouping(Box<Expr>),

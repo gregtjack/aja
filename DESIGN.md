@@ -383,9 +383,12 @@ by a number with a fractional part.
 - **Methods on built-in types** (decided). The prelude has `impl str`,
   `impl int`, `impl float`, and `impl bool`; it counts as where those types
   are defined, so no other module can add to them.
-- **A `void` value.** `Ok(...)` of a `Result<void, E>` can only be written
-  by calling a `void` function (`Ok(write(...))`); there is no literal for
-  "nothing". Does `void` get one, and what is it written as?
+- **A `void` value** (decided). The type's one value is written `void`,
+  the same as the type: `Ok(void)` for a `Result<void, E>`, which could
+  otherwise only be written by wrapping a call (`Ok(write(...))`). Not
+  `()`, which would give one idea two names and look like a function
+  type's empty parameter list. `void` is `Eq`, `Hash`, and `Ord`, can't
+  name anything else, and is also a pattern.
 - **Strings** (decided for now). UTF-8 everywhere. Positions and lengths
   count code points, which matches what people mean by "the third
   character" more often than bytes do; `byte_len` gives the size. There is

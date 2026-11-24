@@ -17,20 +17,22 @@ fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
     for line in conn.lines() {
         conn.write_line(line?)?;
     }
-    Ok(conn.close())
+    conn.close();
+    Ok(void)
 }
 
 fn main() -> Result<void, io::Error> {
     let listener = net::listen(\"127.0.0.1:0\")?;
     println(listener.local_addr());
-    Ok(task::scope(fn(s) {
+    task::scope(fn(s) {
         while true {
             match listener.accept() {
                 Ok(conn) => { s.spawn(fn() { echo(conn) }); }
                 Err(e) => println(e.message),
             }
         }
-    }))
+    });
+    Ok(void)
 }
 ";
 

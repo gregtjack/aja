@@ -746,7 +746,22 @@ mod tests {
         assert!(err("fn main() { let x = (); }")
             .help
             .unwrap()
-            .contains("Aja has no `()` value"));
+            .contains("Aja has no `()` value, and `void` is the value of type `void`"));
+        assert!(matches!(
+            create_parser("void").parse_expr_only().unwrap().kind,
+            Expression::Void
+        ));
+        // `void` names nothing else.
+        for (src, what) in [
+            ("fn main() { let void = 1; }", "a variable name"),
+            ("fn void() {}", "a function name"),
+            ("fn f(void: int) {}", "a parameter name"),
+        ] {
+            assert_eq!(
+                err(src).message,
+                format!("'void' is a value, so it can't be used as {what}")
+            );
+        }
         assert_eq!(
             err("fn main() { var (a, b) = (1, 2); }").message,
             "'var' declares a single name, not a pattern"
@@ -2086,6 +2101,7 @@ where
                 match var.as_str() {
                     "true" => Expression::True,
                     "false" => Expression::False,
+                    "void" => Expression::Void,
                     _ if tok_matches!(self, Token::DoubleColon) => {
                         let mut path = self.parse_path_tail(var)?;
                         let name_span = Span::new(start, self.last_end());
@@ -2162,7 +2178,7 @@ where
         self.next();
         if tok_matches!(self, Token::RightParen) {
             return Err(self.expected("an expression").help(
-                "a tuple holds two or more values, e.g. `(1, \"a\")`; Aja has no `()` value",
+                "a tuple holds two or more values, e.g. `(1, \"a\")`; Aja has no `()` value, and `void` is the value of type `void`",
             ));
         }
         let first = self.parse_expr()?;
@@ -2358,6 +2374,7 @@ where
             "_" => PatternKind::Wildcard,
             "true" => PatternKind::Bool(true),
             "false" => PatternKind::Bool(false),
+            "void" => PatternKind::Void,
             _ if tok_matches!(self, Token::DoubleColon) => {
                 let mut path = self.parse_path_tail(name)?;
                 let name_span = Span::new(span.start, self.last_end());
@@ -2513,6 +2530,14 @@ where
             return Err(self
                 .error(tok, format!("'self' can't be used as {what}"))
                 .help("'self' can only be the first parameter of a function in an impl"));
+        }
+        if name == "void" {
+            return Err(self
+                .error(
+                    tok,
+                    format!("'void' is a value, so it can't be used as {what}"),
+                )
+                .help("choose a different name"));
         }
         match prelude::variant_enum(name) {
             Some(e) => Err(self

@@ -1797,3 +1797,29 @@ fn list_methods_need_their_bounds() {
     // Floats can be compared with `==`, and sorted with `sort_by`.
     ok("fn main() -> bool { [0.5].contains(0.5) && [0.5, 0.1].sort_by(fn(a, b) { if a < b { Ordering::Less } else { Ordering::Greater } }) == [0.1, 0.5] }");
 }
+
+#[test]
+fn void_is_a_value_of_type_void() {
+    ok("fn f() -> Result<void, str> { Ok(void) }
+        fn g() -> void { return void; }
+        fn main() { let v = void; let xs: List<void> = [v, g()]; }");
+    // It is `Eq`, `Hash`, and `Ord`, like `bool`.
+    ok("fn main() { let a = Ok(void) == Ok(void); let b = void < void; let c = void.compare(void); }");
+    ok("fn f<T: Hash + Ord>(x: T) -> T { x } fn main() { f(void); }");
+    assert_eq!(
+        error("fn main() { let x: int = void; }"),
+        (
+            "mismatched types: 'x' is declared as int but was given void".to_string(),
+            "void".to_string()
+        )
+    );
+    // As a pattern, it matches the one value of type `void`.
+    ok("fn main() { match Ok(void) { Ok(void) => {}, Err(e) => println(e) } }");
+    assert_eq!(
+        error("fn main() { match 1 { void => {} } }"),
+        (
+            "mismatched types: this pattern matches void, but the value is int".to_string(),
+            "void".to_string()
+        )
+    );
+}
