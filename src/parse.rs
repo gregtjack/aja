@@ -751,6 +751,24 @@ mod tests {
             create_parser("void").parse_expr_only().unwrap().kind,
             Expression::Void
         ));
+        // `defer` takes an expression, which needs a `;`, or a block, which
+        // doesn't.
+        let Statement::Block(stmts, _) = create_parser("{ defer f(); defer { g(); } h() }")
+            .parse_stmt_only()
+            .unwrap()
+        else {
+            panic!("expected a block")
+        };
+        assert!(
+            matches!(&stmts[0], Statement::Defer(body, _) if matches!(**body, Statement::Expr(_)))
+        );
+        assert!(
+            matches!(&stmts[1], Statement::Defer(body, _) if matches!(**body, Statement::Block(..)))
+        );
+        assert_eq!(
+            err("fn main() { defer f() }").message,
+            "expected ';', found '}'"
+        );
         // `void` names nothing else.
         for (src, what) in [
             ("fn main() { let void = 1; }", "a variable name"),
@@ -1569,6 +1587,7 @@ where
             Token::LeftBrace => self.parse_block(),
             Token::Let | Token::Var => self.parse_let(),
             Token::Return => self.parse_return(),
+            Token::Defer => self.parse_defer(),
             Token::If => self.parse_if_stmt(),
             Token::While => self.parse_while(),
             Token::For => self.parse_for(),
@@ -1736,6 +1755,9 @@ where
                     | Statement::While(..)
                     | Statement::For { .. }
                     | Statement::Block(..) => stmts.push(stmt),
+                    Statement::Defer(ref body, _) if matches!(**body, Statement::Block(..)) => {
+                        stmts.push(stmt)
+                    }
                     _ => return Err(self.missing_semicolon()),
                 };
             }
@@ -1744,6 +1766,17 @@ where
         self.consume(Token::RightBrace)?;
 
         Ok(Statement::Block(stmts, tail))
+    }
+
+    /// `defer expr` or `defer { ... }`.
+    fn parse_defer(&mut self) -> ParseResult<Statement> {
+        let (start, _, end) = self.consume(Token::Defer)?;
+        let body = if tok_matches!(self, Token::LeftBrace) {
+            self.parse_block()?
+        } else {
+            self.parse_stmt_expr()?
+        };
+        Ok(Statement::Defer(Box::new(body), Span::new(start, end)))
     }
 
     fn parse_return(&mut self) -> ParseResult<Statement> {

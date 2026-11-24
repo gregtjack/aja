@@ -40,10 +40,10 @@ fn main() -> Result<void, io::Error> {
 }
 
 fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
+    defer conn.close();
     for line in conn.lines() {
         conn.write_line(line?)?;
     }
-    conn.close();
     Ok(void)
 }
 ```

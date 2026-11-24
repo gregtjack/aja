@@ -1823,3 +1823,41 @@ fn void_is_a_value_of_type_void() {
         )
     );
 }
+
+#[test]
+fn deferred_code_cant_leave_by_itself() {
+    for (src, what, at) in [
+        ("fn f() -> int { defer { return 1; } 2 }", "return", "1"),
+        (
+            "fn f() -> Result<int, str> { defer Ok(1)?; Ok(2) }",
+            "?",
+            "Ok(1)?",
+        ),
+        (
+            "fn f() { while true { defer { break; } } }",
+            "break",
+            "break",
+        ),
+        (
+            "fn f() { for i in 0..2 { defer { continue; } } }",
+            "continue",
+            "continue",
+        ),
+    ] {
+        assert_eq!(
+            error(src),
+            (
+                format!("'{what}' can't leave deferred code"),
+                at.to_string()
+            ),
+            "{src}"
+        );
+    }
+    // A loop or a closure inside the deferred code is its own to leave.
+    ok("fn f() { defer { for i in 0..3 { if i == 1 { break; } } let g = fn() -> int { return 1; }; g(); } }");
+    // And deferred code is type-checked where it is written.
+    assert_eq!(
+        error("fn f() { defer { let x: int = \"a\"; } }").0,
+        "mismatched types: 'x' is declared as int but was given str"
+    );
+}

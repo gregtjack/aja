@@ -353,6 +353,13 @@ pub enum Statement {
     /// `continue`, which starts the innermost loop's next iteration.
     Continue(Span),
     Return(Option<Expr>),
+    /// `defer body;` (or `defer { ... }`), where `span` is the `defer`
+    /// keyword: `body` runs when the block the `defer` is in is left, by
+    /// any path but a runtime error, after the code that follows it and
+    /// before the defers above it. Its value is thrown away, and it can't
+    /// leave by itself: no `return`, `?`, or `break` and `continue` that
+    /// reach outside it.
+    Defer(Box<Statement>, Span),
 }
 
 /// A piece of a template string.

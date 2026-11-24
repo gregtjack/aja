@@ -15,7 +15,7 @@ should get in its way.
 | Surface | **A library, no new syntax.** `std::task::scope(fn(s) { ... })`, `s.spawn(fn() { ... })` returns a `Task<T>`, and `t.join()` returns `T`. |
 | A child's `Err` | **Just a value.** `join` returns it like any other value. Only a panic cancels anything. An errgroup-style helper can be written later, as a library function. |
 | A child's panic | **Cancels the scope and propagates.** The panicking task's siblings are cancelled, and once they have stopped the scope panics in its parent, so the panic reaches `main` and the program fails. The diagnostic shows the child's trace and where it was spawned. |
-| Cancellation | **A silent stop.** At its next safepoint, a cancelled task's frames are dropped and none of its code runs again. Nothing needs to unwind, because Aja has no destructors or `defer`. |
+| Cancellation | **A silent stop.** At its next safepoint, a cancelled task's frames are dropped and none of its code runs again. Nothing needs to unwind, because Aja has no destructors. Aja has `defer` now, though, which this decision predates: whether a cancelled task runs its deferred code (so its sockets close) is open, and step 3 has to settle it. |
 | Blocking intrinsics | **Run on worker threads.** The task that called one is parked, and the others keep running. A kqueue/epoll poller comes with `std::net`. |
 | Primitives | **Bounded channels, and `sleep`.** The built-in `sleep(ms)` sleeps only its task (added after step 2). `select` and timeouts come later. |
 

@@ -441,8 +441,12 @@ pub struct Checker {
     /// written in them, whose bounds are checked once all are declared.
     deferred_bounds: Option<Vec<DeferredBound>>,
     /// How many loops the statement being checked is in, within the
-    /// function or closure being checked.
+    /// function or closure being checked (or the `defer` being checked).
     loop_depth: usize,
+    /// The `defer` keyword of the deferred code being checked, if any,
+    /// within the function or closure being checked. Code there can't
+    /// leave it with `return`, `?`, `break`, or `continue`.
+    in_defer: Option<Span>,
     /// The `iter` method each `for` loop calls, if it calls one.
     for_iters: HashMap<SpanKey, Id>,
     /// The `to_str` method each expression in a template string calls.
@@ -494,6 +498,7 @@ impl Checker {
             type_params: Vec::new(),
             deferred_bounds: None,
             loop_depth: 0,
+            in_defer: None,
             for_iters: HashMap::new(),
             templates: HashMap::new(),
             std_sources: HashSet::new(),
@@ -713,10 +718,13 @@ impl Checker {
         }
         let fallback = ctx.span;
         self.fns.push(ctx);
-        // A loop around a closure isn't one its body can leave.
+        // A loop around a closure isn't one its body can leave, and its
+        // `return` leaves it rather than any `defer` around it.
         let loops = std::mem::replace(&mut self.loop_depth, 0);
+        let in_defer = self.in_defer.take();
         let found = self.stmt(body);
         self.loop_depth = loops;
+        self.in_defer = in_defer;
         let span = Self::tail_span(body).unwrap_or(fallback);
         self.check_return(&found, span);
         self.fns.pop();
@@ -944,13 +952,24 @@ impl Checker {
                 self.scopes.pop();
                 Ty::Void
             }
+            Statement::Defer(body, span) => {
+                // A loop around the `defer` isn't one its code can leave.
+                let loops = std::mem::replace(&mut self.loop_depth, 0);
+                let outer = self.in_defer.replace(*span);
+                self.stmt(body);
+                self.loop_depth = loops;
+                self.in_defer = outer;
+                Ty::Void
+            }
             Statement::Break(span) | Statement::Continue(span) => {
-                if self.loop_depth == 0 {
-                    let word = if matches!(stmt, Statement::Break(_)) {
-                        "break"
-                    } else {
-                        "continue"
-                    };
+                let word = if matches!(stmt, Statement::Break(_)) {
+                    "break"
+                } else {
+                    "continue"
+                };
+                if let (0, Some(at)) = (self.loop_depth, self.in_defer) {
+                    self.error(self.leaves_defer(word, *span, at));
+                } else if self.loop_depth == 0 {
                     let mut err = TypeError::new(format!("'{word}' outside a loop"), *span).help(
                         format!("'{word}' can only be used in a 'while' or 'for' loop"),
                     );
@@ -971,10 +990,24 @@ impl Checker {
                         self.fns.last().map_or(Self::dummy_span(), |f| f.span),
                     ),
                 };
+                if let Some(at) = self.in_defer {
+                    self.error(self.leaves_defer("return", span, at));
+                }
                 self.check_return(&found, span);
                 Ty::Never
             }
         }
+    }
+
+    /// The error for `what` (`return`, `?`, `break`, or `continue`) at
+    /// `span`, in code deferred at `at`, which it would leave.
+    fn leaves_defer(&self, what: &str, span: Span, at: Span) -> TypeError {
+        TypeError::new(format!("'{what}' can't leave deferred code"), span)
+            .help("deferred code runs while its block is being left, so it must run to its end; handle the case inside it")
+            .note(format!(
+                "the 'defer' is at {}:{}",
+                at.start.line, at.start.col
+            ))
     }
 
     /// `list[index]`
@@ -1264,6 +1297,9 @@ impl Checker {
     /// returned from the enclosing function, which must return the same
     /// kind of value (with the same error type, for a `Result`).
     fn try_(&mut self, inner: &Expr, span: Span) -> Ty {
+        if let Some(at) = self.in_defer {
+            self.error(self.leaves_defer("?", span, at));
+        }
         let t = self.expr(inner);
         let (on, value, error) = match self.resolve(&t) {
             Ty::Named(n, args) if n == "Option" => (TryOn::Option, args[0].clone(), None),
@@ -1987,6 +2023,11 @@ impl Checker {
     /// an input with errors leaves the scope as it was.
     pub fn check_repl_stmt(&mut self, stmt: &Statement) -> Result<Types, Vec<TypeError>> {
         let saved = self.scopes[0].clone();
+        if let Statement::Defer(_, span) = stmt {
+            self.error(TypeError::new("'defer' outside a block", *span).help(
+                "put it in a block, `{ defer ...; ... }`, which runs it when the block is left",
+            ));
+        }
         self.stmt(stmt);
         self.report_unresolved();
         let result = self.finish();

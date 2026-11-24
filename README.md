@@ -381,6 +381,38 @@ The only traits are the built-in `Eq`, `Hash`, and `Ord` (see
 the loop can take any type that implements an iterator trait, and these
 programs keep working.
 
+### `defer`
+
+```rust
+fn shout(conn: net::TcpStream) -> Result<void, io::Error> {
+    defer conn.close();
+    for line in conn.lines() {
+        conn.write_line(line?.to_upper())?;   // `?` closes it too
+    }
+    Ok(void)
+}
+```
+
+- **`defer expr;` or `defer { ... }`** puts code off until the block it is
+  in is left, by reaching its end, `return`, `?`, `break`, or `continue`.
+  Cleanup sits next to what it cleans up after, and runs on every way out.
+- **Last first:** several in one block run in the reverse of the order
+  they were written, after the block's value is worked out. Leaving several
+  blocks at once (a `return` from inside a loop) runs the innermost block's
+  first.
+- **Block by block:** in a loop body, a `defer` runs at the end of each
+  iteration, not of the function.
+- **Names as at the `defer`:** the deferred code sees what was in scope
+  where it is written, even if a later `let` shadows a name, and reads a
+  `var` when it runs.
+- **It can't leave by itself:** no `return` or `?`, and no `break` or
+  `continue` out of it, since it runs while its block is already being left.
+  A loop or closure inside it is fine.
+- **Not on a runtime error:** a runtime error stops the whole program, and
+  deferred code doesn't run then.
+- A call returned while code is deferred isn't a tail call, since the
+  deferred code runs after it (see [Tail calls](#architecture)).
+
 ### Methods
 
 An `impl` block gives a struct or enum functions. One whose first parameter
@@ -544,6 +576,8 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 - **`for`:** `for x in values { ... }` (see [Loops and iterators](#loops-and-iterators)).
   `break` leaves the innermost `while` or `for` loop, and `continue` starts
   its next iteration.
+- **`defer`:** `defer expr;` or `defer { ... }` runs code when its block is
+  left (see [`defer`](#defer)).
 - **Operators** (lowest to highest precedence):
   `=` → `..` → `||` → `&&` → `==` `!=` → `<` `<=` `>` `>=` → `+` `-` → `*` `/` `%`
   → unary `!` `-` → calls `f(x)(y)`, field access `p.x`, indexing `xs[i]`,
@@ -743,10 +777,10 @@ import std::net;
 import std::task;
 
 fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
+    defer conn.close();
     for line in conn.lines() {
         conn.write_line(line?)?;
     }
-    conn.close();
     Ok(void)
 }
 
@@ -867,7 +901,8 @@ decide what to do and has no runtime type checks.
 
 Calls are guaranteed to be tail calls when they're in tail position: the
 final expression of a function (including both branches of a final
-`if`/`else`) or the value of a `return`. A tail call reuses the current
+`if`/`else`) or the value of a `return`, unless code deferred with `defer`
+is waiting to run after it. A tail call reuses the current
 frame, so tail recursion runs in constant space, like a loop. Other calls
 keep their frame until they return. Frames are kept in a growable array, not
 on the Rust stack, so deep recursion can't crash the VM. The call stack may
@@ -903,7 +938,7 @@ the VM forgets to keep reachable is caught.
 
 **Working:** ints, floats, bools, strings; immutable `let` and mutable
 `var` with lexical scoping; functions and first-class closures; `if`/`else` expressions;
-`while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
+`while` loops; `return`; `defer`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
 `for` loops over iterators, ranges, `break` and `continue`; immutable lists
 with indexing;
 structs, enums with data, and exhaustive `match`; generic functions, structs, and enums,

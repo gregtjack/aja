@@ -63,6 +63,7 @@ pub enum Token {
     In,           // in
     Break,        // break
     Continue,     // continue
+    Defer,        // defer
 }
 
 impl std::fmt::Display for Token {
@@ -127,6 +128,7 @@ impl std::fmt::Display for Token {
             Token::In => "in",
             Token::Break => "break",
             Token::Continue => "continue",
+            Token::Defer => "defer",
         };
         write!(f, "'{sym}'")
     }

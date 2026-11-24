@@ -3034,3 +3034,144 @@ fn void_compares_hashes_and_matches() {
         "Ok(void)"
     );
 }
+
+#[test]
+fn deferred_code_runs_when_its_block_is_left() {
+    // Each function logs to a `var` list, so the order can be checked.
+    // Last deferred runs first, after the block's own code and value.
+    assert_eq!(
+        std_value(
+            "fn main() -> List<str> {
+                 var log: List<str> = [];
+                 let f = fn() -> int {
+                     defer { log = log.push(\"a\"); }
+                     defer { log = log.push(\"b\"); }
+                     log = log.push(\"body\");
+                     1
+                 };
+                 f();
+                 log
+             }"
+        ),
+        "[\"body\", \"b\", \"a\"]"
+    );
+    // `return`, `?`, `break`, and `continue` run the defers they leave,
+    // and only those.
+    assert_eq!(
+        std_value(
+            "fn main() -> List<str> {
+                 var log: List<str> = [];
+                 let early = fn(n: int) -> int {
+                     defer { log = log.push(\"early {n}\"); }
+                     if n < 0 { return -1; }
+                     n
+                 };
+                 let tried = fn(s: str) -> Result<int, str> {
+                     defer { log = log.push(\"tried {s}\"); }
+                     let n = s.parse_int().ok_or(\"bad\")?;
+                     Ok(n)
+                 };
+                 early(-1); early(1); tried(\"x\"); tried(\"2\");
+                 defer { log = log.push(\"never seen: main's block is left after its value\"); }
+                 for i in 0..4 {
+                     defer { log = log.push(\"end {i}\"); }
+                     if i == 1 { continue; }
+                     if i == 2 { break; }
+                     log = log.push(\"body {i}\");
+                 }
+                 log
+             }"
+        ),
+        "[\"early -1\", \"early 1\", \"tried x\", \"tried 2\", \
+         \"body 0\", \"end 0\", \"end 1\", \"end 2\"]"
+    );
+}
+
+#[test]
+fn deferred_code_sees_the_names_in_scope_at_the_defer() {
+    // A `let` after the `defer` shadows `x` for the rest of the block, but
+    // not for the deferred code. A `var` is read when the code runs.
+    assert_eq!(
+        std_value(
+            "fn main() -> (int, int) {
+                 var seen = 0;
+                 var at_exit = 0;
+                 var n = 1;
+                 let f = fn() {
+                     let x = 10;
+                     defer { seen = x; at_exit = n; }
+                     let x = 20;
+                     n = x + 1;
+                 };
+                 f();
+                 (seen, at_exit)
+             }"
+        ),
+        "(10, 21)"
+    );
+}
+
+#[test]
+fn deferred_code_can_have_blocks_loops_and_defers_of_its_own() {
+    assert_eq!(
+        std_value(
+            "fn main() -> List<str> {
+                 var log: List<str> = [];
+                 let f = fn() {
+                     defer {
+                         for i in 0..5 {
+                             if i == 2 { break; }
+                             log = log.push(\"loop {i}\");
+                         }
+                         defer { log = log.push(\"inner defer\"); }
+                         let g = fn() -> int { return 3; };
+                         log = log.push(\"closure {g()}\");
+                     }
+                     {
+                         defer { log = log.push(\"nested block\"); }
+                         log = log.push(\"in nested\");
+                         return;
+                     }
+                 };
+                 f();
+                 log
+             }"
+        ),
+        "[\"in nested\", \"nested block\", \"loop 0\", \"loop 1\", \
+         \"closure 3\", \"inner defer\"]"
+    );
+}
+
+#[test]
+fn deferred_code_can_wait_in_a_task() {
+    // A deferred `sleep` and `join` wait like any other code, under
+    // switching and collection stress too.
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> List<int> {
+                 task::scope(fn(s) {
+                     [30, 10, 20].map(fn(ms) {
+                         s.spawn(fn() -> int {
+                             var done = 0;
+                             let inner = fn() { defer { sleep(ms); done = ms; } };
+                             inner();
+                             done
+                         })
+                     }).map(fn(t) { t.join() })
+                 })
+             }"
+        ),
+        "[30, 10, 20]"
+    );
+}
+
+#[test]
+fn a_call_returned_while_code_is_deferred_isnt_a_tail_call() {
+    // The deferred code runs after the call, so the call needs its frame.
+    let msg = failure(
+        "fn f(n: int) -> int { defer print(\"\"); if n == 0 { 0 } else { f(n - 1) } }
+         fn main() { f(100_000_000); }",
+    );
+    assert!(msg.starts_with("stack overflow"), "{msg}");
+}

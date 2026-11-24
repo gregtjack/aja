@@ -389,6 +389,18 @@ by a number with a fractional part.
   `()`, which would give one idea two names and look like a function
   type's empty parameter list. `void` is `Eq`, `Hash`, and `Ord`, can't
   name anything else, and is also a pattern.
+- **`defer`** (decided). `defer expr;` or `defer { ... }` runs code when
+  the block it is in is left, by its end, `return`, `?`, `break`, or
+  `continue`, last first. Block-scoped, as in Swift and Zig, not
+  function-scoped as in Go: it is settled at compile time (each way out of
+  a block compiles the pending code again, so there is no list at run
+  time), and a `defer` in a loop body runs each iteration instead of piling
+  up. The code sees the names in scope where it is written and reads a
+  `var` when it runs. It can't `return`, `?`, `break`, or `continue` out of
+  itself. It is visible where it takes effect, so it fits rule 4. It
+  doesn't run when a runtime error stops the program; whether it runs when
+  a task is cancelled is for the cancellation step of the green-threads
+  plan to settle. A call returned while code is deferred isn't a tail call.
 - **Strings** (decided for now). UTF-8 everywhere. Positions and lengths
   count code points, which matches what people mean by "the third
   character" more often than bytes do; `byte_len` gives the size. There is

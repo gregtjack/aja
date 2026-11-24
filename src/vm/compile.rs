@@ -367,6 +367,7 @@ enum Place {
     Global(u32),
 }
 
+#[derive(Clone)]
 struct Local {
     name: Id,
     reg: Reg,
@@ -397,10 +398,26 @@ struct FnState {
     span: Span,
     /// The loops being compiled, innermost last.
     loops: Vec<Loop>,
+    /// The `defer`s of the blocks being compiled, in the order they were
+    /// reached; each block's last. Leaving blocks runs theirs, last first.
+    defers: Vec<Deferred>,
+}
+
+/// Code deferred until its block is left. It is compiled again at each way
+/// out of the block, seeing the names that were in scope at the `defer`.
+struct Deferred {
+    body: Statement,
+    /// `scopes.len()` in the block the `defer` is in.
+    depth: usize,
+    /// The scopes at the `defer`, which its code is compiled in.
+    scopes: Vec<Vec<Local>>,
 }
 
 /// A loop being compiled: where `continue` goes, and the jumps to patch.
 struct Loop {
+    /// `scopes.len()` around the loop's body: `break` and `continue` run
+    /// the defers of blocks deeper than this.
+    depth: usize,
     /// The start of the next iteration, if it is already known.
     next: Option<u32>,
     /// Jumps for `continue` to patch once `next` is known.
@@ -461,6 +478,7 @@ impl<'a> FnCompiler<'a> {
             max: 0,
             span,
             loops: Vec::new(),
+            defers: Vec::new(),
         });
 
         // Arguments arrive in the first registers. Parameters can't be
@@ -629,8 +647,27 @@ impl<'a> FnCompiler<'a> {
                     (None, Some(dst)) => self.void(dst),
                     (None, None) => {}
                 }
+                // The block's value is in `dst` by now, below any register
+                // the deferred code uses.
+                let depth = self.cur().scopes.len();
+                self.run_defers(depth);
+                let f = self.cur();
+                while f.defers.last().is_some_and(|d| d.depth == depth) {
+                    f.defers.pop();
+                }
                 self.cur().scopes.pop();
                 self.release(mark);
+            }
+            Statement::Defer(body, _) => {
+                let f = self.cur();
+                f.defers.push(Deferred {
+                    body: (**body).clone(),
+                    depth: f.scopes.len(),
+                    scopes: f.scopes.clone(),
+                });
+                if let Some(dst) = dst {
+                    self.void(dst);
+                }
             }
             Statement::Expr(e) => match dst {
                 Some(dst) => self.expr(e, dst),
@@ -696,6 +733,8 @@ impl<'a> FnCompiler<'a> {
                 }
             }
             Statement::Break(span) | Statement::Continue(span) => {
+                let depth = self.cur().loops.last().map_or(0, |l| l.depth);
+                self.run_defers(depth + 1);
                 let jump = self.emit(Op::Jump { target: 0 }, *span);
                 let is_break = matches!(stmt, Statement::Break(_));
                 let l = self
@@ -725,9 +764,39 @@ impl<'a> FnCompiler<'a> {
                     }
                 };
                 let span = value.as_ref().map_or(self.cur().span, |e| e.span);
+                // So a call returned while code is deferred isn't a tail
+                // call: the deferred code runs after it.
+                self.run_defers(0);
                 self.emit(Op::Return { src }, span);
                 self.release(mark);
             }
+        }
+    }
+
+    /// Compile the code deferred in blocks at `depth` (a `scopes.len()`)
+    /// and deeper, last first, as when leaving them. Each is compiled in
+    /// the scopes it was deferred in, into registers above everything in
+    /// use, so it changes nothing but what it assigns to.
+    fn run_defers(&mut self, depth: usize) {
+        let pending: Vec<(Statement, Vec<Vec<Local>>)> = self
+            .cur()
+            .defers
+            .iter()
+            .rev()
+            .take_while(|d| d.depth >= depth)
+            .map(|d| (d.body.clone(), d.scopes.clone()))
+            .collect();
+        for (body, scopes) in pending {
+            // While it is compiled, the only defers are its own, so that
+            // leaving a block inside it runs only those.
+            let here = std::mem::replace(&mut self.cur().scopes, scopes);
+            let defers = std::mem::take(&mut self.cur().defers);
+            let mark = self.mark();
+            self.stmt(&body, None);
+            self.release(mark);
+            let f = self.cur();
+            f.scopes = here;
+            f.defers = defers;
         }
     }
 
@@ -735,7 +804,9 @@ impl<'a> FnCompiler<'a> {
     /// isn't known yet, to wherever [`FnCompiler::continue_here`] is
     /// called). [`FnCompiler::end_loop`] finishes the loop.
     fn loop_body(&mut self, next: Option<u32>, body: impl FnOnce(&mut Self)) {
+        let depth = self.cur().scopes.len();
         self.cur().loops.push(Loop {
+            depth,
             next,
             continues: Vec::new(),
             breaks: Vec::new(),
@@ -1335,6 +1406,7 @@ impl<'a> FnCompiler<'a> {
                     },
                     span,
                 );
+                self.run_defers(0);
                 self.emit(Op::Return { src: value }, span);
                 self.patch(jump);
                 self.emit(
@@ -1947,6 +2019,7 @@ impl CaptureFinder {
                     self.expr(e);
                 }
             }
+            Statement::Defer(body, _) => self.stmt(body),
         }
     }
 

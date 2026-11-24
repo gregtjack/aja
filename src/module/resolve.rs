@@ -735,6 +735,7 @@ impl<'a> Resolver<'a> {
                 });
             }
             Statement::Break(_) | Statement::Continue(_) => {}
+            Statement::Defer(body, _) => self.stmt(body),
         }
     }
 

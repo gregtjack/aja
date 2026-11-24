@@ -484,6 +484,7 @@ where
             "in" => Some(Token::In),
             "break" => Some(Token::Break),
             "continue" => Some(Token::Continue),
+            "defer" => Some(Token::Defer),
             "else" => Some(Token::Else),
             "match" => Some(Token::Match),
             "return" => Some(Token::Return),

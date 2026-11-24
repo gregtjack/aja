@@ -14,10 +14,10 @@ import std::net;
 import std::task;
 
 fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
+    defer conn.close();
     for line in conn.lines() {
         conn.write_line(line?)?;
     }
-    conn.close();
     Ok(void)
 }
 

@@ -1,0 +1,24 @@
+// Deferred code runs while its block is being left, so it can't leave by
+// itself: no `return`, `?`, or `break` and `continue` out of it.
+// expect: 'return' can't leave deferred code
+// expect: '?' can't leave deferred code
+// expect: 'break' can't leave deferred code
+
+fn first(xs: List<int>) -> Result<int, str> {
+    defer {
+        if xs.is_empty() {
+            return Err("empty");
+        }
+    }
+    defer xs.get(0).ok_or("empty")?;
+    Ok(xs[0])
+}
+
+fn main() {
+    while true {
+        defer {
+            break;
+        }
+    }
+    println(first([1]));
+}

@@ -11,13 +11,13 @@ import std::net;
 import std::task;
 
 fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
+    defer conn.close();
     let who = conn.peer_addr();
     println("{who} connected");
     for line in conn.lines() {
         conn.write_line(line?)?;
     }
     println("{who} left");
-    conn.close();
     Ok(void)
 }
 

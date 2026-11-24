@@ -1,0 +1,76 @@
+// `defer`: code that runs when its block is left, however it is left.
+//
+// `defer <expression>;` or `defer { ... }` puts code off until the end of
+// the block it is in. It runs there whether the block finishes, `return`s,
+// stops early with `?`, or is left by `break` or `continue`, so cleanup
+// goes next to what it cleans up after instead of at every way out.
+// Several run last first, undoing things in the reverse of the order they
+// were done.
+
+// Something to set up and take down: a shelf of books we borrow and must
+// return.
+struct Shelf {
+    name: str,
+}
+
+fn borrow(name: str) -> Shelf {
+    println("  borrow {name}");
+    Shelf { name }
+}
+
+impl Shelf {
+    fn give_back(self) {
+        println("  give back {self.name}");
+    }
+}
+
+// Two shelves, given back in the reverse order, whichever way we leave.
+fn study(topic: str) -> Result<int, str> {
+    let a = borrow("maths");
+    defer a.give_back();
+    let b = borrow("physics");
+    defer b.give_back();
+
+    // `?` leaves early, and both shelves are still given back.
+    let pages = topic.parse_int().ok_or("'{topic}' isn't a number of pages")?;
+    println("  read {pages} pages");
+    Ok(pages)
+}
+
+// In a loop, a `defer` in the body runs at the end of each iteration,
+// including one cut short by `continue` or `break`.
+fn each_day() {
+    for day in ["mon", "tue", "wed", "thu"] {
+        let s = borrow(day);
+        defer s.give_back();
+        if day == "tue" {
+            continue;
+        }
+        if day == "thu" {
+            break;
+        }
+        println("  work on {day}");
+    }
+}
+
+fn main() {
+    println("study(\"12\"):");
+    println(study("12"));
+    println("study(\"lots\"):");
+    println(study("lots"));
+
+    println("each_day():");
+    each_day();
+
+    // Deferred code sees names as they were at the `defer`, and a `var` as
+    // it is when the code runs.
+    println("counting:");
+    var count = 0;
+    let n = 1;
+    if true {
+        defer println("  deferred: n is {n}, count is {count}");
+        let n = 2;
+        count = count + n;
+        println("  in the block: n is {n}, count is {count}");
+    }
+}

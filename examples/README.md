@@ -17,6 +17,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [generics.aja](generics.aja) | Generic functions, structs, and enums: `Pair`, and a linked list with `map`, `fold`, and `find` |
 | [lists.aja](lists.aja) | Lists: literals, indexing, `get`, `push` and `set` making new lists, `map` / `filter` / `fold`, and sorting |
 | [collections.aja](collections.aja) | `std::collections`: counting words with a `Map` and `update`, ranking them with `sort_by` and `compare(...).then(...)`, `Set` operations, grouping into a `Map` of lists, a `SortedMap` of `SortedSet`s and its `range`, and maps comparing equal however they were built |
+| [defer.aja](defer.aja) | `defer`: cleanup that runs on every way out of a block, `?` included, last first, at the end of each loop iteration, and seeing names as they were at the `defer` |
 | [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |
 | [iterators.aja](iterators.aja) | `for` loops, ranges, `break` / `continue`, lazy `Iter` methods, an endless iterator, and a tree you can loop over |
 | [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |
@@ -50,6 +51,7 @@ there.
 | [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
 | [generic_body.aja](errors/generic_body.aja) | Generic code assuming things about a type parameter, and mismatched type arguments |
 | [question_mark.aja](errors/question_mark.aja) | `?` in a function that doesn't return a `Result`, and with a different error type |
+| [defer.aja](errors/defer.aja) | `return`, `?`, and `break` trying to leave deferred code |
 | [loops.aja](errors/loops.aja) | Looping over something that isn't iterable, `break` outside a loop, and assigning to a loop variable |
 | [methods.aja](errors/methods.aja) | A missing method, mixing up methods and associated functions, and an impl away from its type |
 

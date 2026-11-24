@@ -14,21 +14,21 @@ import std::task;
 
 // Send each line from `conn` back in capitals, until the client finishes.
 fn shout(conn: net::TcpStream) -> Result<void, io::Error> {
+    defer conn.close();
     for line in conn.lines() {
         conn.write_line(line?.to_upper())?;
     }
-    conn.close();
     Ok(void)
 }
 
 // Connect to `addr`, send two lines, and give the reply.
 fn client(addr: str, name: str) -> Result<str, io::Error> {
     let conn = net::connect(addr)?;
+    defer conn.close();
     conn.write_line("hello from {name}")?;
     conn.write_line("goodbye")?;
     conn.close_write()?;
     let reply = conn.read_to_string()?;
-    conn.close();
     Ok(reply)
 }
 
