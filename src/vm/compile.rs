@@ -84,6 +84,9 @@ pub struct Compiled {
     pub literals: Literals,
     /// The native functions, with the global slot each belongs in.
     pub natives: Vec<(u32, Id)>,
+    /// The files of the standard library, which messages about where the
+    /// program is look past, to the program's own code.
+    pub library: Vec<crate::ast::Source>,
 }
 
 /// A compiled REPL input: a function that takes no arguments, and the string
@@ -322,6 +325,7 @@ impl Compiler {
             main_result,
             literals: std::mem::take(&mut self.new_literals),
             natives: std::mem::take(&mut self.new_natives),
+            library: Vec::new(),
         })
     }
 

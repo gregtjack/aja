@@ -1,0 +1,24 @@
+// A deadlock: every task is waiting for another, so none can go on. Here
+// two workers each wait for a value from the other before sending their
+// own. The program stops, saying what each task was waiting for, and
+// where.
+//
+// expect: deadlock: every task is waiting for another task, so none can go on
+
+import std::channel;
+import std::task;
+
+fn main() {
+    let (to_left, for_left) = channel::new(0);
+    let (to_right, for_right) = channel::new(0);
+    task::scope(fn(s) {
+        s.spawn(fn() {
+            let n = for_left.recv().unwrap_or(0);
+            let _ = to_right.send(n + 1);
+        });
+        s.spawn(fn() {
+            let n = for_right.recv().unwrap_or(0);
+            let _ = to_left.send(n + 1);
+        });
+    });
+}

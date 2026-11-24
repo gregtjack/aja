@@ -58,6 +58,11 @@ pub enum Intrinsic {
     Join,
     // `Scope::cancel`.
     Cancel,
+    // `std::channel`: making a channel, sending, receiving, and closing.
+    ChannelOpen,
+    Send,
+    Receive,
+    CloseChannel,
     // Whether a task returned rather than being cancelled, once it has
     // finished: `Task::try_join` is written on it.
     Returned,
@@ -70,13 +75,17 @@ pub enum Intrinsic {
 }
 
 impl Intrinsic {
-    const ALL: [(Intrinsic, &'static str); 8] = [
+    const ALL: [(Intrinsic, &'static str); 12] = [
         (Intrinsic::OpenScope, "std::task::open_scope"),
         (Intrinsic::CloseScope, "std::task::close_scope"),
         (Intrinsic::Spawn, "std::task::Scope::spawn"),
         (Intrinsic::Join, "std::task::Task::join"),
         (Intrinsic::Cancel, "std::task::Scope::cancel"),
         (Intrinsic::Returned, "std::task::returned"),
+        (Intrinsic::ChannelOpen, "std::channel::open"),
+        (Intrinsic::Send, "std::channel::put"),
+        (Intrinsic::Receive, "std::channel::take"),
+        (Intrinsic::CloseChannel, "std::channel::Sender::close"),
         // The built-in, which sleeps only the task that calls it.
         (Intrinsic::Sleep, "sleep"),
         (Intrinsic::SleepNanos, "std::native::sleep_nanos"),
@@ -132,6 +141,10 @@ pub enum Wait {
     Sleep(u64),
     /// A socket to be ready, or a connect to finish.
     Net,
+    /// A receiver to take its value from channel `0`, or room in it.
+    Send(Gc),
+    /// A value to arrive on channel `0`, or it to close.
+    Recv(Gc),
 }
 
 impl Wait {
@@ -142,6 +155,8 @@ impl Wait {
             Wait::Close(_) => "waiting for the tasks of its scope to finish",
             Wait::Sleep(_) => "sleeping",
             Wait::Net => "waiting on the network",
+            Wait::Send(_) => "sending on a channel",
+            Wait::Recv(_) => "receiving from a channel",
         }
     }
 }
@@ -168,9 +183,10 @@ struct Task {
     /// was spawned in. `None` for the tasks a run starts with.
     handle: Option<Gc>,
     scope: Option<Gc>,
-    /// Set when the task's sleep has ended, so its call of `sleep`, which
-    /// runs again, returns.
-    slept: bool,
+    /// Set when what the task waited for has happened on its behalf (its
+    /// sleep ended, or a receiver took the value it was sending), so its
+    /// call, which runs again, returns.
+    done: bool,
     /// What it is waiting for, while it waits.
     waiting_on: Option<Wait>,
     cancel: Cancel,
@@ -263,17 +279,48 @@ impl Scheduler {
     /// Wake task `id` if it is waiting for `what`. A cancelled task stops
     /// waiting early, so a timer or join it was waiting for may come later,
     /// when it is waiting for something else or its slot is another task's.
-    pub fn wake_for(&mut self, id: TaskId, what: Wait) {
+    pub fn wake_for(&mut self, id: TaskId, what: Wait) -> bool {
         let task = &self.tasks[id];
-        if matches!(task.state, State::Waiting) && task.waiting_on == Some(what) {
+        let waiting = matches!(task.state, State::Waiting) && task.waiting_on == Some(what);
+        if waiting {
             self.wake(id);
+        }
+        waiting
+    }
+
+    /// Whether what the running task waited for has just been done for it
+    /// (see [`Task::done`]), which then counts as over.
+    pub fn take_done(&mut self) -> bool {
+        std::mem::take(&mut self.tasks[self.current].done)
+    }
+
+    /// Wake task `id`, which is sending on channel `ch`, a receiver having
+    /// taken its value.
+    pub fn delivered(&mut self, id: TaskId, ch: Gc) {
+        debug_assert_eq!(self.tasks[id].waiting_on, Some(Wait::Send(ch)));
+        self.tasks[id].done = true;
+        self.wake(id);
+    }
+
+    /// Wake the first of `receivers` still waiting to receive from `ch`.
+    pub fn wake_receiver(&mut self, receivers: &mut std::collections::VecDeque<TaskId>, ch: Gc) {
+        while let Some(id) = receivers.pop_front() {
+            if self.wake_for(id, Wait::Recv(ch)) {
+                break;
+            }
         }
     }
 
-    /// Whether the running task has just woken from a sleep, which then
-    /// counts as over.
-    pub fn take_slept(&mut self) -> bool {
-        std::mem::take(&mut self.tasks[self.current].slept)
+    /// Stop task `id`, which has been cancelled, waiting for what it waits
+    /// for, dropping its place in any queue: a value it was sending isn't
+    /// sent.
+    fn forget(&mut self, id: TaskId, heap: &mut Heap) {
+        match self.tasks[id].waiting_on {
+            Some(Wait::Net) => self.net.forget(id),
+            Some(Wait::Send(ch)) => heap.channel(ch).senders.retain(|(t, _)| *t != id),
+            Some(Wait::Recv(ch)) => heap.channel(ch).receivers.retain(|t| *t != id),
+            _ => {}
+        }
     }
 
     /// Wake the sleeping tasks whose time has come.
@@ -289,7 +336,7 @@ impl Scheduler {
             let Reverse((_, n, _)) = self.timers.pop().unwrap();
             let task = &self.tasks[id];
             if matches!(task.state, State::Waiting) && task.waiting_on == Some(Wait::Sleep(n)) {
-                self.tasks[id].slept = true;
+                self.tasks[id].done = true;
                 self.wake(id);
             }
         }
@@ -372,7 +419,7 @@ impl Scheduler {
             status: (0, String::new()),
             handle,
             scope,
-            slept: false,
+            done: false,
             waiting_on: None,
             cancel: Cancel::No,
             origin,
@@ -496,7 +543,7 @@ impl Scheduler {
                     && !matches!(task.waiting_on, Some(Wait::Close(_)))
                     && !waits_in_deferred
                 {
-                    self.net.forget(id);
+                    self.forget(id, heap);
                     self.wake(id);
                 }
             }

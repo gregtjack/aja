@@ -6,6 +6,7 @@
 // connection, waiting for a line, or anywhere else. On the way out each
 // runs its deferred code, so every connection is closed and says so.
 
+import std::channel;
 import std::io;
 import std::net;
 import std::task;
@@ -22,9 +23,9 @@ fn serve(id: int, conn: net::TcpStream) -> Result<void, io::Error> {
     Ok(void)
 }
 
-// A client that says hello, reads the echo, and then just waits, as a
-// client that leaves its connection open does.
-fn client(addr: str, name: str) -> str {
+// A client that says hello, reads the echo, tells `ready` so, and then
+// just waits, as a client that leaves its connection open does.
+fn client(addr: str, name: str, ready: channel::Sender<str>) -> str {
     match net::connect(addr) {
         Ok(conn) => {
             defer conn.close();
@@ -33,6 +34,7 @@ fn client(addr: str, name: str) -> str {
                 Ok(Some(line)) => line,
                 _ => "no echo",
             };
+            let _ = ready.send(name);
             // Ends when the server closes the connection.
             let after = match conn.read_line() {
                 Ok(None) => "the server closed it",
@@ -48,10 +50,12 @@ fn main() -> Result<void, io::Error> {
     let listener = net::listen("127.0.0.1:0")?;
     let addr = listener.local_addr();
 
+    let names = ["ada", "grace", "edsger"];
+    let (ready, said_hello) = channel::new(0);
     let reports = task::scope(fn(outer) {
         // The clients aren't the server's, so cancelling it leaves them be.
-        let clients = ["ada", "grace", "edsger"].map(fn(name) {
-            outer.spawn(fn() { client(addr, name) })
+        let clients = names.map(fn(name) {
+            outer.spawn(fn() { client(addr, name, ready) })
         });
         task::scope(fn(server) {
             server.spawn(fn() {
@@ -68,8 +72,10 @@ fn main() -> Result<void, io::Error> {
                     }
                 }
             });
-            // Give the clients a moment to connect and say hello.
-            sleep(100);
+            // Once every client has had its echo, shut down.
+            for _ in names {
+                let _ = said_hello.recv();
+            }
             println("shutting down:");
             server.cancel();
         });

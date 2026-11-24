@@ -602,10 +602,18 @@ impl Checker {
                 format!("mismatched types: parameter '{pname}' of {what} expects {e}, found {f}")
             });
         }
-        if info.global == "std::task::Scope::spawn" {
-            if let Some(f) = args.first() {
-                self.check_spawned(f);
+        // What goes to another task can't reach a `var` of this one.
+        let to_another_task = match info.global.as_str() {
+            "std::task::Scope::spawn" => {
+                Some("a task can't use a `var` of the task that spawns it")
             }
+            "std::channel::Sender::send" => {
+                Some("a value sent on a channel can't reach a `var` of the task sending it")
+            }
+            _ => None,
+        };
+        if let (Some(what), Some(value)) = (to_another_task, args.first()) {
+            self.check_shared(value, what);
         }
         self.functions.insert(key(callee.span), info.global);
         *ret

@@ -612,7 +612,51 @@ implementation fails the tests and stops the VM at startup. Built-ins named
 
 The standard library is written in Aja (`src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
-it has `std::collections`, `std::io`, `std::fs`, `std::net`, `std::task`, and `std::time`.
+it has `std::channel`, `std::collections`, `std::io`, `std::fs`, `std::net`, `std::task`, and `std::time`.
+
+#### `std::channel`
+
+```rust
+import std::channel;
+import std::task;
+
+fn main() {
+    let (tx, rx) = channel::new(16);
+    task::scope(fn(s) {
+        s.spawn(fn() {
+            for i in 0..5 {
+                let _ = tx.send(i * i);
+            }
+            tx.close();
+        });
+        for n in rx {
+            println("{n}");      // 0 1 4 9 16
+        }
+    });
+}
+```
+
+| `std::channel` | Does |
+|----------------|------|
+| `new(capacity)` | `(Sender<T>, Receiver<T>)`: a channel holding up to `capacity` values |
+| `tx.send(value)` | `Result<void, Closed<T>>`: waits while the channel is full; fails, giving the value back in `Closed { value }`, if it is closed |
+| `rx.recv()` | `Option<T>`: the oldest value, waiting for one; `None` once the channel is closed and empty |
+| `for v in rx` | Each value as it arrives, until the channel is closed and empty |
+| `tx.close()` | Nothing more will be sent; receivers get what is left, then `None` |
+
+- **Waiting blocks only the task that waits.** With capacity 0, a channel
+  holds nothing: `send` waits until a receiver has taken the value, so the
+  two tasks meet.
+- **Any number of tasks can use either end.** Each value goes to one
+  receiver, in the order sent.
+- **Closing is explicit**, and the sender's job. A receiver of a channel
+  that nobody closes waits for good; if every task ends up waiting like
+  that, the program stops with a deadlock that says where each task waits.
+- **A value sent can't reach a `var` of the sender**, as with a task's
+  function: a compile error where the code shows it, an error when sent
+  otherwise. Values that never change are shared, not copied, however big.
+- Sometimes the type of the values can't be told from the first use; then
+  write it: `let (tx, rx): (channel::Sender<str>, channel::Receiver<str>) = channel::new(8);`.
 
 #### `std::collections`
 
@@ -857,7 +901,7 @@ fn main() {
 - **A `var` belongs to one task.** A spawned function can't use a `var` of
   the task spawning it, or a function that does, so no two tasks can ever
   change one at once. Give a task copies with `let`, and get results back
-  from `join`:
+  from `join`, or send them over a [channel](#stdchannel):
 
   ```rust
   var total = 0;
@@ -873,7 +917,8 @@ fn main() {
   `var` some other way (passed in as a parameter, say) stops the program
   when it is spawned. Immutable values, however big, are shared freely,
   and a task's own `var`s are its to use, and to give back once it has
-  finished.
+  finished. To share state, one task owns it and the others send it
+  requests (see [examples/channels.aja](examples/channels.aja)).
 - **Cancelling** stops each task at its next call, loop iteration, or
   wait. On the way out it runs the code it deferred with `defer`, so
   connections and the like get closed:
@@ -1018,7 +1063,7 @@ with `Eq`, `Hash`, and `Ord` bounds; ordering with `<` and `compare` on any `Ord
 `Result`, and `Ordering` in the prelude, and `?`; methods and associated functions in `impl` blocks;
 sorting and searching lists;
 modules, with `import` and `pub`; the start of the standard library
-(`std::collections`, `std::io`, `std::fs`, `std::net`, `std::task`, `std::time`); template strings, and methods on strings and
+(`std::channel`, `std::collections`, `std::io`, `std::fs`, `std::net`, `std::task`, `std::time`); template strings, and methods on strings and
 numbers; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 

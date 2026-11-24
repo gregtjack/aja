@@ -434,6 +434,9 @@ static NATIVES: &[(&str, NativeFn)] = &[
         record(flush(*fd));
         Ok(Value::Void)
     }),
+    // ---- Channels (`std::channel`) -------------------------------------------
+    // A channel's receiving end is the same channel as its sending end.
+    ("std::channel::receiver", |_, args| Ok(args[0].clone())),
     // ---- Time (`std::time`) ------------------------------------------------
     ("std::native::monotonic_nanos", |_, _| {
         // Counted from the first call, so an `int` holds it for centuries.

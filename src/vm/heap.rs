@@ -73,6 +73,8 @@ enum Obj {
     Scope(ScopeState),
     /// A `std::task::Task`.
     Task(TaskState),
+    /// A `std::channel` channel.
+    Channel(ChannelState),
 }
 
 /// What a `std::task::Scope` keeps track of.
@@ -90,6 +92,22 @@ pub struct ScopeState {
     /// Whether it has been cancelled, so its tasks stop and any spawned in
     /// it from now on never start.
     pub cancelled: bool,
+}
+
+/// What a `std::channel` channel holds.
+#[derive(Debug, Default)]
+pub struct ChannelState {
+    /// How many values it holds before a send waits; 0 for one where each
+    /// send waits for a receiver to take its value.
+    pub capacity: usize,
+    /// The values sent and not yet received, oldest first.
+    pub buffer: std::collections::VecDeque<Value>,
+    /// The tasks waiting to send, oldest first, with what each is sending.
+    pub senders: std::collections::VecDeque<(TaskId, Value)>,
+    /// The tasks waiting to receive, oldest first.
+    pub receivers: std::collections::VecDeque<TaskId>,
+    /// Whether it has been closed, so nothing more can be sent.
+    pub closed: bool,
 }
 
 /// What a `std::task::Task` keeps track of.
@@ -120,6 +138,9 @@ impl Obj {
                 Obj::SortedMap(t) | Obj::SortedSet(t) => t.unshared_bytes(),
                 Obj::Scope(_) => 0,
                 Obj::Task(t) => t.joiners.len() * size_of::<TaskId>(),
+                Obj::Channel(c) => {
+                    (c.buffer.len() + c.senders.len() + c.receivers.len()) * size_of::<Value>()
+                }
             }
     }
 }
@@ -234,6 +255,14 @@ impl Heap {
         self.alloc(Obj::Task(TaskState::default()))
     }
 
+    /// A new, empty channel.
+    pub fn alloc_channel(&mut self, capacity: usize) -> Gc {
+        self.alloc(Obj::Channel(ChannelState {
+            capacity,
+            ..ChannelState::default()
+        }))
+    }
+
     fn alloc(&mut self, obj: Obj) -> Gc {
         self.live += 1;
         self.bytes += obj.size();
@@ -292,7 +321,9 @@ impl Heap {
                 Obj::SortedMap(t) | Obj::SortedSet(t) => {
                     t.visit_unseen(&mut seen_nodes, add);
                 }
-                Obj::Str(_) | Obj::Scope(_) | Obj::Task(_) => {}
+                // Handles to share. What is sent on a channel was checked
+                // when it was sent.
+                Obj::Str(_) | Obj::Scope(_) | Obj::Task(_) | Obj::Channel(_) => {}
             }
         }
         false
@@ -389,6 +420,13 @@ impl Heap {
         }
     }
 
+    pub fn channel(&mut self, gc: Gc) -> &mut ChannelState {
+        match self.get_mut(gc) {
+            Obj::Channel(c) => c,
+            _ => panic!("internal error: object {gc} is not a channel"),
+        }
+    }
+
     /// Whether two values of the same type are equal, comparing structs and
     /// enums field by field. Iterative, so long lists can't overflow the stack.
     pub fn equal(&self, a: &Value, b: &Value) -> bool {
@@ -461,7 +499,9 @@ impl Heap {
                 }
                 (Value::Void, Value::Void) => true,
                 // A scope or task is equal only to itself.
-                (Value::Scope(x), Value::Scope(y)) | (Value::Task(x), Value::Task(y)) => x == y,
+                (Value::Scope(x), Value::Scope(y))
+                | (Value::Task(x), Value::Task(y))
+                | (Value::Channel(x), Value::Channel(y)) => x == y,
                 // The type checker only allows `==` on types made of the above.
                 _ => panic!("internal error: comparing {a:?} with {b:?}"),
             };
@@ -691,6 +731,12 @@ impl Heap {
                 | Obj::SortedMap(_)
                 | Obj::SortedSet(_) => {}
                 Obj::Task(t) => work.extend(t.result.as_ref().and_then(Value::handle)),
+                Obj::Channel(c) => work.extend(
+                    c.buffer
+                        .iter()
+                        .chain(c.senders.iter().map(|(_, v)| v))
+                        .filter_map(Value::handle),
+                ),
             }
         }
 
@@ -840,6 +886,7 @@ impl Heap {
                     Value::Runtime(f) => format!("<native fn: {}>", f.name()),
                     Value::Scope(_) => "<scope>".to_string(),
                     Value::Task(_) => "<task>".to_string(),
+                    Value::Channel(_) => "<channel>".to_string(),
                 },
             };
             out.push_str(&value);

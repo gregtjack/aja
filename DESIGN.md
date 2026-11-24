@@ -326,7 +326,8 @@ by a number with a fractional part.
    `sleep_for`, `sleep_until`) ✅. Cancelling a scope, which unwinds its
    tasks through their deferred code, and deadlock reports that say what
    each task waits for ✅. A `var` stays in one task, checked at compile
-   time where the code shows it and when spawning otherwise ✅. A poller in the scheduler, so a socket
+   time where the code shows it and when spawning otherwise ✅. Bounded
+   channels (`std::channel`) ✅. A poller in the scheduler, so a socket
    operation blocks only its task, and `std::net` over TCP ✅ (see
    [plans/net.md](plans/net.md)).
 10. **Cranelift AoT backend** producing native binaries, with the same runtime

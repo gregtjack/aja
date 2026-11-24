@@ -1,0 +1,144 @@
+// `std::channel`: tasks sending values to each other.
+//
+// A channel is a queue between tasks: `send` puts a value in, waiting
+// while it is full, and `recv` takes the oldest out, waiting while it is
+// empty. `close` says nothing more is coming, which ends a `for` loop over
+// it. Each waits only its own task.
+
+import std::channel;
+import std::collections::{Map};
+import std::task;
+
+// ---- A pipeline: each stage a task, joined by channels -------------------
+
+fn pipeline() {
+    let (numbers, numbers_out) = channel::new(4);
+    let (squares, squares_out) = channel::new(4);
+    let total = task::scope(fn(s) {
+        s.spawn(fn() {
+            for i in 1..11 {
+                let _ = numbers.send(i);
+            }
+            numbers.close();
+        });
+        s.spawn(fn() {
+            for n in numbers_out {
+                let _ = squares.send(n * n);
+            }
+            squares.close();
+        });
+        var total = 0;
+        for sq in squares_out {
+            total = total + sq;
+        }
+        total
+    });
+    println("the squares of 1 to 10 add up to {total}");
+}
+
+// ---- A pool of workers sharing one queue of jobs ---------------------------
+
+fn workers() {
+    // The values' type can't be told from the first use, so it is written.
+    let (jobs, queue): (channel::Sender<str>, channel::Receiver<str>) = channel::new(8);
+    let (results, done) = channel::new(16);
+    task::scope(fn(s) {
+        for w in 1..4 {
+            s.spawn(fn() {
+                // Each job goes to whichever worker is free.
+                for word in queue {
+                    let _ = results.send((word, word.len(), w));
+                }
+            });
+        }
+        for word in "the quick brown fox jumps over the lazy dog".words() {
+            let _ = jobs.send(word);
+        }
+        jobs.close();
+    });
+    // The workers have finished, so nothing more will be sent.
+    results.close();
+    var longest = ("", 0);
+    var count = 0;
+    for (word, n, _) in done {
+        if n > longest.1 {
+            longest = (word, n);
+        }
+        count = count + 1;
+    }
+    println("3 workers measured {count} words; the longest is \"{longest.0}\"");
+}
+
+// ---- Meeting: with no room, a send waits for a receiver ---------------------
+
+fn ping_pong() {
+    let (to_pong, pong_in): (channel::Sender<int>, channel::Receiver<int>) = channel::new(0);
+    let (to_ping, ping_in) = channel::new(0);
+    task::scope(fn(s) {
+        s.spawn(fn() {
+            for ball in pong_in {
+                println("  pong {ball}");
+                let _ = to_ping.send(ball + 1);
+            }
+        });
+        var ball = 1;
+        while ball < 4 {
+            println("  ping {ball}");
+            let _ = to_pong.send(ball);
+            ball = ping_in.recv().unwrap_or(99);
+        }
+        to_pong.close();
+    });
+}
+
+// ---- Shared state, kept by one task ------------------------------------------
+//
+// A `var` belongs to one task, so tasks don't share one. To share state, a
+// task owns it, and the others send it requests: it handles one at a time,
+// so nothing changes the state at once. A request that wants an answer
+// brings a channel to send it on.
+
+enum Request {
+    Visit(str),
+    Count(str, channel::Sender<int>),
+}
+
+fn page_counter() {
+    let (requests, inbox) = channel::new(16);
+    task::scope(fn(s) {
+        // The owner: `visits` is its own.
+        s.spawn(fn() {
+            var visits: Map<str, int> = Map::new();
+            for request in inbox {
+                match request {
+                    Request::Visit(page) => {
+                        visits = visits.update(page, fn(n) { Some(n.unwrap_or(0) + 1) });
+                    }
+                    Request::Count(page, reply) => {
+                        let _ = reply.send(visits.get(page).unwrap_or(0));
+                    }
+                }
+            }
+        });
+        // Visitors, all at once.
+        task::scope(fn(visitors) {
+            for page in ["home", "about", "home", "blog", "home"] {
+                visitors.spawn(fn() {
+                    let _ = requests.send(Request::Visit(page));
+                });
+            }
+        });
+        let (reply, answer) = channel::new(0);
+        let _ = requests.send(Request::Count("home", reply));
+        println("'home' was visited {answer.recv().unwrap_or(0)} times");
+        requests.close();
+    });
+}
+
+fn main() {
+    pipeline();
+    workers();
+    println("ping pong:");
+    ping_pong();
+    page_counter();
+}

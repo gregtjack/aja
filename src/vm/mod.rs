@@ -181,11 +181,8 @@ pub struct Vm {
     scheduler: Scheduler,
     /// The most memory, in bytes, each task's call stack may use.
     pub stack_limit: usize,
-    /// Let a task be spawned with a function that reaches a `var` of the
-    /// task spawning it. Only tests that need tasks to share one, to build
-    /// a deadlock, which nothing else can make yet, set it.
-    #[cfg(test)]
-    pub share_vars: bool,
+    /// The program's standard library files (see [`Compiled::library`]).
+    library: Vec<crate::ast::Source>,
 }
 
 impl Vm {
@@ -211,14 +208,14 @@ impl Vm {
             frames: Vec::new(),
             scheduler: Scheduler::new(),
             stack_limit: DEFAULT_STACK_LIMIT,
-            #[cfg(test)]
-            share_vars: false,
+            library: Vec::new(),
         }
     }
 
     /// Define a compiled program's functions, then run `main` and return
     /// its result.
     pub fn run_program(&mut self, program: &Compiled) -> Result<Value, RuntimeError> {
+        self.library = program.library.clone();
         self.load_literals(&program.literals);
         self.load_functions(&program.functions);
         self.load_natives(&program.natives);
@@ -617,8 +614,7 @@ impl Vm {
                     }
                     Next::Finished | Next::Deadlock => {
                         let mut err = self.deadlock(false);
-                        let top = self.frames.last().unwrap();
-                        err.span = Some(top.proto.spans[top.ip]);
+                        err.span = self.waiting_at(&self.frames);
                         return Err(err);
                     }
                 }
@@ -963,11 +959,7 @@ impl Vm {
                 }
                 // What the checker can't see: a function from a parameter,
                 // a list, or a call.
-                #[cfg(test)]
-                let checked = !self.share_vars;
-                #[cfg(not(test))]
-                let checked = true;
-                if checked && self.heap.reaches_cell(&Value::Fn(f)) {
+                if self.heap.reaches_cell(&Value::Fn(f)) {
                     return Outcome::Error(
                         "cannot spawn this function: it can reach a `var` of the task \
                          spawning it, and a `var` belongs to one task (give the task copies \
@@ -996,6 +988,111 @@ impl Vm {
                     .spawn(f, proto, Some(handle), Some(s), Rc::from(origin));
                 Outcome::Value(Value::Task(handle))
             }
+            Intrinsic::ChannelOpen => {
+                let Value::Int(capacity) = arg(self, 0) else {
+                    internal_error("Int", &arg(self, 0));
+                };
+                if capacity < 0 {
+                    return Outcome::Error(format!(
+                        "cannot make a channel with capacity {capacity}: it must be 0 or more"
+                    ));
+                }
+                if self.heap.wants_collection(0) {
+                    self.collect_garbage_with(Vec::new());
+                }
+                Outcome::Value(Value::Channel(self.heap.alloc_channel(capacity as usize)))
+            }
+            Intrinsic::Send => {
+                let (Value::Channel(ch), value) = (arg(self, 0), arg(self, 1)) else {
+                    internal_error("Channel", &arg(self, 0));
+                };
+                // Run again after a receiver took the value.
+                if self.scheduler.take_done() {
+                    native::set_status(native::OK, String::new());
+                    return Outcome::Value(Value::Void);
+                }
+                if self.heap.reaches_cell(&value) {
+                    return Outcome::Error(
+                        "cannot send this value: it can reach a `var` of the task sending it, \
+                         and a `var` belongs to one task (send a copy, made with `let`)"
+                            .to_string(),
+                    );
+                }
+                let current = self.scheduler.current();
+                let c = self.heap.channel(ch);
+                if c.closed {
+                    native::set_status(native::END_OF_INPUT, "the channel is closed".to_string());
+                    return Outcome::Value(Value::Void);
+                }
+                native::set_status(native::OK, String::new());
+                if c.buffer.len() < c.capacity {
+                    c.buffer.push_back(value);
+                    self.scheduler.wake_receiver(&mut c.receivers, ch);
+                    Outcome::Value(Value::Void)
+                } else {
+                    // Waits until a receiver takes it: at once, for a
+                    // receiver already waiting on a channel that holds none.
+                    c.senders.push_back((current, value));
+                    self.scheduler.wake_receiver(&mut c.receivers, ch);
+                    self.scheduler.waiting_for(Wait::Send(ch));
+                    Outcome::Wait
+                }
+            }
+            Intrinsic::Receive => {
+                let Value::Channel(ch) = arg(self, 0) else {
+                    internal_error("Channel", &arg(self, 0));
+                };
+                let current = self.scheduler.current();
+                let c = self.heap.channel(ch);
+                let got = match c.buffer.pop_front() {
+                    // A waiting sender's value takes the room this leaves.
+                    Some(v) => {
+                        if let Some((sender, next)) = c.senders.pop_front() {
+                            c.buffer.push_back(next);
+                            self.scheduler.delivered(sender, ch);
+                        }
+                        Some(v)
+                    }
+                    None => match c.senders.pop_front() {
+                        Some((sender, v)) => {
+                            self.scheduler.delivered(sender, ch);
+                            Some(v)
+                        }
+                        None => None,
+                    },
+                };
+                match got {
+                    Some(v) => {
+                        native::set_status(native::OK, String::new());
+                        Outcome::Value(v)
+                    }
+                    None if c.closed => {
+                        native::set_status(native::END_OF_INPUT, String::new());
+                        Outcome::Value(Value::Void)
+                    }
+                    None => {
+                        c.receivers.push_back(current);
+                        self.scheduler.waiting_for(Wait::Recv(ch));
+                        Outcome::Wait
+                    }
+                }
+            }
+            Intrinsic::CloseChannel => {
+                let Value::Channel(ch) = arg(self, 0) else {
+                    internal_error("Channel", &arg(self, 0));
+                };
+                let c = self.heap.channel(ch);
+                c.closed = true;
+                // Receivers get what is left, then `None`; senders still
+                // waiting find it closed and keep their values.
+                for id in std::mem::take(&mut c.receivers) {
+                    self.scheduler.wake_for(id, Wait::Recv(ch));
+                }
+                for (id, _) in std::mem::take(&mut c.senders) {
+                    self.scheduler.wake_for(id, Wait::Send(ch));
+                }
+                Outcome::Value(Value::Void)
+            }
             Intrinsic::Cancel => {
                 let Value::Scope(s) = arg(self, 0) else {
                     internal_error("Scope", &arg(self, 0));
@@ -1021,7 +1118,7 @@ impl Vm {
                     ));
                 }
                 // The call runs again when the task wakes, and then returns.
-                if self.scheduler.take_slept() || n == 0 {
+                if self.scheduler.take_done() || n == 0 {
                     return Outcome::Value(Value::Void);
                 }
                 self.scheduler.set_timer(duration(n as u64));
@@ -1151,10 +1248,9 @@ impl Vm {
                 Some(&at) => ("the task spawned at {}", vec![at]),
                 None => ("the main task", vec![]),
             };
-            // Its innermost frame is at the call it is waiting in.
-            match frames.last() {
-                Some(top) => {
-                    places.push(top.proto.spans[top.ip]);
+            match self.waiting_at(frames) {
+                Some(at) => {
+                    places.push(at);
                     notes.push(Note {
                         text: format!("{who} is {what}, at {{}}"),
                         places,
@@ -1183,6 +1279,24 @@ impl Vm {
             trace: Vec::new(),
             notes,
         }
+    }
+
+    /// Where a waiting task, whose frames are `frames`, is waiting, in the
+    /// program's own code: the call it waits in (its innermost frame is at
+    /// it), or the call into the standard library that led there.
+    fn waiting_at(&self, frames: &[Frame]) -> Option<Span> {
+        let n = frames.len();
+        let at = |i: usize, f: &Frame| f.proto.spans[if i + 1 == n { f.ip } else { f.ip - 1 }];
+        let mine = |s: &Span| {
+            !matches!(s.start.source, Source::Prelude) && !self.library.contains(&s.start.source)
+        };
+        frames
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, f)| at(i, f))
+            .find(mine)
+            .or_else(|| frames.last().map(|f| at(n - 1, f)))
     }
 }
 

@@ -82,14 +82,14 @@ pub fn build(root: &dyn Root, main: &str) -> (Files, Result<Compiled, Vec<Diagno
     if !errors.is_empty() {
         return (loaded.files, Err(errors));
     }
-    let std_sources = loaded
+    let library: Vec<_> = loaded
         .modules
         .iter()
         .filter(|m| m.is_std())
         .map(|m| m.source)
         .collect();
     let (program, mut errors) = resolve(loaded.modules);
-    let types = check::check_modules(&program, std_sources);
+    let types = check::check_modules(&program, library.iter().copied().collect());
     if let Err(type_errors) = &types {
         errors.extend(type_errors.iter().map(|e| e.to_diagnostic()));
     }
@@ -100,6 +100,10 @@ pub fn build(root: &dyn Root, main: &str) -> (Files, Result<Compiled, Vec<Diagno
     let types = types.expect("there are no type errors");
     let compiled = Compiler::new()
         .program(&program, &types)
+        .map(|mut c| {
+            c.library = library;
+            c
+        })
         .map_err(|e| vec![e]);
     (loaded.files, compiled)
 }

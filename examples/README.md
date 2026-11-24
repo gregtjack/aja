@@ -22,6 +22,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [iterators.aja](iterators.aja) | `for` loops, ranges, `break` / `continue`, lazy `Iter` methods, an endless iterator, and a tree you can loop over |
 | [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |
 | [tasks.aja](tasks.aja) | `std::task`: spawning and joining tasks in a scope, a scope waiting for tasks nobody joins, a generic `par_map`, divide and conquer with nested scopes, errors as values from tasks, and two long loops taking turns |
+| [channels.aja](channels.aja) | `std::channel`: a pipeline of tasks, a pool of workers sharing a queue, a rendezvous with no room, and shared state kept by one task that the others send requests |
 | [shutdown.aja](shutdown.aja) | Cancelling a scope: a server whose accept loop and connections all stop on `cancel()`, each closing its connection in deferred code, while its clients, in another scope, carry on |
 | [sleep.aja](sleep.aja) | Tasks running at the same time: three jobs that wait, done one after another and then at once, timed with `clock()` |
 | [time.aja](time.aja) | `std::time`: timing a computation with `Instant`, making, adding, and comparing `Duration`s, and ticking at a steady rate with `sleep_until` |
@@ -50,6 +51,7 @@ there.
 | [task_failure.aja](errors/task_failure.aja) | An error inside a task, which stops the program |
 | [cancelled_join.aja](errors/cancelled_join.aja) | `join` on a cancelled task, which has no value to give, and `try_join`, which gives `None` |
 | [shared_var.aja](errors/shared_var.aja) | Spawning a task that uses a `var` of the spawning task, directly or through a function, and doing it with `let` copies and `join` instead |
+| [deadlock.aja](errors/deadlock.aja) | Two tasks each waiting for the other's value, and the report of what every task waits for |
 | [scope_ended.aja](errors/scope_ended.aja) | Spawning on a `Scope` kept after its `scope` call returned |
 | [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
 | [generic_body.aja](errors/generic_body.aja) | Generic code assuming things about a type parameter, and mismatched type arguments |

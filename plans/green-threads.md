@@ -316,14 +316,29 @@ Each step lands on its own with tests, in order:
    test-only buffer. [examples/errors/shared_var.aja](../examples/errors/shared_var.aja).
 5. **`std::channel`.** Bounded channels with capacity 0 as a rendezvous,
    `close`, `recv` returning `None`, `for v in rx`, and parked tasks as GC
-   roots.
+   roots. ✅ As built: one heap object per channel, behind both ends, holds
+   the buffered values, the senders waiting with the values they are
+   sending, and the receivers waiting. A sender waiting with capacity 0 has
+   its value taken straight from it; one whose value is taken (with room
+   made in the buffer, or by a receiver) is marked done, so its `send`,
+   which runs again, returns. Close is explicit, and a send on a closed
+   channel gives the value back in `Closed { value }`. A cancelled task
+   waiting to send or receive leaves the channel's queues, so its value is
+   never received. What is sent is checked for `var`s like a spawned
+   function, at compile time and when sent. Deadlocks can be built again,
+   so the deadlock tests use channels and the test-only switch is gone;
+   a deadlock's notes point at each wait in the program's own code, past
+   the standard library's. Examples: [channels.aja](../examples/channels.aja)
+   (a pipeline, a worker pool, a rendezvous, and state kept by one task),
+   `errors/deadlock.aja`, and `shutdown.aja` now waits on a channel rather
+   than a guess at how long clients take.
 6. **Blocking intrinsics off-thread.** Worker pool, `blocking` flags, per-task
    status, and waiting for an in-flight call when its task is cancelled.
 7. **Documentation.** Examples grow with each step: so far
    [examples/tasks.aja](../examples/tasks.aja) and, in `examples/errors/`,
    `task_failure.aja` and `scope_ended.aja`, which a test also runs with
    switching and collection stress. Channels (step 5) get an example of
-   their own, and step 3 adds a deadlock example to `errors/`. DESIGN updates (the M:1
+   their own, and a deadlock example in `errors/` ✅. DESIGN updates (the M:1
    note in "Concurrency runtime", the scheduler intrinsics as part of a
    backend's set), and doc comments for both modules.
 

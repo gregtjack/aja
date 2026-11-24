@@ -1747,23 +1747,23 @@ impl Checker {
         }
     }
 
-    /// Report `arg`, the function given to `Scope::spawn`, if it plainly
-    /// uses a `var` of the task spawning it.
-    pub(super) fn check_spawned(&mut self, arg: &Expr) {
+    /// Report `arg`, a value going to another task (the function given to
+    /// `Scope::spawn`, or a value sent on a channel), if it plainly reaches
+    /// a `var` of this one. `what` says what can't happen.
+    pub(super) fn check_shared(&mut self, arg: &Expr, what: &str) {
         if let Some((span, why, var)) = self.reaches_var(arg) {
             let help = match var {
                 Some(n) => format!(
-                    "give the task a copy made with `let` before spawning it (`let {n} = {n};`), and get what it works out back from `join`"
+                    "give it a copy made with `let` (`let {n} = {n};`), and get results back from `join` or a channel"
                 ),
-                None => "have the task work out what it needs itself, and get what it works out back from `join`".to_string(),
+                None => "have the other task work out what it needs itself, and get results back from `join` or a channel".to_string(),
             };
             self.error(
-                TypeError::new(
-                    format!("a task can't use a `var` of the task that spawns it: {why}"),
-                    span,
-                )
-                .help(help)
-                .note("a `var` belongs to one task, so that no two tasks can change it at once"),
+                TypeError::new(format!("{what}: {why}"), span)
+                    .help(help)
+                    .note(
+                        "a `var` belongs to one task, so that no two tasks can change it at once",
+                    ),
             );
         }
     }

@@ -1,0 +1,110 @@
+// Channels: sending values from one task to another.
+//
+//     import std::channel;
+//     import std::task;
+//
+//     fn main() {
+//         let (tx, rx) = channel::new(16);
+//         task::scope(fn(s) {
+//             s.spawn(fn() {
+//                 for i in 0..5 {
+//                     tx.send(i * i);
+//                 }
+//                 tx.close();
+//             });
+//             for n in rx {
+//                 println("{n}");
+//             }
+//         });
+//     }
+//
+// A channel holds up to `capacity` values. `send` waits while it is full,
+// and `recv` while it is empty, each blocking only its task. With capacity
+// 0 a channel holds none: `send` waits until a receiver has taken its
+// value, so the two tasks meet.
+//
+// Values come out in the order they went in. Both ends can be used by any
+// number of tasks: each value goes to one receiver, and receivers waiting
+// at once get values in the order they began to wait.
+//
+// `close` says nothing more is coming. Values sent before it can still be
+// received, and then `recv` gives `None`, which ends a `for` loop over the
+// channel. Sending on a closed channel gives the value back in an `Err`.
+// Closing is the sender's job: a channel nobody closes keeps its
+// receivers waiting, and a program whose every task waits that way stops
+// with a deadlock.
+//
+// A value sent can't reach a `var` of the sending task, as with a task's
+// function, since then two tasks could change it at once. Values that
+// never change, however big, are shared, not copied.
+
+import std::native;
+
+// The end of a channel that values are sent from.
+pub native struct Sender<T>;
+
+// The end of a channel that values are received from.
+pub native struct Receiver<T>;
+
+// Why a send failed: the channel was closed. Holds the value, which wasn't
+// sent.
+pub struct Closed<T> {
+    pub value: T,
+}
+
+// A new channel that holds up to `capacity` values, which must be 0 or
+// more, and its two ends.
+pub fn new<T>(capacity: int) -> (Sender<T>, Receiver<T>) {
+    let tx = open(capacity);
+    (tx, receiver(tx))
+}
+
+impl<T> Sender<T> {
+    // Send `value`, waiting while the channel is full (or, with capacity 0,
+    // until a receiver takes it). Fails if the channel is closed, or is
+    // closed while this waits.
+    pub fn send(self, value: T) -> Result<void, Closed<T>> {
+        put(self, value);
+        if native::status() == 0 {
+            Ok(void)
+        } else {
+            Err(Closed { value })
+        }
+    }
+
+    // Say that nothing more will be sent. Receivers get what is left, then
+    // `None`. Closing a closed channel does nothing.
+    pub native fn close(self);
+}
+
+impl<T> Receiver<T> {
+    // The next value, waiting for one, or `None` once the channel is closed
+    // and every value sent has been received.
+    pub fn recv(self) -> Option<T> {
+        let value = take(self);
+        if native::status() == 0 {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    // Each value as it arrives, until the channel is closed and empty, so
+    // that `for v in rx` works.
+    pub fn iter(self) -> Iter<T> {
+        Iter::new(fn() -> Option<T> { self.recv() })
+    }
+}
+
+// A new channel, by its sending end.
+native fn open<T>(capacity: int) -> Sender<T>;
+
+// The receiving end of the channel `tx` sends on.
+native fn receiver<T>(tx: Sender<T>) -> Receiver<T>;
+
+// Send `value` on `tx`. The status is 1 if the channel is closed.
+native fn put<T>(tx: Sender<T>, value: T);
+
+// The next value from `rx`. The status is 1 if the channel is closed and
+// empty, and then the value is meaningless.
+native fn take<T>(rx: Receiver<T>) -> T;

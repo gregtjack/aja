@@ -2356,21 +2356,15 @@ fn a_scope_cannot_be_used_after_it_ends() {
 }
 
 #[test]
-fn a_task_waiting_for_itself_is_a_deadlock() {
-    let msg = sharing_failure(
-        "import std::task;
-         fn spawn_it(s: task::Scope, f: () -> int) -> task::Task<int> { s.spawn(f) }
-         fn main() {
-             var me: Option<task::Task<int>> = None;
-             task::scope(fn(s) {
-                 let t = spawn_it(s, fn() -> int {
-                     match me { Some(t) => t.join(), None => 0 }
-                 });
-                 me = Some(t);
-             });
-         }",
-    );
-    assert!(msg.starts_with("deadlock"), "{msg}");
+fn waiting_on_a_channel_nobody_sends_on_is_a_deadlock() {
+    for stress in [false, true] {
+        let msg = std_failure(
+            "import std::channel;
+             fn main() { let (tx, rx): (channel::Sender<int>, channel::Receiver<int>) = channel::new(0); rx.recv(); }",
+            stress,
+        );
+        assert!(msg.starts_with("deadlock"), "{msg}");
+    }
 }
 
 #[test]
@@ -3191,30 +3185,6 @@ fn std_output(src: &str) -> [(String, String); 2] {
     })
 }
 
-/// A program that has tasks share a `var`, run with the check that stops
-/// that turned off, and its error. It passes the function it spawns
-/// through a parameter, so the checker doesn't see it either. Only a
-/// deadlock needs this, until channels can make one.
-#[track_caller]
-fn sharing_failure(src: &str) -> String {
-    let root: std::collections::HashMap<String, String> =
-        [("main.aja".to_string(), src.to_string())].into();
-    let (_, program) = crate::module::build(&root, "main.aja");
-    let program = program.unwrap_or_else(|es| {
-        let msgs: Vec<String> = es.into_iter().map(|e| e.message).collect();
-        panic!("test program has errors: {msgs:#?}")
-    });
-    let mut vm = Vm::new();
-    vm.share_vars = true;
-    let e = vm.run_program(&program).expect_err("program should fail");
-    let mut text = e.message.clone();
-    for n in e.to_diagnostic().notes {
-        text.push('\n');
-        text.push_str(&n);
-    }
-    text
-}
-
 /// The error a program using the standard library stops with, under
 /// stress or not, rendered with its notes.
 #[track_caller]
@@ -3436,24 +3406,29 @@ fn main() {
 
 #[test]
 fn a_deadlock_says_what_each_task_waits_for() {
-    let msg = sharing_failure(
-        "import std::task;
-fn spawn_it(s: task::Scope, f: () -> int) -> task::Task<int> { s.spawn(f) }
+    // Each task waits for the other's value; it points at each wait in the
+    // program's own code, not in the standard library.
+    let msg = std_failure(
+        "import std::channel;
+import std::task;
 fn main() {
+    let (to_a, for_a) = channel::new(0);
+    let (to_b, for_b) = channel::new(0);
     task::scope(fn(s) {
-        var other: Option<task::Task<int>> = None;
-        let a = spawn_it(s, fn() -> int { sleep(5); match other { Some(t) => t.join(), None => 0 } });
-        other = Some(spawn_it(s, fn() -> int { a.join() }));
-        a.join()
+        let a = s.spawn(fn() -> int { match for_a.recv() { Some(n) => n, None => 0 } });
+        let b = s.spawn(fn() -> int { match for_b.recv() { Some(n) => n, None => 0 } });
+        let _ = to_a.send(b.join());
+        let _ = to_b.send(a.join());
     });
 }",
+        false,
     );
     assert_eq!(
         msg,
         "deadlock: every task is waiting for another task, so none can go on\n\
-         the task spawned at line 2, column 64 is joining a task, at line 6, column 78\n\
-         the main task is joining a task, at line 8, column 9\n\
-         the task spawned at line 2, column 64 is joining a task, at line 7, column 48"
+         the task spawned at line 8, column 17 is receiving from a channel, at line 8, column 45\n\
+         the main task is joining a task, at line 9, column 27\n\
+         the task spawned at line 7, column 17 is receiving from a channel, at line 7, column 45"
     );
 }
 
@@ -3560,4 +3535,186 @@ fn what_a_task_can_be_given_and_give_back() {
     .unzip();
     assert_eq!(outputs, ["50003 500\n", "50003 500\n"]);
     assert_eq!(values, ["2", "2"]);
+}
+
+#[test]
+fn channels_carry_values_in_order_until_closed() {
+    let src = "import std::channel;
+               import std::task;
+               fn main() -> (List<int>, bool, bool, int) {
+                   let (tx, rx) = channel::new(2);
+                   let got = task::scope(fn(s) {
+                       s.spawn(fn() {
+                           for i in 0..20 { let _ = tx.send(i * i); }
+                           tx.close();
+                       });
+                       var got: List<int> = [];
+                       for n in rx { got = got.push(n); }
+                       got
+                   });
+                   let refused = match tx.send(99) { Ok(_) => -1, Err(e) => e.value };
+                   (got.slice(0, 5), rx.recv().is_none(), got.len() == 20, refused)
+               }";
+    for (_, value) in std_output(src) {
+        assert_eq!(value, "([0, 1, 4, 9, 16], true, true, 99)");
+    }
+}
+
+#[test]
+fn a_channel_with_no_room_makes_the_sender_wait_for_a_receiver() {
+    // The receiver waits 30 ms before taking the value, so `send` returns
+    // no sooner.
+    let src = "import std::channel;
+               import std::task;
+               fn main() -> bool {
+                   let (tx, rx) = channel::new(0);
+                   let start = clock();
+                   task::scope(fn(s) {
+                       let sender = s.spawn(fn() -> int { let _ = tx.send(\"hi\"); clock() - start });
+                       sleep(30);
+                       let got = rx.recv();
+                       sender.join() >= 30 && got == Some(\"hi\")
+                   })
+               }";
+    for (_, value) in std_output(src) {
+        assert_eq!(value, "true");
+    }
+}
+
+#[test]
+fn many_senders_and_receivers_share_a_channel() {
+    // Four producers and three consumers: every value arrives once.
+    let src = "import std::channel;
+               import std::task;
+               fn main() -> (int, int) {
+                   let (jobs, inbox) = channel::new(3);
+                   let (results, outbox) = channel::new(100);
+                   task::scope(fn(s) {
+                       let producers = [0, 1, 2, 3].map(fn(p) {
+                           s.spawn(fn() { for i in 0..25 { let _ = jobs.send(p * 100 + i); } })
+                       });
+                       let consumers = [0, 1, 2].map(fn(_) {
+                           s.spawn(fn() -> int {
+                               var n = 0;
+                               for j in inbox { let _ = results.send(j); n = n + 1; }
+                               n
+                           })
+                       });
+                       for p in producers { p.join(); }
+                       jobs.close();
+                       let counted = consumers.fold(0, fn(sum, c) { sum + c.join() });
+                       results.close();
+                       var total = 0;
+                       for r in outbox { total = total + r; }
+                       (counted, total)
+                   })
+               }";
+    // 25 values from each producer: p * 2500 + (0 + ... + 24).
+    let expected = format!("(100, {})", (0..4).map(|p| p * 2500 + 300).sum::<i64>());
+    for (_, value) in std_output(src) {
+        assert_eq!(value, expected);
+    }
+}
+
+#[test]
+fn closing_a_channel_wakes_whoever_waits_on_it() {
+    // A receiver waiting gets `None`; a sender waiting for room keeps its
+    // value; and values sent before the close are still received.
+    let src = "import std::channel;
+               import std::task;
+               fn main() -> (bool, int, List<int>) {
+                   let (tx, rx) = channel::new(1);
+                   let (other_tx, other_rx): (channel::Sender<int>, channel::Receiver<int>) = channel::new(0);
+                   task::scope(fn(s) {
+                       let waiting = s.spawn(fn() { other_rx.recv() });
+                       let _ = tx.send(1);
+                       let blocked = s.spawn(fn() -> int { match tx.send(2) { Ok(_) => 0, Err(e) => e.value } });
+                       sleep(10);
+                       other_tx.close();
+                       // Takes the 1, which makes room for the 2, which goes in.
+                       let first = rx.recv();
+                       tx.close();
+                       var rest: List<int> = [];
+                       for n in rx { rest = rest.push(n); }
+                       (waiting.join().is_none(), blocked.join(), [first.unwrap_or(0)].concat(rest))
+                   })
+               }";
+    for (_, value) in std_output(src) {
+        assert_eq!(value, "(true, 0, [1, 2])");
+    }
+    // A sender still waiting when the channel closes gets its value back.
+    let src = "import std::channel;
+               import std::task;
+               fn main() -> int {
+                   let (tx, rx): (channel::Sender<int>, channel::Receiver<int>) = channel::new(0);
+                   task::scope(fn(s) {
+                       let blocked = s.spawn(fn() -> int { match tx.send(7) { Ok(_) => 0, Err(e) => e.value } });
+                       sleep(10);
+                       tx.close();
+                       blocked.join()
+                   })
+               }";
+    for (_, value) in std_output(src) {
+        assert_eq!(value, "7");
+    }
+}
+
+#[test]
+fn a_cancelled_sender_s_value_is_never_received() {
+    // A sender with no receiver to meet is cancelled; its value isn't
+    // received later, and the channel still works. Likewise a receiver
+    // cancelled while waiting takes nothing.
+    let src = "import std::channel;
+               import std::task;
+               fn main() -> (Option<int>, Option<int>, Option<int>) {
+                   let (tx, rx) = channel::new(0);
+                   let (tx2, rx2) = channel::new(0);
+                   task::scope(fn(s) {
+                       task::scope(fn(inner) {
+                           inner.spawn(fn() { let _ = tx.send(1); println(\"sent\"); });
+                           inner.spawn(fn() { rx2.recv(); println(\"received\"); });
+                           sleep(10);
+                           inner.cancel();
+                       });
+                       s.spawn(fn() { let _ = tx.send(2); tx.close(); });
+                       s.spawn(fn() { let _ = tx2.send(3); });
+                       (rx.recv(), rx.recv(), rx2.recv())
+                   })
+               }";
+    for (out, value) in std_output(src) {
+        assert_eq!(out, "");
+        assert_eq!(value, "(Some(2), None, Some(3))");
+    }
+}
+
+#[test]
+fn a_value_sent_cant_reach_a_var_of_the_sender() {
+    assert_eq!(
+        std_errors(
+            "import std::channel;
+             fn main() { var n = 0; let (tx, rx) = channel::new(1); let _ = tx.send(fn() { n = n + 1; }); }"
+        ),
+        ["a value sent on a channel can't reach a `var` of the task sending it: 'n' is a `var`"]
+    );
+    for stress in [false, true] {
+        let msg = std_failure(
+            "import std::channel;
+             fn counter() -> () -> void { var n = 0; fn() { n = n + 1; } }
+             fn main() { let (tx, rx) = channel::new(1); let _ = tx.send(counter()); }",
+            stress,
+        );
+        assert!(
+            msg.starts_with("cannot send this value: it can reach a `var`"),
+            "{msg}"
+        );
+    }
+    let msg = std_failure(
+        "import std::channel;
+         fn main() { let (tx, rx): (channel::Sender<int>, channel::Receiver<int>) = channel::new(-1); }",
+        false,
+    );
+    assert!(
+        msg.starts_with("cannot make a channel with capacity -1: it must be 0 or more"),
+        "{msg}"
+    );
 }

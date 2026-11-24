@@ -40,6 +40,9 @@ pub enum Value {
     Scope(Gc),
     /// A `std::task::Task` on the heap.
     Task(Gc),
+    /// A `std::channel::Sender` or `Receiver`: the same channel on the
+    /// heap, used from either end.
+    Channel(Gc),
     /// A local variable captured by a closure, as a cell on the heap. Cells
     /// only appear in the registers of the function that declared the
     /// variable; programs never see them as values.
@@ -60,7 +63,8 @@ impl Value {
             | Value::SortedMap(gc)
             | Value::SortedSet(gc)
             | Value::Scope(gc)
-            | Value::Task(gc) => Some(*gc),
+            | Value::Task(gc)
+            | Value::Channel(gc) => Some(*gc),
             _ => None,
         }
     }
@@ -85,6 +89,7 @@ impl fmt::Debug for Value {
             Value::Runtime(i) => write!(f, "Runtime({})", i.name()),
             Value::Scope(gc) => write!(f, "Scope({gc})"),
             Value::Task(gc) => write!(f, "Task({gc})"),
+            Value::Channel(gc) => write!(f, "Channel({gc})"),
             Value::Cell(gc) => write!(f, "Cell({gc})"),
         }
     }
