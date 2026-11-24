@@ -11,7 +11,7 @@ should get in its way.
 | Question | Decision |
 |---|---|
 | OS threads | **M:1.** All tasks run on the VM's thread. There is no parallelism yet. `Rc`, `&mut Heap`, and the stop-the-world GC stay as they are. |
-| Shared mutable state | **None.** A `var` cell must never reach a second task. The checker rejects the cases it can see, and spawn and send check a per-value bit at runtime (see [Keeping `var` cells in one task](#keeping-var-cells-in-one-task)). Tasks share immutable data and communicate over channels. |
+| Shared mutable state | **None.** A `var` cell must never reach a second task. The checker rejects the cases it can see, and spawn and send check what the value reaches at runtime, remembering what has been checked (see [Keeping `var` cells in one task](#keeping-var-cells-in-one-task)). Tasks share immutable data and communicate over channels. |
 | Surface | **A library, no new syntax.** `std::task::scope(fn(s) { ... })`, `s.spawn(fn() { ... })` returns a `Task<T>`, and `t.join()` returns `T`. |
 | A child's `Err` | **Just a value.** `join` returns it like any other value. An errgroup-style helper can be written later, as a library function. |
 | A child's panic | **Stops the program, at once.** As anywhere else, since nothing can catch a panic: no task's code, deferred code included, runs again. The diagnostic shows the child's trace and the chain of `spawn` calls back to `main`. (This was "cancels the scope and propagates"; with nothing to catch it, that would be the same thing, slower. It comes back if panics can ever be caught.) |
@@ -296,7 +296,24 @@ Each step lands on its own with tests, in order:
    one variable per task: two tasks changing one `var` lose updates under
    switching stress, which is step 4's point.
 4. **The `var` rule.** The checker's capture analysis and diagnostic, and
-   the `reaches_cell` bit with its runtime check.
+   the `reaches_cell` bit with its runtime check. ✅ As built: the checker
+   notes the names each closure uses from outside it (nested closures'
+   too), and a `let` bound to a closure that uses a `var`, or to a list,
+   tuple, struct, or variant literal holding one, is marked as reaching
+   one. `Scope::spawn` given such a value is an error at the `var`'s use.
+   The runtime check differs from the plan: rather than a bit computed at
+   every allocation (which every native that builds a list or map would
+   have to keep right), `spawn` walks what its function reaches and
+   remembers each object found to reach no cell. Objects never change, so
+   that stays true until the slot is reused, and spawning many tasks that
+   share a big list checks it once. `Task` and `Scope` handles aren't
+   walked, and a value a task gives back through `join` may hold its own
+   `var`s, since it has finished with them. A consequence: with no shared
+   state and no channels, joins only reach tasks made earlier, so no
+   deadlock can be built; the deadlock tests turn the check off (a
+   test-only switch) until channels can make one. Tests that watched
+   cancelled tasks through a shared `var` now print instead, into a
+   test-only buffer. [examples/errors/shared_var.aja](../examples/errors/shared_var.aja).
 5. **`std::channel`.** Bounded channels with capacity 0 as a rendezvous,
    `close`, `recv` returning `None`, `for v in rx`, and parked tasks as GC
    roots.

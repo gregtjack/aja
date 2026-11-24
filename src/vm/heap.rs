@@ -135,6 +135,10 @@ pub struct Heap {
     /// Objects by handle; `None` for a free slot.
     objects: Vec<Option<Obj>>,
     marks: Vec<bool>,
+    /// By slot, whether the object there has been found to reach no cell
+    /// (see [`Heap::reaches_cell`]). Objects never change once made, so
+    /// that stays true until the slot is reused.
+    cell_free: Vec<bool>,
     /// Free slots, reused before the heap grows.
     free: Vec<u32>,
     live: usize,
@@ -153,6 +157,7 @@ impl Heap {
         Heap {
             objects: Vec::new(),
             marks: Vec::new(),
+            cell_free: Vec::new(),
             free: Vec::new(),
             live: 0,
             bytes: 0,
@@ -235,15 +240,62 @@ impl Heap {
         match self.free.pop() {
             Some(i) => {
                 self.objects[i as usize] = Some(obj);
+                self.cell_free[i as usize] = false;
                 Gc(i)
             }
             None => {
                 let i = u32::try_from(self.objects.len()).expect("the heap is full");
                 self.objects.push(Some(obj));
                 self.marks.push(false);
+                self.cell_free.push(false);
                 Gc(i)
             }
         }
+    }
+
+    /// Whether `value` can reach a cell: a `var` that a closure captured.
+    /// A `Task` and a `Scope` are handles to share, so what is behind them
+    /// doesn't count. Each object found to reach none is remembered, so
+    /// asking again about it, or about a value that holds it, takes a step.
+    pub fn reaches_cell(&mut self, value: &Value) -> bool {
+        let mut work: Vec<Gc> = value.handle().into_iter().collect();
+        let mut visited = Vec::new();
+        let mut seen_nodes = HashSet::new();
+        while let Some(gc) = work.pop() {
+            let i = gc.0 as usize;
+            if self.cell_free[i] {
+                continue;
+            }
+            // Marked as found free below; set early so a cycle (a closure
+            // that captures itself) is visited once.
+            self.cell_free[i] = true;
+            visited.push(i);
+            let mut add = |v: &Value| work.extend(v.handle());
+            match self.objects[i]
+                .as_ref()
+                .expect("a live value's object is live")
+            {
+                Obj::Cell(_) => {
+                    for i in visited {
+                        self.cell_free[i] = false;
+                    }
+                    return true;
+                }
+                Obj::Closure(c) => c.upvalues.iter().for_each(&mut add),
+                Obj::Data(_, fields) => fields.iter().for_each(&mut add),
+                Obj::List(l) => {
+                    l.visit_unseen(&mut seen_nodes, add);
+                }
+                Obj::Map(m) | Obj::Set(m) => {
+                    m.visit_unseen(&mut seen_nodes, add);
+                }
+                Obj::SortedMap(t) | Obj::SortedSet(t) => {
+                    t.visit_unseen(&mut seen_nodes, add);
+                }
+                Obj::Str(_) | Obj::Scope(_) | Obj::Task(_) => {}
+            }
+        }
+        false
     }
 
     fn get(&self, gc: Gc) -> &Obj {

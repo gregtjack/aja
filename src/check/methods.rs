@@ -602,6 +602,11 @@ impl Checker {
                 format!("mismatched types: parameter '{pname}' of {what} expects {e}, found {f}")
             });
         }
+        if info.global == "std::task::Scope::spawn" {
+            if let Some(f) = args.first() {
+                self.check_spawned(f);
+            }
+        }
         self.functions.insert(key(callee.span), info.global);
         *ret
     }

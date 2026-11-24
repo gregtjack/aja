@@ -374,6 +374,20 @@ struct Binding {
     /// The type parameters of a generic function, which appear in `ty` as
     /// [`Ty::Param`]s and are replaced by fresh variables at each use.
     generics: Vec<Generic>,
+    /// Whether its value can reach a `var` of the function it is in, so
+    /// it mustn't go to another task: a `let` bound to a closure that uses
+    /// one, say. Only what is plain from the code; a value from a call
+    /// could reach one too, which the runtime checks.
+    reaches_var: bool,
+}
+
+/// A name that a closure uses from outside it, where.
+#[derive(Debug, Clone)]
+struct Capture {
+    name: Id,
+    span: Span,
+    kind: BindingKind,
+    reaches_var: bool,
 }
 
 /// The function whose body is being checked.
@@ -458,6 +472,11 @@ pub struct Checker {
     /// known: the closure's unannotated parameters start out with its
     /// parameter types, so its body can use them (`xs.map(fn(p) { p.0 })`).
     closure_hint: Option<Ty>,
+    /// The closures being checked, innermost last: how many scopes there
+    /// were around each, and the names it has been found to use from them.
+    open_closures: Vec<(usize, Vec<Capture>)>,
+    /// The names each closure checked uses from outside it, by its span.
+    captures: HashMap<SpanKey, Vec<Capture>>,
 }
 
 impl Checker {
@@ -503,6 +522,8 @@ impl Checker {
             templates: HashMap::new(),
             std_sources: HashSet::new(),
             closure_hint: None,
+            open_closures: Vec::new(),
+            captures: HashMap::new(),
         };
         for builtin in BUILTINS {
             let binding = match &builtin.params {
@@ -510,6 +531,7 @@ impl Checker {
                     ty: Ty::Error,
                     kind: BindingKind::Variadic,
                     generics: Vec::new(),
+                    reaches_var: false,
                 },
                 Params::Fixed(params) => {
                     let names = params.iter().map(|(n, _)| Id::from(*n)).collect();
@@ -520,6 +542,7 @@ impl Checker {
                         ty,
                         kind: BindingKind::Function,
                         generics: Vec::new(),
+                        reaches_var: false,
                     }
                 }
             };
@@ -633,6 +656,7 @@ impl Checker {
                             ty: sig,
                             kind: BindingKind::Function,
                             generics,
+                            reaches_var: false,
                         },
                     );
                     self.param_names.insert(
@@ -895,6 +919,11 @@ impl Checker {
                     }
                 };
                 self.define(var.name.clone(), ty, kind);
+                if self.reaches_var(value).is_some() {
+                    if let Some(b) = self.scopes.last_mut().unwrap().get_mut(&var.name) {
+                        b.reaches_var = true;
+                    }
+                }
                 Ty::Void
             }
             Statement::If(cond, body) => {
@@ -1117,30 +1146,35 @@ impl Checker {
                     }
                 }
             }
-            Expression::Var(name) => match self.lookup(name) {
-                Some(Binding {
-                    kind: BindingKind::Variadic,
-                    ..
-                }) => {
-                    self.error(
-                        TypeError::new(format!("'{name}' can only be called directly"), span).help(
-                            format!("wrap it in a closure, e.g. `fn(x: str) {{ {name}(x) }}`"),
-                        ),
-                    );
-                    Ty::Error
+            Expression::Var(name) => {
+                self.note_use(name, span);
+                match self.lookup(name) {
+                    Some(Binding {
+                        kind: BindingKind::Variadic,
+                        ..
+                    }) => {
+                        self.error(
+                            TypeError::new(format!("'{name}' can only be called directly"), span)
+                                .help(format!(
+                                    "wrap it in a closure, e.g. `fn(x: str) {{ {name}(x) }}`"
+                                )),
+                        );
+                        Ty::Error
+                    }
+                    Some(b) if b.generics.is_empty() => b.ty.clone(),
+                    Some(b) => {
+                        let b = b.clone();
+                        self.instantiate(&b.generics, &b.ty)
+                    }
+                    None => {
+                        self.undefined(name, span);
+                        Ty::Error
+                    }
                 }
-                Some(b) if b.generics.is_empty() => b.ty.clone(),
-                Some(b) => {
-                    let b = b.clone();
-                    self.instantiate(&b.generics, &b.ty)
-                }
-                None => {
-                    self.undefined(name, span);
-                    Ty::Error
-                }
-            },
+            }
             Expression::Assign(name, value) => {
                 let found = self.expr(value);
+                self.note_use(name, span);
                 match self.lookup(name).cloned() {
                     Some(Binding {
                         ty,
@@ -1248,7 +1282,10 @@ impl Checker {
                     span,
                     try_reported: false,
                 };
+                self.open_closures.push((self.scopes.len(), Vec::new()));
                 self.function(ctx, params, &param_tys, body);
+                let (_, uses) = self.open_closures.pop().expect("this closure is open");
+                self.captures.insert(key(span), uses);
                 Ty::Fn(param_tys, Box::new(ret))
             }
             Expression::Field(obj, name, name_span) => self.field(obj, name, *name_span, span),
@@ -1634,12 +1671,101 @@ impl Checker {
                 ty,
                 kind,
                 generics: Vec::new(),
+                reaches_var: false,
             },
         );
     }
 
     fn lookup(&self, name: &Id) -> Option<&Binding> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
+    }
+
+    /// Note that `name` is used at `span`, for each closure being checked
+    /// that it comes from outside of.
+    fn note_use(&mut self, name: &Id, span: Span) {
+        if self.open_closures.is_empty() {
+            return;
+        }
+        let Some(at) = self.scopes.iter().rposition(|s| s.contains_key(name)) else {
+            return;
+        };
+        let b = &self.scopes[at][name];
+        if matches!(b.kind, BindingKind::Function | BindingKind::Variadic) {
+            return;
+        }
+        let capture = Capture {
+            name: name.clone(),
+            span,
+            kind: b.kind,
+            reaches_var: b.reaches_var,
+        };
+        for (depth, uses) in &mut self.open_closures {
+            if at < *depth {
+                uses.push(capture.clone());
+            }
+        }
+    }
+
+    /// Where, if anywhere, the value of `e` plainly reaches a `var` of the
+    /// function it is in, how to say so, and the `var`'s name if it is
+    /// used directly: a closure that uses one, or a list, tuple, struct, or
+    /// variant holding one, or a `let` bound to one.
+    fn reaches_var(&self, e: &Expr) -> Option<(Span, String, Option<Id>)> {
+        let holds = |name: &Id| format!("'{name}' holds a function that uses a `var`");
+        match &e.kind {
+            Expression::Closure(..) => self.captures.get(&key(e.span))?.iter().find_map(|c| {
+                if c.kind == BindingKind::Var {
+                    Some((
+                        c.span,
+                        format!("'{}' is a `var`", c.name),
+                        Some(c.name.clone()),
+                    ))
+                } else if c.reaches_var {
+                    Some((c.span, holds(&c.name), None))
+                } else {
+                    None
+                }
+            }),
+            Expression::Var(name) => match self.lookup(name) {
+                Some(b) if b.reaches_var => Some((e.span, holds(name), None)),
+                _ => None,
+            },
+            Expression::Grouping(x) => self.reaches_var(x),
+            Expression::List(items) | Expression::Tuple(items) => {
+                items.iter().find_map(|x| self.reaches_var(x))
+            }
+            Expression::StructLit { fields, base, .. } => fields
+                .iter()
+                .map(|f| &f.value)
+                .chain(base.as_deref())
+                .find_map(|x| self.reaches_var(x)),
+            // A variant that holds values, such as `Some(f)`.
+            Expression::Call(callee, args) if matches!(callee.kind, Expression::Path(..)) => {
+                args.iter().find_map(|x| self.reaches_var(x))
+            }
+            _ => None,
+        }
+    }
+
+    /// Report `arg`, the function given to `Scope::spawn`, if it plainly
+    /// uses a `var` of the task spawning it.
+    pub(super) fn check_spawned(&mut self, arg: &Expr) {
+        if let Some((span, why, var)) = self.reaches_var(arg) {
+            let help = match var {
+                Some(n) => format!(
+                    "give the task a copy made with `let` before spawning it (`let {n} = {n};`), and get what it works out back from `join`"
+                ),
+                None => "have the task work out what it needs itself, and get what it works out back from `join`".to_string(),
+            };
+            self.error(
+                TypeError::new(
+                    format!("a task can't use a `var` of the task that spawns it: {why}"),
+                    span,
+                )
+                .help(help)
+                .note("a `var` belongs to one task, so that no two tasks can change it at once"),
+            );
+        }
     }
 
     // ---- Unification -------------------------------------------------------

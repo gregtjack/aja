@@ -1,0 +1,24 @@
+// A `var` belongs to the task that made it: a task can't use one of the
+// task that spawns it, since then two tasks could change it at once. A
+// task is given copies, made with `let`, and gives back what it works out
+// through `join`. What the checker can see is a compile error; a function
+// that reaches a `var` some other way stops the program when spawned.
+//
+// expect: a task can't use a `var` of the task that spawns it: 'total' is a `var`
+// expect: a task can't use a `var` of the task that spawns it: 'add' holds a function that uses a `var`
+
+import std::task;
+
+fn main() {
+    var total = 0;
+    let add = fn(n: int) { total = total + n; };
+    task::scope(fn(s) {
+        s.spawn(fn() { total = total + 1; });
+        s.spawn(fn() { add(2); });
+    });
+    // Instead: each task works out its part, and `join` brings it back.
+    let parts = task::scope(fn(s) {
+        [1, 2, 3].map(fn(n) { s.spawn(fn() { n * n }) }).map(fn(t) { t.join() })
+    });
+    println(parts);
+}

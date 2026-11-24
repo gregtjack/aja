@@ -49,6 +49,7 @@ there.
 | [assert.aja](errors/assert.aja) | A failed `assert` |
 | [task_failure.aja](errors/task_failure.aja) | An error inside a task, which stops the program |
 | [cancelled_join.aja](errors/cancelled_join.aja) | `join` on a cancelled task, which has no value to give, and `try_join`, which gives `None` |
+| [shared_var.aja](errors/shared_var.aja) | Spawning a task that uses a `var` of the spawning task, directly or through a function, and doing it with `let` copies and `join` instead |
 | [scope_ended.aja](errors/scope_ended.aja) | Spawning on a `Scope` kept after its `scope` call returned |
 | [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
 | [generic_body.aja](errors/generic_body.aja) | Generic code assuming things about a type parameter, and mismatched type arguments |

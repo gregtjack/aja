@@ -854,6 +854,26 @@ fn main() {
 - **No task outlives its scope:** `scope` returns only once every task in
   it has finished, so nothing a task does happens after the code that
   started it has moved on.
+- **A `var` belongs to one task.** A spawned function can't use a `var` of
+  the task spawning it, or a function that does, so no two tasks can ever
+  change one at once. Give a task copies with `let`, and get results back
+  from `join`:
+
+  ```rust
+  var total = 0;
+  task::scope(fn(s) {
+      s.spawn(fn() { total = total + 1; });   // error: 'total' is a `var`
+  });
+  let parts = task::scope(fn(s) {
+      [1, 2, 3].map(fn(n) { s.spawn(fn() { n * n }) }).map(fn(t) { t.join() })
+  });
+  ```
+
+  What the checker can see is a compile error. A function that reaches a
+  `var` some other way (passed in as a parameter, say) stops the program
+  when it is spawned. Immutable values, however big, are shared freely,
+  and a task's own `var`s are its to use, and to give back once it has
+  finished.
 - **Cancelling** stops each task at its next call, loop iteration, or
   wait. On the way out it runs the code it deferred with `defer`, so
   connections and the like get closed:

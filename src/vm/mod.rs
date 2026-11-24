@@ -181,6 +181,11 @@ pub struct Vm {
     scheduler: Scheduler,
     /// The most memory, in bytes, each task's call stack may use.
     pub stack_limit: usize,
+    /// Let a task be spawned with a function that reaches a `var` of the
+    /// task spawning it. Only tests that need tasks to share one, to build
+    /// a deadlock, which nothing else can make yet, set it.
+    #[cfg(test)]
+    pub share_vars: bool,
 }
 
 impl Vm {
@@ -206,6 +211,8 @@ impl Vm {
             frames: Vec::new(),
             scheduler: Scheduler::new(),
             stack_limit: DEFAULT_STACK_LIMIT,
+            #[cfg(test)]
+            share_vars: false,
         }
     }
 
@@ -951,6 +958,20 @@ impl Vm {
                     return Outcome::Error(
                         "cannot spawn a task in a scope that has ended: a Scope can only be \
                          used inside the `task::scope` call that made it"
+                            .to_string(),
+                    );
+                }
+                // What the checker can't see: a function from a parameter,
+                // a list, or a call.
+                #[cfg(test)]
+                let checked = !self.share_vars;
+                #[cfg(not(test))]
+                let checked = true;
+                if checked && self.heap.reaches_cell(&Value::Fn(f)) {
+                    return Outcome::Error(
+                        "cannot spawn this function: it can reach a `var` of the task \
+                         spawning it, and a `var` belongs to one task (give the task copies \
+                         of what it needs, made with `let`)"
                             .to_string(),
                     );
                 }

@@ -322,9 +322,25 @@ fn read_all(fd: i64) -> io::Result<String> {
 /// lines). It is never shown: the program stops quietly instead.
 pub const OUTPUT_CLOSED: &str = "standard output was closed";
 
+#[cfg(test)]
+thread_local! {
+    /// While `Some`, what `print` and `println` write goes here instead of
+    /// to standard output, for tests to read.
+    pub(super) static CAPTURED: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// Write what `print` or `println` prints. Failing stops the program, since
 /// `print` doesn't return a `Result`; `std::io` is for handling it.
 fn print_out(text: String) -> Result<(), String> {
+    #[cfg(test)]
+    if CAPTURED.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .map(|out| out.push_str(&text))
+            .is_some()
+    }) {
+        return Ok(());
+    }
     match io::stdout().write_all(text.as_bytes()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(OUTPUT_CLOSED.to_string()),
