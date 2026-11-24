@@ -13,9 +13,9 @@ should get in its way.
 | OS threads | **M:1.** All tasks run on the VM's thread. There is no parallelism yet. `Rc`, `&mut Heap`, and the stop-the-world GC stay as they are. |
 | Shared mutable state | **None.** A `var` cell must never reach a second task. The checker rejects the cases it can see, and spawn and send check a per-value bit at runtime (see [Keeping `var` cells in one task](#keeping-var-cells-in-one-task)). Tasks share immutable data and communicate over channels. |
 | Surface | **A library, no new syntax.** `std::task::scope(fn(s) { ... })`, `s.spawn(fn() { ... })` returns a `Task<T>`, and `t.join()` returns `T`. |
-| A child's `Err` | **Just a value.** `join` returns it like any other value. Only a panic cancels anything. An errgroup-style helper can be written later, as a library function. |
-| A child's panic | **Cancels the scope and propagates.** The panicking task's siblings are cancelled, and once they have stopped the scope panics in its parent, so the panic reaches `main` and the program fails. The diagnostic shows the child's trace and where it was spawned. |
-| Cancellation | **A silent stop.** At its next safepoint, a cancelled task's frames are dropped and none of its code runs again. Nothing needs to unwind, because Aja has no destructors. Aja has `defer` now, though, which this decision predates: whether a cancelled task runs its deferred code (so its sockets close) is open, and step 3 has to settle it. |
+| A child's `Err` | **Just a value.** `join` returns it like any other value. An errgroup-style helper can be written later, as a library function. |
+| A child's panic | **Stops the program, at once.** As anywhere else, since nothing can catch a panic: no task's code, deferred code included, runs again. The diagnostic shows the child's trace and the chain of `spawn` calls back to `main`. (This was "cancels the scope and propagates"; with nothing to catch it, that would be the same thing, slower. It comes back if panics can ever be caught.) |
+| Cancellation | **`Scope::cancel()`, which unwinds.** A cancelled task stops at its next safepoint or wait, running the deferred code pending in each of its frames on the way out, so what it opened gets closed. Deferred code already running runs to its end first. A cancelled task has no value: `join` on it panics, and `try_join` gives `None`. Timeouts and `select` will cancel the same way. |
 | Blocking intrinsics | **Run on worker threads.** The task that called one is parked, and the others keep running. A kqueue/epoll poller comes with `std::net`. |
 | Primitives | **Bounded channels, and `sleep`.** The built-in `sleep(ms)` sleeps only its task (added after step 2). `select` and timeouts come later. |
 
@@ -175,15 +175,13 @@ register, so the invariant the code relies on today holds.
   marked ended, and `spawn` on it panics.
 - The root task is `main`'s. Tasks can only be spawned inside a scope, so
   every task has a parent that outlives it.
-- **A panic in a child**: record the `RuntimeError` on the scope, cancel
-  every other task in it (recursively, through any scopes they opened), and
-  wake the parent. When the parent's `scope` call returns, it raises a
-  `RuntimeError` whose message and trace are the child's, with a note
-  saying where the child was spawned. A panic in the parent's own `body`
-  cancels the children too, before propagating.
-- **Cancelling** sets a flag. At its next safepoint the task's frames are
-  cleared and it becomes `Cancelled`. A task parked in `recv` or `send` is
-  removed from the channel's wait list. A task parked in an offloaded
+- **A panic in a child** stops the program (see the decisions above; this
+  first planned to cancel the scope and propagate the panic to the parent,
+  which nothing could catch).
+- **Cancelling** (`Scope::cancel`) sets a flag. At its next safepoint, or
+  at once if it is waiting, the task unwinds, running its deferred code, and
+  finishes without a value (see step 3). A task parked in `recv` or `send`
+  is removed from the channel's wait list. A task parked in an offloaded
   intrinsic can't be interrupted, so the scope waits for that call to finish
   and throws its result away. That way no side effect from a scope's tasks
   happens after the scope has returned.
@@ -273,7 +271,30 @@ Each step lands on its own with tests, in order:
    other waiting intrinsics do, and a flag on the task makes that call
    return. [examples/sleep.aja](../examples/sleep.aja) shows tasks overlap.
 3. **Panics and cancellation.** Cancelling a scope, propagating a panic with
-   the combined trace, silent stops at safepoints, and deadlock detection.
+   the combined trace, silent stops at safepoints, and deadlock detection. ✅
+   As built: `s.cancel()` stops the scope's tasks, and those in the scopes
+   they opened, at their next safepoint, or at once if they are waiting in
+   `join`, `sleep`, or on a socket (a task closing a scope of its own keeps
+   waiting, for tasks that are stopping too). Deferred code is compiled
+   inline, so there is nothing at run time to say what is pending; the
+   compiler gives each function a table from instruction ranges to cleanup
+   blocks that run the deferred code pending there and end in `Unwind`,
+   which leaves the frame and goes on in the caller's. `scope` closes its
+   scope with `defer`, so a task stopping inside one still waits for its
+   tasks: none outlives its scope. A task is never stopped while any frame
+   of it is in deferred code (the compiler marks those instructions, and
+   checking costs nothing while no task is being cancelled), and a waiting
+   task in deferred code isn't woken early. Each wait records what it is
+   for, so a timer or join that comes after its task stopped waiting wakes
+   no one, and the timers of cancelled sleepers don't keep the program
+   running. Tasks spawned in a cancelled scope never start. A panic, as
+   decided above, stops the program, with the chain of spawn sites in its
+   trace; a deadlock lists each task, what it waits for and where, and
+   where it was spawned. Tests: VM tests under stress, and
+   [examples/shutdown.aja](../examples/shutdown.aja) and
+   `errors/cancelled_join.aja`. Tests that record order across tasks use
+   one variable per task: two tasks changing one `var` lose updates under
+   switching stress, which is step 4's point.
 4. **The `var` rule.** The checker's capture analysis and diagnostic, and
    the `reaches_cell` bit with its runtime check.
 5. **`std::channel`.** Bounded channels with capacity 0 as a rendezvous,

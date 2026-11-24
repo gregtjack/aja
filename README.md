@@ -409,7 +409,9 @@ fn shout(conn: net::TcpStream) -> Result<void, io::Error> {
   `continue` out of it, since it runs while its block is already being left.
   A loop or closure inside it is fine.
 - **Not on a runtime error:** a runtime error stops the whole program, and
-  deferred code doesn't run then.
+  deferred code doesn't run then. It does run when a task is cancelled
+  (see [`std::task`](#stdtask)), and deferred code that is running when
+  the cancel comes runs to its end first.
 - A call returned while code is deferred isn't a tail call, since the
   deferred code runs after it (see [Tail calls](#architecture)).
 
@@ -823,6 +825,56 @@ fn main() -> Result<void, io::Error> {
   waiting on it, with `NotConnected`.
 - Sockets stay open until closed, or until the program ends. There are no
   timeouts yet. See [plans/net.md](plans/net.md) for what comes next.
+
+#### `std::task`
+
+```rust
+import std::task;
+
+fn main() {
+    let total = task::scope(fn(s) {
+        let a = s.spawn(fn() { fib(30) });
+        let b = s.spawn(fn() { fib(31) });
+        a.join() + b.join()
+    });
+    println("{total}");
+}
+```
+
+| `std::task` | Does |
+|-------------|------|
+| `scope(fn(s) { ... })` | Run the function with a new `Scope`, then wait for every task spawned in it; gives what the function returned |
+| `s.spawn(f)` | Start `f` as a task in the scope, giving a `Task<T>` |
+| `t.join()`, `t.try_join()` | Wait for the task, and give its value; `try_join` gives an `Option`, `None` if it was cancelled |
+| `s.cancel()` | Stop every task in the scope, and in the scopes they opened |
+
+- **Tasks are green threads** that the runtime switches between on its
+  own, all on one OS thread for now. Waiting (`join`, `sleep`, a socket)
+  blocks only the task that waits.
+- **No task outlives its scope:** `scope` returns only once every task in
+  it has finished, so nothing a task does happens after the code that
+  started it has moved on.
+- **Cancelling** stops each task at its next call, loop iteration, or
+  wait. On the way out it runs the code it deferred with `defer`, so
+  connections and the like get closed:
+
+  ```rust
+  task::scope(fn(server) {
+      server.spawn(fn() { accept_forever(listener, server) });
+      wait_for_shutdown();
+      server.cancel();   // every connection's `defer conn.close()` runs
+  });
+  ```
+
+  Deferred code that is already running when the cancel comes runs to its
+  end first. The code that called `scope` isn't one of its tasks, so it
+  carries on. A cancelled task has no value: `join` on it stops the
+  program, so use `try_join` where a task might have been cancelled. Tasks
+  spawned in a cancelled scope never start.
+- **A runtime error in a task stops the program**, like one anywhere else,
+  with the chain of `spawn` calls that led to the task in its trace. A
+  deadlock (every task waiting on another) stops it too, saying what each
+  task waits for and where.
 
 #### `std::time`
 

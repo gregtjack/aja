@@ -37,7 +37,7 @@ mod tests;
 use bytecode::{Capture, Layout, Literals, Op, Proto};
 pub use compile::{Compiled, Compiler, ReplInput};
 use heap::{Closure, Gc, Heap, MAX_STR_LEN};
-use scheduler::{Intrinsic, Next, Outcome, Scheduler};
+use scheduler::{Intrinsic, Next, Outcome, Scheduler, Wait};
 use value::Value;
 
 /// Whether the VM implements the native function `name`.
@@ -59,6 +59,17 @@ pub struct RuntimeError {
     /// The calls in progress, innermost first, with runs of identical calls
     /// (deep recursion) collapsed into one entry.
     pub trace: Vec<TraceEntry>,
+    /// Notes after the trace: where the failing task was spawned, or, for
+    /// a deadlock, what each task is waiting for.
+    pub notes: Vec<Note>,
+}
+
+/// A note that points at places in the program: each `{}` in `text` is
+/// replaced by where the next of `places` is, as in "line 3, column 5".
+#[derive(Debug, Clone)]
+pub struct Note {
+    pub text: String,
+    pub places: Vec<Span>,
 }
 
 /// One or more identical calls in an error's trace.
@@ -108,6 +119,27 @@ impl RuntimeError {
                 "... and {} more calls",
                 self.trace.len() - MAX_NOTES
             ));
+        }
+        for note in &self.notes {
+            let mut text = String::new();
+            let mut places = note.places.iter();
+            let mut parts = note.text.split("{}");
+            text.push_str(parts.next().unwrap_or(""));
+            for part in parts {
+                if let Some(span) = places.next() {
+                    let place = match span.start.source {
+                        Source::MAIN => String::new(),
+                        Source::Prelude => " in the prelude".to_string(),
+                        file => format!(" in {}", files.path(file)),
+                    };
+                    text.push_str(&format!(
+                        "line {}, column {}{place}",
+                        span.start.line, span.start.col
+                    ));
+                }
+                text.push_str(part);
+            }
+            notes.push(text);
         }
 
         let d = Diagnostic::new(self.message.clone()).with_notes(notes);
@@ -195,6 +227,7 @@ impl Vm {
                     message: format!("main returned an error: {}", self.heap.repr(&fields[0])),
                     span: Some(span),
                     trace: Vec::new(),
+                    notes: Vec::new(),
                 });
             }
         }
@@ -377,7 +410,8 @@ impl Vm {
         self.scheduler.clear();
         for &closure in closures {
             let proto = self.heap.closure(closure).proto.clone();
-            self.scheduler.spawn(closure, proto, None, None);
+            self.scheduler
+                .spawn(closure, proto, None, None, Rc::from(Vec::new()));
         }
         self.scheduler.start(&mut self.regs, &mut self.frames);
         let result = self.execute();
@@ -412,16 +446,76 @@ impl Vm {
                 ip = frame.ip;
             }};
         }
-        // Count a safepoint, and end the task's turn once its budget runs
-        // out. `ip` must be where this task goes on.
-        macro_rules! safepoint {
-            () => {{
-                budget -= 1;
-                if budget == 0 {
-                    budget = self.scheduler.slice();
-                    self.frames.last_mut().unwrap().ip = ip;
-                    if self.scheduler.end_turn(&mut self.regs, &mut self.frames) {
+        // Leave frames on the way to stopping a cancelled task, starting
+        // with the innermost, which is at instruction `at` (`None` if it
+        // hasn't started, or has just run its cleanup block). A frame with
+        // deferred code pending there runs it, in its cleanup block, which
+        // ends in `Unwind` and comes back here; a frame without is just
+        // left. Once the outermost is left, the task has finished, without
+        // a result. Every frame's `ip` but the innermost's must be up to
+        // date.
+        macro_rules! unwind {
+            ($at:expr) => {{
+                let mut at: Option<usize> = $at;
+                loop {
+                    let frame = self.frames.last_mut().unwrap();
+                    if let Some(cleanup) = at.and_then(|a| frame.proto.cleanup_at(a)) {
+                        frame.ip = cleanup;
                         load!();
+                        break;
+                    }
+                    self.frames.pop();
+                    if self.frames.is_empty() {
+                        let next = self.scheduler.finish(
+                            None,
+                            &mut self.heap,
+                            &mut self.regs,
+                            &mut self.frames,
+                        );
+                        match next {
+                            Next::Switched => {
+                                load!();
+                                budget = self.scheduler.slice();
+                            }
+                            Next::Finished => return Ok(()),
+                            Next::Deadlock => return Err(self.deadlock(true)),
+                        }
+                        break;
+                    }
+                    at = Some(self.frames.last().unwrap().ip - 1);
+                }
+            }};
+        }
+        // If the running task has been asked to stop, and isn't running
+        // deferred code, which always runs to its end, start stopping it
+        // at instruction `at` of the innermost frame and evaluate to true.
+        macro_rules! stopped {
+            ($at:expr) => {{
+                let at: Option<usize> = $at;
+                if self.scheduler.cancel_requested() && !in_deferred(&self.frames, at) {
+                    self.frames.last_mut().unwrap().ip = ip;
+                    self.scheduler.start_unwinding();
+                    unwind!(at);
+                    true
+                } else {
+                    false
+                }
+            }};
+        }
+        // Count a safepoint, which `at` (in the innermost frame) has just
+        // run, and end the task's turn once its budget runs out; or stop
+        // the task there, if it has been cancelled. `ip` must be where this
+        // task goes on.
+        macro_rules! safepoint {
+            ($at:expr) => {{
+                if !stopped!($at) {
+                    budget -= 1;
+                    if budget == 0 {
+                        budget = self.scheduler.slice();
+                        self.frames.last_mut().unwrap().ip = ip;
+                        if self.scheduler.end_turn(&mut self.regs, &mut self.frames) {
+                            load!();
+                        }
                     }
                 }
             }};
@@ -484,16 +578,19 @@ impl Vm {
                 let v = $v;
                 let done = self.frames.pop().unwrap();
                 if self.frames.is_empty() {
-                    let next =
-                        self.scheduler
-                            .finish(v, &mut self.heap, &mut self.regs, &mut self.frames);
+                    let next = self.scheduler.finish(
+                        Some(v),
+                        &mut self.heap,
+                        &mut self.regs,
+                        &mut self.frames,
+                    );
                     match next {
                         Next::Switched => {
                             load!();
                             budget = self.scheduler.slice();
                         }
                         Next::Finished => return Ok(()),
-                        Next::Deadlock => return Err(deadlock(None)),
+                        Next::Deadlock => return Err(self.deadlock(true)),
                     }
                 } else {
                     load!();
@@ -512,9 +609,9 @@ impl Vm {
                         budget = self.scheduler.slice();
                     }
                     Next::Finished | Next::Deadlock => {
-                        self.frames.last_mut().unwrap().ip = ip;
-                        let mut err = self.error(String::new());
-                        err.message = deadlock(None).message;
+                        let mut err = self.deadlock(false);
+                        let top = self.frames.last().unwrap();
+                        err.span = Some(top.proto.spans[top.ip]);
                         return Err(err);
                     }
                 }
@@ -703,11 +800,12 @@ impl Vm {
                 Op::Not { dst, src } => reg!(dst) = Value::Bool(!get!(Bool, src)),
 
                 Op::Jump { target } => {
+                    let at = ip - 1;
                     let back = (target as usize) < ip;
                     ip = target as usize;
                     // Every loop jumps back to its start.
                     if back {
-                        safepoint!();
+                        safepoint!(Some(at));
                     }
                 }
                 Op::JumpIfFalse { cond, target } => {
@@ -742,7 +840,7 @@ impl Vm {
                         proto = callee_proto;
                         base = new_base;
                         ip = 0;
-                        safepoint!();
+                        safepoint!(None);
                     }
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
@@ -750,13 +848,24 @@ impl Vm {
                             Ok(v) => reg!(dst) = v,
                             Err(msg) => throw!(msg),
                         }
-                        safepoint!();
+                        safepoint!(Some(ip - 1));
                     }
-                    Value::Runtime(f) => match self.intrinsic(f, base + callee as usize + 1) {
-                        Outcome::Value(v) => reg!(dst) = v,
-                        Outcome::Wait => wait!(),
-                        Outcome::Error(msg) => throw!(msg),
-                    },
+                    // A cancelled task stops before an intrinsic, which may be
+                    // one it was woken from, except before ending a scope,
+                    // which waits for the scope's tasks to stop first.
+                    Value::Runtime(f) => {
+                        if f == Intrinsic::CloseScope || !stopped!(Some(ip - 1)) {
+                            self.frames.last_mut().unwrap().ip = ip;
+                            match self.intrinsic(f, base + callee as usize + 1) {
+                                Outcome::Value(v) => {
+                                    reg!(dst) = v;
+                                    stopped!(Some(ip - 1));
+                                }
+                                Outcome::Wait => wait!(),
+                                Outcome::Error(msg) => throw!(msg),
+                            }
+                        }
+                    }
                     v => internal_error("Fn", &v),
                 },
                 Op::TailCall { callee, argc } => match reg!(callee).clone() {
@@ -777,7 +886,7 @@ impl Vm {
                         closure = f;
                         proto = callee_proto;
                         ip = 0;
-                        safepoint!();
+                        safepoint!(None);
                     }
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
@@ -786,15 +895,23 @@ impl Vm {
                             Err(msg) => throw!(msg),
                         }
                     }
-                    Value::Runtime(f) => match self.intrinsic(f, base + callee as usize + 1) {
-                        Outcome::Value(v) => ret!(v),
-                        Outcome::Wait => wait!(),
-                        Outcome::Error(msg) => throw!(msg),
-                    },
+                    Value::Runtime(f) => {
+                        if f == Intrinsic::CloseScope || !stopped!(Some(ip - 1)) {
+                            self.frames.last_mut().unwrap().ip = ip;
+                            match self.intrinsic(f, base + callee as usize + 1) {
+                                Outcome::Value(v) => ret!(v),
+                                Outcome::Wait => wait!(),
+                                Outcome::Error(msg) => throw!(msg),
+                            }
+                        }
+                    }
                     v => internal_error("Fn", &v),
                 },
                 Op::Return { src } => ret!(reg!(src).clone()),
                 Op::NoMatch => throw!("internal error: no arm of this match matched".to_string()),
+                // A cancelled task has run a frame's deferred code; it goes
+                // on stopping in the caller.
+                Op::Unwind => unwind!(None),
             }
         }
     }
@@ -808,7 +925,8 @@ impl Vm {
                 if self.heap.wants_collection(0) {
                     self.collect_garbage_with(Vec::new());
                 }
-                Outcome::Value(Value::Scope(self.heap.alloc_scope()))
+                let owner = self.scheduler.current();
+                Outcome::Value(Value::Scope(self.heap.alloc_scope(owner)))
             }
             Intrinsic::CloseScope => {
                 let Value::Scope(s) = arg(self, 0) else {
@@ -821,6 +939,7 @@ impl Vm {
                     Outcome::Value(Value::Void)
                 } else {
                     scope.closer = Some(current);
+                    self.scheduler.waiting_for(Wait::Close(s));
                     Outcome::Wait
                 }
             }
@@ -841,10 +960,29 @@ impl Vm {
                     self.collect_garbage_with(Vec::new());
                 }
                 let handle = self.heap.alloc_task();
+                // In a cancelled scope, a task never starts.
+                if self.heap.scope(s).cancelled {
+                    self.heap.task(handle).cancelled = true;
+                    return Outcome::Value(Value::Task(handle));
+                }
                 self.heap.scope(s).live += 1;
                 let proto = self.heap.closure(f).proto.clone();
-                self.scheduler.spawn(f, proto, Some(handle), Some(s));
+                let top = self.frames.last().unwrap();
+                let at = top.proto.spans[top.ip - 1];
+                let mut origin = self.scheduler.origin().to_vec();
+                origin.push(at);
+                self.scheduler
+                    .spawn(f, proto, Some(handle), Some(s), Rc::from(origin));
                 Outcome::Value(Value::Task(handle))
+            }
+            Intrinsic::Cancel => {
+                let Value::Scope(s) = arg(self, 0) else {
+                    internal_error("Scope", &arg(self, 0));
+                };
+                if !self.heap.scope(s).ended {
+                    self.scheduler.cancel_scope(s, &mut self.heap);
+                }
+                Outcome::Value(Value::Void)
             }
             Intrinsic::Sleep | Intrinsic::SleepNanos => {
                 let Value::Int(n) = arg(self, 0) else {
@@ -873,6 +1011,9 @@ impl Vm {
                 let task = self.scheduler.current();
                 let outcome = self.scheduler.net.call(op, task, &mut self.heap, &args);
                 self.scheduler.wake_net_woken();
+                if let Outcome::Wait = outcome {
+                    self.scheduler.waiting_for(Wait::Net);
+                }
                 outcome
             }
             Intrinsic::Join => {
@@ -883,10 +1024,30 @@ impl Vm {
                 let task = self.heap.task(t);
                 match &task.result {
                     Some(v) => Outcome::Value(v.clone()),
+                    None if task.cancelled => Outcome::Error(
+                        "cannot join a task that was cancelled: it stopped before returning a \
+                         value (`try_join` gives `None` for one)"
+                            .to_string(),
+                    ),
                     None => {
                         task.joiners.push(current);
+                        self.scheduler.waiting_for(Wait::Join(t));
                         Outcome::Wait
                     }
+                }
+            }
+            Intrinsic::Returned => {
+                let Value::Task(t) = arg(self, 0) else {
+                    internal_error("Task", &arg(self, 0));
+                };
+                let current = self.scheduler.current();
+                let task = self.heap.task(t);
+                if task.result.is_some() || task.cancelled {
+                    Outcome::Value(Value::Bool(!task.cancelled))
+                } else {
+                    task.joiners.push(current);
+                    self.scheduler.waiting_for(Wait::Join(t));
+                    Outcome::Wait
                 }
             }
         }
@@ -938,22 +1099,81 @@ impl Vm {
             });
         }
 
+        // A task's outermost frame is its function; where it was spawned,
+        // and where the tasks it came from were, lead back to `main`.
+        let notes = self
+            .scheduler
+            .origin()
+            .iter()
+            .rev()
+            .map(|&at| Note {
+                text: "in a task spawned at {}".to_string(),
+                places: vec![at],
+            })
+            .collect();
         RuntimeError {
             message,
             span: Some(span),
             trace,
+            notes,
+        }
+    }
+
+    /// The error when every task is waiting for another, so none can go on,
+    /// found while the running task waits (or finishes, if `finished`).
+    /// It says what each task is waiting for, where, and where it was
+    /// spawned. Every frame's `ip` must be up to date.
+    fn deadlock(&self, finished: bool) -> RuntimeError {
+        let mut notes = Vec::new();
+        let mut describe = |what: &str, origin: &[Span], frames: &[Frame]| {
+            let (who, mut places) = match origin.last() {
+                Some(&at) => ("the task spawned at {}", vec![at]),
+                None => ("the main task", vec![]),
+            };
+            // Its innermost frame is at the call it is waiting in.
+            match frames.last() {
+                Some(top) => {
+                    places.push(top.proto.spans[top.ip]);
+                    notes.push(Note {
+                        text: format!("{who} is {what}, at {{}}"),
+                        places,
+                    });
+                }
+                None => notes.push(Note {
+                    text: format!("{who} is {what}"),
+                    places,
+                }),
+            }
+        };
+        if !finished {
+            describe(
+                self.scheduler.current_wait(),
+                &self.scheduler.origin(),
+                &self.frames,
+            );
+        }
+        for (what, origin, frames) in self.scheduler.waiting() {
+            describe(what, origin, frames);
+        }
+        RuntimeError {
+            message: "deadlock: every task is waiting for another task, so none can go on"
+                .to_string(),
+            span: None,
+            trace: Vec::new(),
+            notes,
         }
     }
 }
 
-/// The error when every task is waiting for another, so none can go on.
-/// `span` is the call the running task is waiting in, if it is waiting.
-fn deadlock(span: Option<Span>) -> RuntimeError {
-    RuntimeError {
-        message: "deadlock: every task is waiting for another task, so none can go on".to_string(),
-        span,
-        trace: Vec::new(),
-    }
+/// Whether a task whose frames are `frames` is running deferred code that
+/// a block runs on its way out, in any of them, so it mustn't stop yet.
+/// `top` is the instruction the innermost frame is at, if it has started.
+fn in_deferred(frames: &[Frame], top: Option<usize>) -> bool {
+    let n = frames.len();
+    frames.iter().enumerate().any(|(i, f)| {
+        let at = if i + 1 == n { top } else { f.ip.checked_sub(1) };
+        at.is_some_and(|at| f.proto.in_deferred(at))
+    })
 }
 
 /// How many of a task's registers can hold live values: those in some

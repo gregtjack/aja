@@ -323,7 +323,9 @@ by a number with a fractional part.
    Several OS threads, `select`, and timeouts come after. Started: tasks
    in the VM ✅, `std::task` (scopes, `spawn`, `join`) ✅, a `sleep`
    that sleeps only its task ✅, and `std::time` (`Duration`, `Instant`,
-   `sleep_for`, `sleep_until`) ✅. A poller in the scheduler, so a socket
+   `sleep_for`, `sleep_until`) ✅. Cancelling a scope, which unwinds its
+   tasks through their deferred code, and deadlock reports that say what
+   each task waits for ✅. A poller in the scheduler, so a socket
    operation blocks only its task, and `std::net` over TCP ✅ (see
    [plans/net.md](plans/net.md)).
 10. **Cranelift AoT backend** producing native binaries, with the same runtime
@@ -398,9 +400,10 @@ by a number with a fractional part.
   up. The code sees the names in scope where it is written and reads a
   `var` when it runs. It can't `return`, `?`, `break`, or `continue` out of
   itself. It is visible where it takes effect, so it fits rule 4. It
-  doesn't run when a runtime error stops the program; whether it runs when
-  a task is cancelled is for the cancellation step of the green-threads
-  plan to settle. A call returned while code is deferred isn't a tail call.
+  doesn't run when a runtime error stops the program, but does when a task
+  is cancelled (the compiler gives each function cleanup blocks for that),
+  and deferred code that is running when the cancel comes runs to its end
+  first. A call returned while code is deferred isn't a tail call.
 - **Strings** (decided for now). UTF-8 everywhere. Positions and lengths
   count code points, which matches what people mean by "the third
   character" more often than bytes do; `byte_len` gives the size. There is

@@ -85,6 +85,11 @@ pub struct ScopeState {
     pub ended: bool,
     /// The task waiting for the scope's tasks to finish, so it can end it.
     pub closer: Option<TaskId>,
+    /// The task that opened it, whose `scope` call it is in.
+    pub owner: TaskId,
+    /// Whether it has been cancelled, so its tasks stop and any spawned in
+    /// it from now on never start.
+    pub cancelled: bool,
 }
 
 /// What a `std::task::Task` keeps track of.
@@ -94,6 +99,8 @@ pub struct TaskState {
     pub result: Option<Value>,
     /// The tasks waiting for it to finish.
     pub joiners: Vec<TaskId>,
+    /// Whether it was cancelled, and so finished without a result.
+    pub cancelled: bool,
 }
 
 impl Obj {
@@ -210,8 +217,12 @@ impl Heap {
         self.alloc(Obj::SortedSet(tree))
     }
 
-    pub fn alloc_scope(&mut self) -> Gc {
-        self.alloc(Obj::Scope(ScopeState::default()))
+    /// A new scope, opened by task `owner`.
+    pub fn alloc_scope(&mut self, owner: TaskId) -> Gc {
+        self.alloc(Obj::Scope(ScopeState {
+            owner,
+            ..ScopeState::default()
+        }))
     }
 
     pub fn alloc_task(&mut self) -> Gc {

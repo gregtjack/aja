@@ -103,8 +103,8 @@ impl Socket {
     }
 }
 
-/// A connect's task, and how it went.
-type Connected = (TaskId, io::Result<TcpStream>);
+/// A connect's task and ticket, and how it went.
+type Connected = (TaskId, u64, io::Result<TcpStream>);
 
 /// An operation that has made progress, and runs again to finish.
 enum Pending {
@@ -113,6 +113,9 @@ enum Pending {
     /// A connect, with its result once its thread has one.
     Connect {
         addr: String,
+        /// Which connect this is, so a result that comes after its task
+        /// was cancelled, and its slot went to another task, is ignored.
+        ticket: u64,
         result: Option<io::Result<TcpStream>>,
     },
 }
@@ -133,6 +136,8 @@ pub struct Net {
     waiting: usize,
     /// Tasks that an operation has woken, for the scheduler to queue.
     woken: Vec<TaskId>,
+    /// How many connects have been started.
+    tickets: u64,
 }
 
 impl Net {
@@ -146,6 +151,22 @@ impl Net {
             connected: mpsc::channel(),
             waiting: 0,
             woken: Vec::new(),
+            tickets: 0,
+        }
+    }
+
+    /// Stop `task` waiting on anything here, since it has been cancelled,
+    /// and drop what it had in progress.
+    pub fn forget(&mut self, task: TaskId) {
+        for socket in self.sockets.values_mut() {
+            for list in [&mut socket.readers, &mut socket.writers] {
+                let before = list.len();
+                list.retain(|&t| t != task);
+                self.waiting -= before - list.len();
+            }
+        }
+        if let Some(Pending::Connect { result: None, .. }) = self.pending.remove(&task) {
+            self.waiting -= 1;
         }
     }
 
@@ -191,10 +212,17 @@ impl Net {
                 rearm(&poller, socket, interest);
             }
         }
-        while let Ok((task, result)) = self.connected.1.try_recv() {
-            if let Some(Pending::Connect { result: slot, .. }) = self.pending.get_mut(&task) {
-                *slot = Some(result);
-                woken.push(task);
+        while let Ok((task, ticket, result)) = self.connected.1.try_recv() {
+            if let Some(Pending::Connect {
+                ticket: t,
+                result: slot,
+                ..
+            }) = self.pending.get_mut(&task)
+            {
+                if *t == ticket {
+                    *slot = Some(result);
+                    woken.push(task);
+                }
             }
         }
         self.waiting -= woken.len();
@@ -334,6 +362,7 @@ impl Net {
             Some(Pending::Connect {
                 addr,
                 result: Some(result),
+                ..
             }) => {
                 let result = result.and_then(|tcp| {
                     let name = tcp
@@ -368,14 +397,22 @@ impl Net {
                 };
                 let done = self.connected.0.clone();
                 let to = addr.clone();
+                self.tickets += 1;
+                let ticket = self.tickets;
                 std::thread::spawn(move || {
                     let result = TcpStream::connect(&to);
                     // The VM may have ended, and these with it.
-                    let _ = done.send((task, result));
+                    let _ = done.send((task, ticket, result));
                     let _ = poller.notify();
                 });
-                self.pending
-                    .insert(task, Pending::Connect { addr, result: None });
+                self.pending.insert(
+                    task,
+                    Pending::Connect {
+                        addr,
+                        ticket,
+                        result: None,
+                    },
+                );
                 None
             }
         }

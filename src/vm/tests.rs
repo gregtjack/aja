@@ -3175,3 +3175,253 @@ fn a_call_returned_while_code_is_deferred_isnt_a_tail_call() {
     );
     assert!(msg.starts_with("stack overflow"), "{msg}");
 }
+
+/// The error a program using the standard library stops with, under
+/// stress or not, rendered with its notes.
+#[track_caller]
+fn std_failure(src: &str, stress: bool) -> String {
+    let (_, result) = run_std(src, stress);
+    let e = result.expect_err("program should fail");
+    let mut text = e.message.clone();
+    for n in e.to_diagnostic().notes {
+        text.push_str("\n");
+        text.push_str(&n);
+    }
+    text
+}
+
+#[test]
+fn cancelling_a_scope_stops_its_tasks_and_runs_their_deferred_code() {
+    // A busy loop, a sleeper, a joiner, and one waiting on a socket all
+    // stop; their deferred code runs; and `scope` returns once they have.
+    // Each task has a variable of its own to mark, since a `var` that two
+    // tasks change at once can lose a change under switching stress.
+    assert_eq!(
+        std_value(
+            "import std::net;
+             import std::task;
+             fn main() -> (List<bool>, List<bool>) {
+                 var busy_done = false;
+                 var sleeper_done = false;
+                 var joiner_done = false;
+                 var accepter_done = false;
+                 let listener = match net::listen(\"127.0.0.1:0\") { Ok(l) => l, Err(_) => { return ([], []); } };
+                 let stopped = task::scope(fn(s) {
+                     let busy = s.spawn(fn() -> int {
+                         defer { busy_done = true; }
+                         var n = 0;
+                         while true { n = n + 1; }
+                         n
+                     });
+                     let sleeper = s.spawn(fn() -> int { defer { sleeper_done = true; } sleep(100_000); 1 });
+                     let joiner = s.spawn(fn() -> int { defer { joiner_done = true; } sleeper.join() });
+                     let accepter = s.spawn(fn() -> int {
+                         defer { accepter_done = true; }
+                         match listener.accept() { Ok(_) => 1, Err(_) => 2 }
+                     });
+                     sleep(20);
+                     s.cancel();
+                     [busy.try_join().is_none(), sleeper.try_join().is_none(),
+                      joiner.try_join().is_none(), accepter.try_join().is_none()]
+                 });
+                 ([busy_done, sleeper_done, joiner_done, accepter_done], stopped)
+             }"
+        ),
+        "([true, true, true, true], [true, true, true, true])"
+    );
+}
+
+#[test]
+fn a_cancelled_task_unwinds_every_frame_innermost_first() {
+    // Deferred code pending in each frame, in blocks and loop bodies, runs
+    // once each, from the innermost frame out; and a task's nested scope's
+    // tasks stop before it leaves the scope. Only the cancelled task
+    // writes `log`; `seq = seq + 1` has no safepoint in it, so no switch
+    // can split it, and it orders the two tasks.
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> (List<str>, bool) {
+                 var log: List<str> = [];
+                 var seq = 0;
+                 var nested_at = 0;
+                 var task_at = 0;
+                 let inner = fn(depth: int) {
+                     defer { log = log.push(\"frame {depth}\"); }
+                     for i in 0..3 {
+                         defer { log = log.push(\"iteration {i} of frame {depth}\"); }
+                         if i == 1 { sleep(100_000); }
+                     }
+                 };
+                 task::scope(fn(s) {
+                     s.spawn(fn() {
+                         defer { seq = seq + 1; task_at = seq; }
+                         task::scope(fn(nested) {
+                             nested.spawn(fn() { defer { seq = seq + 1; nested_at = seq; } sleep(100_000); });
+                             inner(1);
+                         });
+                     });
+                     sleep(20);
+                     s.cancel();
+                 });
+                 (log, 0 < nested_at && nested_at < task_at)
+             }"
+        ),
+        "([\"iteration 0 of frame 1\", \"iteration 1 of frame 1\", \"frame 1\"], true)"
+    );
+}
+
+#[test]
+fn deferred_code_runs_to_its_end_when_its_task_is_cancelled() {
+    // The cancel comes while the task is in deferred code, asleep; the
+    // rest of it runs, and the task stops at its next safepoint, running
+    // the deferred code around it.
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> List<str> {
+                 var log: List<str> = [];
+                 task::scope(fn(s) {
+                     s.spawn(fn() {
+                         defer { log = log.push(\"outer\"); }
+                         {
+                             defer { log = log.push(\"start\"); sleep(40); log = log.push(\"end\"); }
+                             log = log.push(\"body\");
+                         }
+                         log = log.push(\"after the block\");
+                         sleep(100_000);
+                     });
+                     sleep(10);
+                     s.cancel();
+                 });
+                 log
+             }"
+        ),
+        "[\"body\", \"start\", \"end\", \"outer\"]"
+    );
+}
+
+#[test]
+fn a_sleep_in_deferred_code_isnt_cut_short_or_restarted() {
+    // Cancelled 10 ms into a 60 ms sleep in deferred code, the task sleeps
+    // out the rest of it: not less, and not 60 ms more.
+    let src = "import std::task;
+               fn main() -> int {
+                   let start = clock();
+                   var woke = 0;
+                   task::scope(fn(s) {
+                       s.spawn(fn() {
+                           { defer { sleep(60); woke = clock() - start; } }
+                           sleep(100_000);
+                       });
+                       sleep(10);
+                       s.cancel();
+                   });
+                   woke
+               }";
+    for stress in [false, true] {
+        let (vm, result) = run_std(src, stress);
+        let woke: i64 = vm.heap.repr(&result.unwrap()).parse().unwrap();
+        // Restarting the sleep would make it 70.
+        assert!((60..67).contains(&woke), "woke after {woke} ms");
+    }
+}
+
+#[test]
+fn cancelled_scopes_start_no_tasks_and_cancel_once() {
+    assert_eq!(
+        std_value(
+            "import std::task;
+             fn main() -> (bool, bool, int) {
+                 var ran = 0;
+                 let (never, own) = task::scope(fn(s) {
+                     s.cancel();
+                     s.cancel();
+                     let never = s.spawn(fn() -> int { ran = ran + 1; 1 });
+                     (never.try_join().is_none(), s.spawn(fn() { ran = ran + 1; }).try_join().is_none())
+                 });
+                 // The code that called `scope` isn't a task of it, so it
+                 // carried on; and a scope that has ended can't be cancelled.
+                 let kept = task::scope(fn(s) { s });
+                 kept.cancel();
+                 (never, own, ran)
+             }"
+        ),
+        "(true, true, 0)"
+    );
+}
+
+#[test]
+fn joining_a_cancelled_task_stops_the_program() {
+    for stress in [false, true] {
+        let msg = std_failure(
+            "import std::task;
+             fn main() {
+                 task::scope(fn(s) {
+                     let t = s.spawn(fn() -> int { sleep(100_000); 1 });
+                     s.cancel();
+                     t.join();
+                 });
+             }",
+            stress,
+        );
+        assert!(
+            msg.starts_with("cannot join a task that was cancelled"),
+            "{msg}"
+        );
+    }
+}
+
+#[test]
+fn a_task_s_error_says_where_it_was_spawned() {
+    let msg = std_failure(
+        "import std::task;
+fn main() {
+    task::scope(fn(s) {
+        s.spawn(fn() {
+            task::scope(fn(t) { t.spawn(fn() -> int { [1][5] }); });
+        });
+    });
+}",
+        false,
+    );
+    assert_eq!(
+        msg,
+        "index 5 is out of range for a list of length 1\n\
+         in a task spawned at line 5, column 33\n\
+         in a task spawned at line 4, column 9"
+    );
+}
+
+#[test]
+fn a_deadlock_says_what_each_task_waits_for() {
+    let msg = std_failure(
+        "import std::task;
+fn main() {
+    task::scope(fn(s) {
+        var other: Option<task::Task<int>> = None;
+        let a = s.spawn(fn() -> int { sleep(5); match other { Some(t) => t.join(), None => 0 } });
+        other = Some(s.spawn(fn() -> int { a.join() }));
+        a.join()
+    });
+}",
+        false,
+    );
+    assert_eq!(
+        msg,
+        "deadlock: every task is waiting for another task, so none can go on\n\
+         the task spawned at line 5, column 17 is joining a task, at line 5, column 74\n\
+         the main task is joining a task, at line 7, column 9\n\
+         the task spawned at line 6, column 22 is joining a task, at line 6, column 44"
+    );
+}
+
+#[test]
+fn a_cancelled_sleeper_doesnt_keep_the_program_running() {
+    let start = std::time::Instant::now();
+    std_value(
+        "import std::task;
+         fn main() { task::scope(fn(s) { s.spawn(fn() { sleep(100_000); }); s.cancel(); }); }",
+    );
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+}

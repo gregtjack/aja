@@ -32,6 +32,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::ast::Span;
+
 use super::{
     bytecode::Proto,
     heap::{Gc, Heap},
@@ -54,6 +56,11 @@ pub enum Intrinsic {
     CloseScope,
     Spawn,
     Join,
+    // `Scope::cancel`.
+    Cancel,
+    // Whether a task returned rather than being cancelled, once it has
+    // finished: `Task::try_join` is written on it.
+    Returned,
     // `sleep(ms)`.
     Sleep,
     // `std::native::sleep_nanos(nanos)`, for `std::time`.
@@ -63,11 +70,13 @@ pub enum Intrinsic {
 }
 
 impl Intrinsic {
-    const ALL: [(Intrinsic, &'static str); 6] = [
+    const ALL: [(Intrinsic, &'static str); 8] = [
         (Intrinsic::OpenScope, "std::task::open_scope"),
         (Intrinsic::CloseScope, "std::task::close_scope"),
         (Intrinsic::Spawn, "std::task::Scope::spawn"),
         (Intrinsic::Join, "std::task::Task::join"),
+        (Intrinsic::Cancel, "std::task::Scope::cancel"),
+        (Intrinsic::Returned, "std::task::returned"),
         // The built-in, which sleeps only the task that calls it.
         (Intrinsic::Sleep, "sleep"),
         (Intrinsic::SleepNanos, "std::native::sleep_nanos"),
@@ -112,6 +121,41 @@ pub enum Next {
     Deadlock,
 }
 
+/// What a waiting task is waiting for, so that only that wakes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wait {
+    /// The `Task` it is joining to finish.
+    Join(Gc),
+    /// The tasks of the scope it is closing to finish.
+    Close(Gc),
+    /// The timer it set, by number, to go off.
+    Sleep(u64),
+    /// A socket to be ready, or a connect to finish.
+    Net,
+}
+
+impl Wait {
+    /// What the task is doing, for a deadlock's report.
+    fn describe(self) -> &'static str {
+        match self {
+            Wait::Join(_) => "joining a task",
+            Wait::Close(_) => "waiting for the tasks of its scope to finish",
+            Wait::Sleep(_) => "sleeping",
+            Wait::Net => "waiting on the network",
+        }
+    }
+}
+
+/// Where a task is in being cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cancel {
+    No,
+    /// Its scope was cancelled; it stops at its next safepoint or wait.
+    Requested,
+    /// It is running its deferred code on the way out of its frames.
+    Unwinding,
+}
+
 struct Task {
     /// Its registers and frames, while it isn't running.
     regs: Vec<Value>,
@@ -127,6 +171,12 @@ struct Task {
     /// Set when the task's sleep has ended, so its call of `sleep`, which
     /// runs again, returns.
     slept: bool,
+    /// What it is waiting for, while it waits.
+    waiting_on: Option<Wait>,
+    cancel: Cancel,
+    /// Where it and the tasks it was spawned from were spawned, outermost
+    /// first; empty for the tasks a run starts with.
+    origin: Rc<[Span]>,
 }
 
 enum State {
@@ -157,6 +207,9 @@ pub struct Scheduler {
     timers_set: u64,
     /// The sockets, and the tasks waiting on them.
     pub net: net::Net,
+    /// How many tasks have been asked to stop but haven't started to, so
+    /// that checking for one costs nothing while there are none.
+    requested: usize,
     /// End every turn at its first safepoint, to flush out code that
     /// depends on when switches happen. Used by tests.
     pub stress: bool,
@@ -175,6 +228,7 @@ impl Scheduler {
             timers: BinaryHeap::new(),
             timers_set: 0,
             net: net::Net::new(),
+            requested: 0,
             stress: false,
             #[cfg(test)]
             switches: Vec::new(),
@@ -188,6 +242,7 @@ impl Scheduler {
         self.free.clear();
         self.timers.clear();
         self.net = net::Net::new();
+        self.requested = 0;
     }
 
     /// Wake the running task once `after` has passed. It still has to
@@ -197,6 +252,22 @@ impl Scheduler {
         self.timers_set += 1;
         self.timers
             .push(Reverse((at, self.timers_set, self.current)));
+        self.waiting_for(Wait::Sleep(self.timers_set));
+    }
+
+    /// Record what the running task is about to wait for.
+    pub fn waiting_for(&mut self, what: Wait) {
+        self.tasks[self.current].waiting_on = Some(what);
+    }
+
+    /// Wake task `id` if it is waiting for `what`. A cancelled task stops
+    /// waiting early, so a timer or join it was waiting for may come later,
+    /// when it is waiting for something else or its slot is another task's.
+    pub fn wake_for(&mut self, id: TaskId, what: Wait) {
+        let task = &self.tasks[id];
+        if matches!(task.state, State::Waiting) && task.waiting_on == Some(what) {
+            self.wake(id);
+        }
     }
 
     /// Whether the running task has just woken from a sleep, which then
@@ -215,9 +286,12 @@ impl Scheduler {
             if at > now {
                 break;
             }
-            self.timers.pop();
-            self.tasks[id].slept = true;
-            self.wake(id);
+            let Reverse((_, n, _)) = self.timers.pop().unwrap();
+            let task = &self.tasks[id];
+            if matches!(task.state, State::Waiting) && task.waiting_on == Some(Wait::Sleep(n)) {
+                self.tasks[id].slept = true;
+                self.wake(id);
+            }
         }
     }
 
@@ -225,14 +299,14 @@ impl Scheduler {
     /// (forever if `None`) for one to be.
     fn wake_net(&mut self, timeout: Option<Duration>) {
         for id in self.net.poll(timeout) {
-            self.wake(id);
+            self.wake_for(id, Wait::Net);
         }
     }
 
     /// Queue the tasks the last network operation woke.
     pub fn wake_net_woken(&mut self) {
         for id in self.net.take_woken() {
-            self.wake(id);
+            self.wake_for(id, Wait::Net);
         }
     }
 
@@ -244,6 +318,15 @@ impl Scheduler {
             self.wake_sleepers();
             if let Some(next) = self.run_queue.pop_front() {
                 return Some(next);
+            }
+            // A cancelled task's timer wakes no one, so isn't worth
+            // waiting for.
+            while let Some(&Reverse((_, n, id))) = self.timers.peek() {
+                let task = &self.tasks[id];
+                if matches!(task.state, State::Waiting) && task.waiting_on == Some(Wait::Sleep(n)) {
+                    break;
+                }
+                self.timers.pop();
             }
             let until = self
                 .timers
@@ -271,6 +354,7 @@ impl Scheduler {
         proto: Rc<Proto>,
         handle: Option<Gc>,
         scope: Option<Gc>,
+        origin: Rc<[Span]>,
     ) -> TaskId {
         let regs = vec![Value::Void; proto.num_regs as usize];
         let frames = vec![Frame {
@@ -289,6 +373,9 @@ impl Scheduler {
             handle,
             scope,
             slept: false,
+            waiting_on: None,
+            cancel: Cancel::No,
+            origin,
         };
         let id = match self.free.pop() {
             Some(id) => {
@@ -342,10 +429,78 @@ impl Scheduler {
     }
 
     /// Put waiting task `id` back in the run queue.
-    pub fn wake(&mut self, id: TaskId) {
+    fn wake(&mut self, id: TaskId) {
         debug_assert!(matches!(self.tasks[id].state, State::Waiting));
-        self.tasks[id].state = State::Runnable;
+        let task = &mut self.tasks[id];
+        task.state = State::Runnable;
+        task.waiting_on = None;
         self.run_queue.push_back(id);
+    }
+
+    /// Where the running task and those it was spawned from were spawned.
+    pub fn origin(&self) -> Rc<[Span]> {
+        self.tasks[self.current].origin.clone()
+    }
+
+    /// Whether the running task has been asked to stop and hasn't started
+    /// to. Cheap while no task has been.
+    pub fn cancel_requested(&self) -> bool {
+        self.requested > 0 && self.tasks[self.current].cancel == Cancel::Requested
+    }
+
+    /// The running task starts to stop: from now on it runs only its
+    /// deferred code, which nothing cancels.
+    pub fn start_unwinding(&mut self) {
+        let task = &mut self.tasks[self.current];
+        debug_assert_eq!(task.cancel, Cancel::Requested);
+        task.cancel = Cancel::Unwinding;
+        self.requested -= 1;
+    }
+
+    /// Cancel scope `s`: each of its tasks, and those in the scopes they
+    /// opened, stops at its next safepoint or wait. A task waiting stops
+    /// waiting, except one waiting for the tasks of a scope it opened,
+    /// which are stopping too and wake it when they have, and one waiting
+    /// in deferred code, which runs to its end first.
+    pub fn cancel_scope(&mut self, s: Gc, heap: &mut Heap) {
+        let mut scopes = vec![s];
+        while let Some(s) = scopes.pop() {
+            let state = heap.scope(s);
+            if state.cancelled {
+                continue;
+            }
+            state.cancelled = true;
+            for id in 0..self.tasks.len() {
+                let task = &mut self.tasks[id];
+                if task.scope != Some(s)
+                    || task.cancel != Cancel::No
+                    || matches!(task.state, State::Free | State::Done(_))
+                {
+                    continue;
+                }
+                task.cancel = Cancel::Requested;
+                self.requested += 1;
+                // The scopes it opened that still have tasks.
+                for other in &self.tasks {
+                    if let Some(inner) = other.scope {
+                        if heap.scope(inner).owner == id && !scopes.contains(&inner) {
+                            scopes.push(inner);
+                        }
+                    }
+                }
+                let task = &self.tasks[id];
+                // A waiting task's innermost frame is at the call it waits in.
+                let waits_in_deferred =
+                    super::in_deferred(&task.frames, task.frames.last().map(|f| f.ip));
+                if matches!(task.state, State::Waiting)
+                    && !matches!(task.waiting_on, Some(Wait::Close(_)))
+                    && !waits_in_deferred
+                {
+                    self.net.forget(id);
+                    self.wake(id);
+                }
+            }
+        }
     }
 
     /// Make the running task wait until it is woken, and run the next
@@ -367,7 +522,7 @@ impl Scheduler {
     /// waiting to end it. Then the next task runs.
     pub fn finish(
         &mut self,
-        value: Value,
+        value: Option<Value>,
         heap: &mut Heap,
         regs: &mut Vec<Value>,
         frames: &mut Vec<Frame>,
@@ -376,21 +531,26 @@ impl Scheduler {
         frames.clear();
         let task = &mut self.tasks[self.current];
         match task.handle.take() {
-            None => task.state = State::Done(value),
+            None => {
+                task.state =
+                    State::Done(value.expect("a task a run starts with can't be cancelled"))
+            }
             Some(handle) => {
                 task.state = State::Free;
+                task.cancel = Cancel::No;
                 let scope = task.scope.take().expect("a spawned task has a scope");
                 self.free.push(self.current);
                 let state = heap.task(handle);
-                state.result = Some(value);
+                state.cancelled = value.is_none();
+                state.result = value;
                 for joiner in std::mem::take(&mut state.joiners) {
-                    self.wake(joiner);
+                    self.wake_for(joiner, Wait::Join(handle));
                 }
-                let scope = heap.scope(scope);
-                scope.live -= 1;
-                if scope.live == 0 {
-                    if let Some(closer) = scope.closer.take() {
-                        self.wake(closer);
+                let state = heap.scope(scope);
+                state.live -= 1;
+                if state.live == 0 {
+                    if let Some(closer) = state.closer.take() {
+                        self.wake_for(closer, Wait::Close(scope));
                     }
                 }
             }
@@ -418,6 +578,26 @@ impl Scheduler {
                 State::Runnable | State::Waiting => unreachable!("every task has finished"),
             })
             .collect()
+    }
+
+    /// Each waiting task but the running one: what it waits for, where it
+    /// was spawned, and its frames, for a deadlock's report.
+    pub fn waiting(&self) -> impl Iterator<Item = (&'static str, &[Span], &[Frame])> {
+        self.tasks
+            .iter()
+            .enumerate()
+            .filter(move |(id, t)| *id != self.current && matches!(t.state, State::Waiting))
+            .map(|(_, t)| {
+                let what = t.waiting_on.map_or("waiting", Wait::describe);
+                (what, &t.origin[..], &t.frames[..])
+            })
+    }
+
+    /// What the running task is waiting for, for a deadlock's report.
+    pub fn current_wait(&self) -> &'static str {
+        self.tasks[self.current]
+            .waiting_on
+            .map_or("waiting", Wait::describe)
     }
 
     /// The registers and frames of every task but the running one, for the

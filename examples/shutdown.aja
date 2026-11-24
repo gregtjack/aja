@@ -1,0 +1,84 @@
+// Cancelling a scope: a server that shuts down cleanly.
+//
+// The server's tasks live in one scope: one accepts connections, and each
+// connection gets a task of its own. When it is time to stop,
+// `server.cancel()` stops them all, wherever they are: waiting for a
+// connection, waiting for a line, or anywhere else. On the way out each
+// runs its deferred code, so every connection is closed and says so.
+
+import std::io;
+import std::net;
+import std::task;
+
+// Echo each line back until the client finishes, or the server stops.
+fn serve(id: int, conn: net::TcpStream) -> Result<void, io::Error> {
+    defer {
+        conn.close();
+        println("  connection {id} closed");
+    }
+    for line in conn.lines() {
+        conn.write_line(line?)?;
+    }
+    Ok(void)
+}
+
+// A client that says hello, reads the echo, and then just waits, as a
+// client that leaves its connection open does.
+fn client(addr: str, name: str) -> str {
+    match net::connect(addr) {
+        Ok(conn) => {
+            defer conn.close();
+            let _ = conn.write_line("hello from {name}");
+            let echo = match conn.read_line() {
+                Ok(Some(line)) => line,
+                _ => "no echo",
+            };
+            // Ends when the server closes the connection.
+            let after = match conn.read_line() {
+                Ok(None) => "the server closed it",
+                _ => "something else",
+            };
+            "{name} got \"{echo}\", then {after}"
+        }
+        Err(e) => e.message,
+    }
+}
+
+fn main() -> Result<void, io::Error> {
+    let listener = net::listen("127.0.0.1:0")?;
+    let addr = listener.local_addr();
+
+    let reports = task::scope(fn(outer) {
+        // The clients aren't the server's, so cancelling it leaves them be.
+        let clients = ["ada", "grace", "edsger"].map(fn(name) {
+            outer.spawn(fn() { client(addr, name) })
+        });
+        task::scope(fn(server) {
+            server.spawn(fn() {
+                defer println("  stopped accepting");
+                var next = 1;
+                while true {
+                    match listener.accept() {
+                        Ok(conn) => {
+                            let id = next;
+                            server.spawn(fn() { serve(id, conn) });
+                            next = next + 1;
+                        }
+                        Err(e) => println("accept failed: {e.message}"),
+                    }
+                }
+            });
+            // Give the clients a moment to connect and say hello.
+            sleep(100);
+            println("shutting down:");
+            server.cancel();
+        });
+        // `scope` has returned, so the server has stopped.
+        println("the server has stopped");
+        clients.map(fn(t) { t.join() })
+    });
+    for report in reports {
+        println(report);
+    }
+    Ok(void)
+}

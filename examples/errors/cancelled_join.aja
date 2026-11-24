@@ -1,0 +1,20 @@
+// A cancelled task stops before it returns, so it has no value for `join`
+// to give, and joining it stops the program. `try_join` gives an `Option`
+// instead: `None` for a task that was cancelled.
+//
+// expect: cannot join a task that was cancelled: it stopped before returning a value (`try_join` gives `None` for one)
+
+import std::task;
+
+fn main() {
+    let answer = task::scope(fn(s) {
+        let slow = s.spawn(fn() -> int {
+            sleep(10_000);
+            42
+        });
+        s.cancel();
+        println("try_join gave None: {slow.try_join().is_none()}");
+        slow.join()
+    });
+    println(answer);
+}

@@ -296,6 +296,10 @@ pub enum Op {
     /// The end of a `match` whose arms all failed. The type checker proves
     /// every `match` exhaustive, so reaching this is a bug in the compiler.
     NoMatch,
+    /// The end of a cleanup block (see [`Proto::cleanups`]): the frame's
+    /// deferred code has run, so a cancelled task leaves the frame and goes
+    /// on stopping in its caller.
+    Unwind,
 }
 
 /// String literals, numbered by the compiler. The VM allocates each one on
@@ -355,6 +359,38 @@ pub struct Proto {
     /// For `Call` instructions whose callee is a name, that name (by
     /// instruction index), to describe the call in error traces.
     pub call_names: HashMap<usize, Id>,
+    /// Where a cancelled task goes to run the deferred code that is pending
+    /// at an instruction: `(start, end, cleanup)` says the instructions
+    /// from `start` up to `end` go to `cleanup`, which runs it and ends in
+    /// [`Op::Unwind`]. Sorted, and not overlapping; an instruction in none
+    /// has no deferred code pending.
+    pub cleanups: Vec<(u32, u32, u32)>,
+    /// The instructions of deferred code run on the way out of a block, as
+    /// sorted, separate `(start, end)` ranges. A task asked to stop while
+    /// running them stops once they are done, so deferred code always runs
+    /// to its end.
+    pub deferred: Vec<(u32, u32)>,
+}
+
+impl Proto {
+    /// Where a task cancelled at instruction `at` runs its pending deferred
+    /// code, if it has any.
+    pub fn cleanup_at(&self, at: usize) -> Option<usize> {
+        let at = at as u32;
+        let i = self.cleanups.partition_point(|&(_, end, _)| end <= at);
+        match self.cleanups.get(i) {
+            Some(&(start, _, cleanup)) if start <= at => Some(cleanup as usize),
+            _ => None,
+        }
+    }
+
+    /// Whether instruction `at` is in deferred code run on the way out of
+    /// a block.
+    pub fn in_deferred(&self, at: usize) -> bool {
+        let at = at as u32;
+        let i = self.deferred.partition_point(|&(_, end)| end <= at);
+        self.deferred.get(i).is_some_and(|&(start, _)| start <= at)
+    }
 }
 
 impl fmt::Display for Proto {

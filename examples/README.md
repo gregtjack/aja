@@ -22,6 +22,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [iterators.aja](iterators.aja) | `for` loops, ranges, `break` / `continue`, lazy `Iter` methods, an endless iterator, and a tree you can loop over |
 | [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |
 | [tasks.aja](tasks.aja) | `std::task`: spawning and joining tasks in a scope, a scope waiting for tasks nobody joins, a generic `par_map`, divide and conquer with nested scopes, errors as values from tasks, and two long loops taking turns |
+| [shutdown.aja](shutdown.aja) | Cancelling a scope: a server whose accept loop and connections all stop on `cancel()`, each closing its connection in deferred code, while its clients, in another scope, carry on |
 | [sleep.aja](sleep.aja) | Tasks running at the same time: three jobs that wait, done one after another and then at once, timed with `clock()` |
 | [time.aja](time.aja) | `std::time`: timing a computation with `Instant`, making, adding, and comparing `Duration`s, and ticking at a steady rate with `sleep_until` |
 | [net.aja](net.aja) | `std::net`: a server and three clients in one program, each connection in a task, `close_write` and reading to the end, and a refused connection |
@@ -47,6 +48,7 @@ there.
 | [overflow.aja](errors/overflow.aja) | Integer overflow, which is an error rather than a wraparound |
 | [assert.aja](errors/assert.aja) | A failed `assert` |
 | [task_failure.aja](errors/task_failure.aja) | An error inside a task, which stops the program |
+| [cancelled_join.aja](errors/cancelled_join.aja) | `join` on a cancelled task, which has no value to give, and `try_join`, which gives `None` |
 | [scope_ended.aja](errors/scope_ended.aja) | Spawning on a `Scope` kept after its `scope` call returned |
 | [non_exhaustive.aja](errors/non_exhaustive.aja) | A `match` missing a case, an unreachable arm, and a name meant as a variant |
 | [generic_body.aja](errors/generic_body.aja) | Generic code assuming things about a type parameter, and mismatched type arguments |

@@ -24,6 +24,22 @@
 // For now every task runs on one OS thread, so tasks take turns rather than
 // running in parallel. Waiting overlaps all the same: while one task waits
 // (in `join`, or in the built-in `sleep(ms)`), the others run.
+//
+// A scope can be cancelled, which stops its tasks: a server stopping its
+// connections, say.
+//
+//     task::scope(fn(s) {
+//         s.spawn(fn() { serve_forever(listener) });
+//         wait_for_shutdown();
+//         s.cancel();
+//     });
+//
+// Each task in the scope, and in the scopes it opened, stops at its next
+// call, loop iteration, or wait (in `join`, `sleep`, or on a socket). On
+// the way out it runs the code it deferred with `defer`, so what it
+// opened gets closed, and deferred code that is already running runs to
+// its end. A cancelled task gives no value: `join` on it stops the
+// program, and `try_join` gives `None`.
 
 // The tasks started inside one call of `scope`.
 pub native struct Scope;
@@ -35,23 +51,48 @@ pub native struct Task<T>;
 // finish. Returns what `body` returned.
 pub fn scope<T>(body: (Scope) -> T) -> T {
     let s = open_scope();
-    let result = body(s);
-    close_scope(s);
-    result
+    // Deferred, so that a task cancelled while in `body` still waits for
+    // the scope's tasks before it stops: no task outlives its scope.
+    defer close_scope(s);
+    body(s)
 }
 
 impl Scope {
     // Start running `f` as a new task in this scope; the caller carries on.
     // Stops the program if the scope has ended, which can only happen if
-    // `self` was kept after its `scope` returned.
+    // `self` was kept after its `scope` returned. In a cancelled scope,
+    // the task never starts, as if cancelled straight away.
     pub native fn spawn<T>(self, f: () -> T) -> Task<T>;
+
+    // Stop every task in this scope, and in the scopes those tasks opened,
+    // at its next call, loop iteration, or wait, running its deferred code
+    // on the way out. Tasks spawned in it from now on never start. The
+    // code that called `scope` isn't one of its tasks, so it carries on,
+    // and `scope` returns once the tasks have stopped. Cancelling it again,
+    // or once it has ended, does nothing.
+    pub native fn cancel(self);
 }
 
 impl<T> Task<T> {
     // Wait for the task to finish, and give what it returned. Joining a task
-    // again gives the same value.
+    // again gives the same value. Stops the program if the task was
+    // cancelled, since then there is no value to give.
     pub native fn join(self) -> T;
+
+    // Wait for the task to finish, and give what it returned, or `None` if
+    // it was cancelled.
+    pub fn try_join(self) -> Option<T> {
+        if returned(self) {
+            Some(self.join())
+        } else {
+            None
+        }
+    }
 }
+
+// Wait for `t` to finish, then whether it returned, rather than being
+// cancelled.
+native fn returned<T>(t: Task<T>) -> bool;
 
 // A new scope, with no tasks yet.
 native fn open_scope() -> Scope;
