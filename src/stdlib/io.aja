@@ -34,6 +34,16 @@ pub enum ErrorKind {
     IsADirectory,
     // A directory to remove still had something in it.
     DirectoryNotEmpty,
+    // Nothing was listening at the address connected to.
+    ConnectionRefused,
+    // The other end of a connection ended it abruptly.
+    ConnectionReset,
+    // Something else is already listening at the address.
+    AddrInUse,
+    // The address isn't one of this machine's.
+    AddrNotAvailable,
+    // The socket has been closed.
+    NotConnected,
     Other,
 }
 
@@ -152,6 +162,11 @@ fn error(code: int) -> Error {
         8 => ErrorKind::NotADirectory,
         9 => ErrorKind::IsADirectory,
         10 => ErrorKind::DirectoryNotEmpty,
+        11 => ErrorKind::ConnectionRefused,
+        12 => ErrorKind::ConnectionReset,
+        13 => ErrorKind::AddrInUse,
+        14 => ErrorKind::AddrNotAvailable,
+        15 => ErrorKind::NotConnected,
         _ => ErrorKind::Other,
     };
     Error { kind, message: native::error_message() }

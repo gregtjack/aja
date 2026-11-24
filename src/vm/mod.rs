@@ -25,6 +25,7 @@ pub mod hamt;
 pub mod heap;
 pub mod list;
 mod native;
+mod net;
 pub use native::OUTPUT_CLOSED;
 mod scheduler;
 pub mod sorted;
@@ -866,6 +867,13 @@ impl Vm {
                 }
                 self.scheduler.set_timer(duration(n as u64));
                 Outcome::Wait
+            }
+            Intrinsic::Net(op) => {
+                let args = self.regs[args..args + op.arity()].to_vec();
+                let task = self.scheduler.current();
+                let outcome = self.scheduler.net.call(op, task, &mut self.heap, &args);
+                self.scheduler.wake_net_woken();
+                outcome
             }
             Intrinsic::Join => {
                 let Value::Task(t) = arg(self, 0) else {

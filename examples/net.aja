@@ -1,0 +1,64 @@
+// `std::net`: a server and its clients in one program, each in a task.
+//
+// The server accepts three connections and gives each a task that sends
+// every line back in capitals. Three clients connect at the same time,
+// each sends two lines, says it has finished with `close_write`, and reads
+// the reply to the end. Each operation blocks only its own task, so
+// all of this runs at once on one thread.
+//
+// For a server to try with `nc`, see net/echo_server.aja.
+
+import std::io;
+import std::net;
+import std::task;
+
+// Send each line from `conn` back in capitals, until the client finishes.
+fn shout(conn: net::TcpStream) -> Result<void, io::Error> {
+    for line in conn.lines() {
+        conn.write_line(line?.to_upper())?;
+    }
+    Ok(conn.close())
+}
+
+// Connect to `addr`, send two lines, and give the reply.
+fn client(addr: str, name: str) -> Result<str, io::Error> {
+    let conn = net::connect(addr)?;
+    conn.write_line("hello from {name}")?;
+    conn.write_line("goodbye")?;
+    conn.close_write()?;
+    let reply = conn.read_to_string()?;
+    conn.close();
+    Ok(reply)
+}
+
+fn main() -> Result<void, io::Error> {
+    // Port 0 picks a free port, and `local_addr` says which.
+    let listener = net::listen("127.0.0.1:0")?;
+    let addr = listener.local_addr();
+
+    let names = ["ada", "grace", "edsger"];
+    let replies = task::scope(fn(s) {
+        s.spawn(fn() {
+            for _ in names {
+                match listener.accept() {
+                    Ok(conn) => { s.spawn(fn() { shout(conn) }); }
+                    Err(e) => println("accept failed: {e.message}"),
+                }
+            }
+            listener.close();
+        });
+        names.map(fn(name) { s.spawn(fn() { client(addr, name) }) }).map(fn(t) { t.join() })
+    });
+    for reply in replies {
+        println(reply?.trim().replace("\n", " / "));
+    }
+
+    // Now the listener is closed, connecting fails, with an `io::Error`
+    // that names the address.
+    let refused = match net::connect(addr) {
+        Ok(_) => "the listener is still open",
+        Err(e) => e.message,
+    };
+    // `println` returns `void`, which is what `main`'s `Ok` holds.
+    Ok(println(refused))
+}

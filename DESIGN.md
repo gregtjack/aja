@@ -323,7 +323,9 @@ by a number with a fractional part.
    Several OS threads, `select`, and timeouts come after. Started: tasks
    in the VM ✅, `std::task` (scopes, `spawn`, `join`) ✅, a `sleep`
    that sleeps only its task ✅, and `std::time` (`Duration`, `Instant`,
-   `sleep_for`, `sleep_until`) ✅.
+   `sleep_for`, `sleep_until`) ✅. A poller in the scheduler, so a socket
+   operation blocks only its task, and `std::net` over TCP ✅ (see
+   [plans/net.md](plans/net.md)).
 10. **Cranelift AoT backend** producing native binaries, with the same runtime
     semantics as the VM.
 

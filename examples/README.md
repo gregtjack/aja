@@ -23,6 +23,8 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [tasks.aja](tasks.aja) | `std::task`: spawning and joining tasks in a scope, a scope waiting for tasks nobody joins, a generic `par_map`, divide and conquer with nested scopes, errors as values from tasks, and two long loops taking turns |
 | [sleep.aja](sleep.aja) | Tasks running at the same time: three jobs that wait, done one after another and then at once, timed with `clock()` |
 | [time.aja](time.aja) | `std::time`: timing a computation with `Instant`, making, adding, and comparing `Duration`s, and ticking at a steady rate with `sleep_until` |
+| [net.aja](net.aja) | `std::net`: a server and three clients in one program, each connection in a task, `close_write` and reading to the end, and a refused connection |
+| [net/echo_server.aja](net/echo_server.aja) | An echo server with a task per connection. Run `cargo run -- examples/net/echo_server.aja`, then `nc 127.0.0.1 7000` in another terminal |
 | [fs/notes.aja](fs/notes.aja) | `std::fs`: appending to a file, checking it exists, its size, and reading its lines. Run `echo "buy milk" \| cargo run -- examples/fs/notes.aja` (it writes `notes.txt` in the working directory) |
 | [io/greet.aja](io/greet.aja) | `std::io`: a prompt, reading lines until the input ends, standard error, and `main` returning a `Result`. Run `printf 'Ada\nfirst\nsecond\n' \| cargo run -- examples/io/greet.aja` |
 | [modules/](modules) | A program in several files: `import`, `pub`, and a struct whose private field keeps an invariant. Run `cargo run -- examples/modules/main.aja` |

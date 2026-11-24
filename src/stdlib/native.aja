@@ -74,3 +74,38 @@ pub native fn monotonic_nanos() -> int;
 // Sleep the calling task for `nanos` nanoseconds, which must be 0 or more,
 // while the others run.
 pub native fn sleep_nanos(nanos: int);
+
+// ---- TCP (`std::net`) ---------------------------------------------------------
+//
+// A socket is an `int` handle into the runtime's table, never reused, so a
+// closed one fails with status 15 (not connected). Each of these blocks
+// only its task.
+
+// A listener bound to `addr`, such as "127.0.0.1:8080".
+pub native fn tcp_listen(addr: str) -> int;
+
+// The next connection made to listener `id`, waiting for one.
+pub native fn tcp_accept(id: int) -> int;
+
+// A connection to `addr`, which may need resolving: "localhost:80".
+pub native fn tcp_connect(addr: str) -> int;
+
+// The next line from stream `id`, without its line ending. At the end of
+// the stream the status is 1.
+pub native fn tcp_read_line(id: int) -> str;
+
+// Everything left to read from stream `id`, up to its end.
+pub native fn tcp_read_all(id: int) -> str;
+
+// Send all of `text` on stream `id`.
+pub native fn tcp_write(id: int, text: str);
+
+// Tell the other end of stream `id` that nothing more is coming.
+pub native fn tcp_close_write(id: int);
+
+// Close socket `id`. Closing one that is already closed does nothing.
+pub native fn tcp_close(id: int);
+
+pub native fn tcp_local_addr(id: int) -> str;
+
+pub native fn tcp_peer_addr(id: int) -> str;

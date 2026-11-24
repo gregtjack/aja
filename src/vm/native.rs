@@ -29,8 +29,8 @@ pub type NativeFn = fn(&mut Heap, &[Value]) -> Result<Value, String>;
 
 // How the last intrinsic that can fail went, for `std::native::status`. The
 // codes match `std::io::ErrorKind` in `stdlib/io.aja`.
-const OK: i64 = 0;
-const END_OF_INPUT: i64 = 1;
+pub(super) const OK: i64 = 0;
+pub(super) const END_OF_INPUT: i64 = 1;
 const NOT_FOUND: i64 = 2;
 const PERMISSION_DENIED: i64 = 3;
 const INVALID_DATA: i64 = 4;
@@ -40,13 +40,18 @@ const OTHER: i64 = 7;
 const NOT_A_DIRECTORY: i64 = 8;
 const IS_A_DIRECTORY: i64 = 9;
 const DIRECTORY_NOT_EMPTY: i64 = 10;
+const CONNECTION_REFUSED: i64 = 11;
+const CONNECTION_RESET: i64 = 12;
+const ADDR_IN_USE: i64 = 13;
+const ADDR_NOT_AVAILABLE: i64 = 14;
+pub(super) const NOT_CONNECTED: i64 = 15;
 
 thread_local! {
     /// The status of the last intrinsic that can fail, and its message.
     static STATUS: RefCell<(i64, String)> = const { RefCell::new((OK, String::new())) };
 }
 
-fn set_status(code: i64, message: String) {
+pub(super) fn set_status(code: i64, message: String) {
     STATUS.with(|s| *s.borrow_mut() = (code, message));
 }
 
@@ -69,7 +74,10 @@ fn record<T: Default>(result: io::Result<T>) -> T {
 
 /// Like [`record`], with the message of an error made by `message` from
 /// the error's own description.
-fn record_as<T: Default>(result: io::Result<T>, message: impl FnOnce(String) -> String) -> T {
+pub(super) fn record_as<T: Default>(
+    result: io::Result<T>,
+    message: impl FnOnce(String) -> String,
+) -> T {
     match result {
         Ok(v) => {
             set_status(OK, String::new());
@@ -85,6 +93,13 @@ fn record_as<T: Default>(result: io::Result<T>, message: impl FnOnce(String) -> 
                 io::ErrorKind::NotADirectory => NOT_A_DIRECTORY,
                 io::ErrorKind::IsADirectory => IS_A_DIRECTORY,
                 io::ErrorKind::DirectoryNotEmpty => DIRECTORY_NOT_EMPTY,
+                io::ErrorKind::ConnectionRefused => CONNECTION_REFUSED,
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => {
+                    CONNECTION_RESET
+                }
+                io::ErrorKind::AddrInUse => ADDR_IN_USE,
+                io::ErrorKind::AddrNotAvailable => ADDR_NOT_AVAILABLE,
+                io::ErrorKind::NotConnected => NOT_CONNECTED,
                 _ => OTHER,
             };
             set_status(code, message(describe(&e)));
@@ -334,7 +349,7 @@ fn flush(fd: i64) -> io::Result<()> {
 }
 
 /// A string for a native function to return.
-fn str_value(heap: &mut Heap, s: String) -> Value {
+pub(super) fn str_value(heap: &mut Heap, s: String) -> Value {
     Value::Str(heap.alloc_str(s.into_boxed_str()))
 }
 

@@ -1,0 +1,156 @@
+// Networking over TCP.
+//
+//     import std::io;
+//     import std::net;
+//     import std::task;
+//
+//     fn main() -> Result<void, io::Error> {
+//         let listener = net::listen("127.0.0.1:7000")?;
+//         Ok(task::scope(fn(s) {
+//             while true {
+//                 match listener.accept() {
+//                     Ok(conn) => { s.spawn(fn() { echo(conn) }); }
+//                     Err(e) => println("accept failed: {e.message}"),
+//                 }
+//             }
+//         }))
+//     }
+//
+//     fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
+//         for line in conn.lines() {
+//             conn.write_line(line?)?;
+//         }
+//         Ok(conn.close())
+//     }
+//
+// Every operation blocks only the task that does it: while one task waits
+// for a connection or for data, the others run. So a server handles many
+// connections at once by giving each a task of its own, written as plain
+// code that reads, then writes, then reads again.
+//
+// Addresses are strings: "127.0.0.1:8080", "localhost:80", "[::1]:0". Port
+// 0 picks a free port, which `local_addr` tells. Streams carry text, which
+// must be UTF-8; a line or a character that arrives in pieces comes out
+// whole. Errors are `io::Error`s whose message names the address:
+// "could not connect to '127.0.0.1:1': connection refused".
+//
+// A listener or stream stays open until it is closed, or the program ends.
+// Using one after closing it fails with `io::ErrorKind::NotConnected`.
+
+import std::io;
+import std::native;
+
+// Waits for connections at an address.
+pub struct TcpListener {
+    id: int,
+}
+
+// A connection, to read text from and write text to.
+pub struct TcpStream {
+    id: int,
+}
+
+// A listener at `addr`. Fails with `AddrInUse` if something else is
+// listening there.
+pub fn listen(addr: str) -> Result<TcpListener, io::Error> {
+    let id = native::tcp_listen(addr);
+    io::checked(TcpListener { id })
+}
+
+// A connection to `addr`, looking its name up first if it has one. Fails
+// with `ConnectionRefused` if nothing is listening there.
+pub fn connect(addr: str) -> Result<TcpStream, io::Error> {
+    let id = native::tcp_connect(addr);
+    io::checked(TcpStream { id })
+}
+
+impl TcpListener {
+    // The next connection made to it, waiting for one.
+    pub fn accept(self) -> Result<TcpStream, io::Error> {
+        let id = native::tcp_accept(self.id);
+        io::checked(TcpStream { id })
+    }
+
+    // The address it listens at, with the port filled in: "127.0.0.1:53412".
+    pub fn local_addr(self) -> str {
+        native::tcp_local_addr(self.id)
+    }
+
+    // Stop listening. Tasks waiting in `accept` get a `NotConnected` error.
+    pub fn close(self) {
+        native::tcp_close(self.id);
+    }
+}
+
+impl TcpStream {
+    // The next line, without its line ending (`\n` or `\r\n`), or `None`
+    // once the other end has finished sending and every line is read.
+    pub fn read_line(self) -> Result<Option<str>, io::Error> {
+        let line = native::tcp_read_line(self.id);
+        match native::status() {
+            0 => Ok(Some(line)),
+            1 => Ok(None),
+            code => Err(io::error(code)),
+        }
+    }
+
+    // Each line left, as `read_line` gives them. A read that fails gives
+    // its error as the last value.
+    pub fn lines(self) -> Iter<Result<str, io::Error>> {
+        var done = false;
+        Iter::new(fn() -> Option<Result<str, io::Error>> {
+            if done {
+                return None;
+            }
+            match self.read_line() {
+                Ok(Some(line)) => Some(Ok(line)),
+                Ok(None) => {
+                    done = true;
+                    None
+                }
+                Err(e) => {
+                    done = true;
+                    Some(Err(e))
+                }
+            }
+        })
+    }
+
+    // Everything the other end sends until it finishes.
+    pub fn read_to_string(self) -> Result<str, io::Error> {
+        io::checked(native::tcp_read_all(self.id))
+    }
+
+    // Send `text`, returning once all of it is sent.
+    pub fn write(self, text: str) -> Result<void, io::Error> {
+        io::checked(native::tcp_write(self.id, text))
+    }
+
+    // `text`, then a newline.
+    pub fn write_line(self, text: str) -> Result<void, io::Error> {
+        self.write(text + "\n")
+    }
+
+    // Tell the other end that nothing more is coming, while still reading
+    // what it sends. One reading to the end, with `read_to_string` or
+    // `lines`, then finishes.
+    pub fn close_write(self) -> Result<void, io::Error> {
+        io::checked(native::tcp_close_write(self.id))
+    }
+
+    // This end's address.
+    pub fn local_addr(self) -> str {
+        native::tcp_local_addr(self.id)
+    }
+
+    // The other end's address.
+    pub fn peer_addr(self) -> str {
+        native::tcp_peer_addr(self.id)
+    }
+
+    // Close the connection. Tasks waiting to read from it or write to it
+    // get a `NotConnected` error.
+    pub fn close(self) {
+        native::tcp_close(self.id);
+    }
+}

@@ -576,7 +576,7 @@ implementation fails the tests and stops the VM at startup. Built-ins named
 
 The standard library is written in Aja (`src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
-it has `std::collections`, `std::io`, `std::fs`, `std::task`, and `std::time`.
+it has `std::collections`, `std::io`, `std::fs`, `std::net`, `std::task`, and `std::time`.
 
 #### `std::collections`
 
@@ -735,6 +735,59 @@ fn main() -> Result<void, io::Error> {
 - To add a module, write `src/stdlib/<name>.aja` and list it in `MODULES`
   in `src/stdlib/mod.rs`.
 
+#### `std::net`
+
+```rust
+import std::io;
+import std::net;
+import std::task;
+
+fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
+    for line in conn.lines() {
+        conn.write_line(line?)?;
+    }
+    Ok(conn.close())
+}
+
+fn main() -> Result<void, io::Error> {
+    let listener = net::listen("127.0.0.1:7000")?;
+    Ok(task::scope(fn(s) {
+        while true {
+            match listener.accept() {
+                Ok(conn) => { s.spawn(fn() { echo(conn) }); }
+                Err(e) => println(e.message),
+            }
+        }
+    }))
+}
+```
+
+| `std::net` | Does |
+|------------|------|
+| `listen(addr)` | `Result<TcpListener, io::Error>`; port 0 picks a free port |
+| `connect(addr)` | `Result<TcpStream, io::Error>`, looking up a name first if there is one |
+| `listener.accept()` | `Result<TcpStream, io::Error>`, waiting for the next connection |
+| `stream.read_line()`, `stream.lines()`, `stream.read_to_string()` | As on `io::Reader`; the end is when the other end finishes sending |
+| `stream.write(text)`, `stream.write_line(text)` | `Result<void, io::Error>`, returning once all of it is sent |
+| `stream.close_write()` | Tell the other end nothing more is coming, while still reading |
+| `local_addr()`, `stream.peer_addr()`, `close()` | On both; addresses are `str`s like `"127.0.0.1:7000"` |
+
+- **Each operation blocks only its task.** Sockets are non-blocking
+  underneath: one that isn't ready parks its task with a poller (epoll,
+  kqueue, or IOCP, through the `polling` crate), and the other tasks run.
+  So a server gives each connection a task, written as plain code.
+  Connecting runs on a thread of its own, since it can't be done without
+  blocking.
+- **Streams carry text**, which must be UTF-8. Reads are buffered, so a
+  line or character that arrives in pieces comes out whole. Bytes wait for
+  a bytes type.
+- Errors are `io::Error`s naming the address, with the kinds
+  `ConnectionRefused`, `ConnectionReset`, `AddrInUse`, `AddrNotAvailable`,
+  and `NotConnected` (a closed socket). Closing a socket wakes any task
+  waiting on it, with `NotConnected`.
+- Sockets stay open until closed, or until the program ends. There are no
+  timeouts yet. See [plans/net.md](plans/net.md) for what comes next.
+
 #### `std::time`
 
 ```rust
@@ -795,6 +848,8 @@ files ──► Loader ──► Lexer ──► Parser ──► Resolver ─�
 | `src/vm/mod.rs`       | The VM: call frames, the dispatch loop, runtime errors |
 | `src/vm/value.rs`     | Runtime values |
 | `src/vm/heap.rs`      | Garbage-collected heap for closures, cells, strings, struct and enum values, and lists |
+| `src/vm/scheduler.rs` | Tasks: the run queue, switching, timers, and waiting on sockets |
+| `src/vm/net.rs`       | TCP for `std::net`: the socket table and the poller |
 | `src/vm/list.rs`      | Lists: persistent vectors that share structure between versions |
 | `src/vm/hamt.rs`      | Maps and sets: hash array mapped tries that share structure between versions |
 | `src/vm/sorted.rs`    | Sorted maps and sets: weight-balanced trees that share structure between versions |
@@ -854,7 +909,7 @@ with `Eq`, `Hash`, and `Ord` bounds; ordering with `<` and `compare` on any `Ord
 `Result`, and `Ordering` in the prelude, and `?`; methods and associated functions in `impl` blocks;
 sorting and searching lists;
 modules, with `import` and `pub`; the start of the standard library
-(`std::collections`, `std::io`, `std::fs`, `std::task`, `std::time`); template strings, and methods on strings and
+(`std::collections`, `std::io`, `std::fs`, `std::net`, `std::task`, `std::time`); template strings, and methods on strings and
 numbers; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 

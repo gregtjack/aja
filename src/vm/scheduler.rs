@@ -35,7 +35,7 @@ use std::{
 use super::{
     bytecode::Proto,
     heap::{Gc, Heap},
-    native,
+    native, net,
     value::Value,
     Frame,
 };
@@ -58,6 +58,8 @@ pub enum Intrinsic {
     Sleep,
     // `std::native::sleep_nanos(nanos)`, for `std::time`.
     SleepNanos,
+    // The TCP functions, for `std::net`.
+    Net(net::Op),
 }
 
 impl Intrinsic {
@@ -73,10 +75,19 @@ impl Intrinsic {
 
     /// The intrinsic declared as the native function `name`, if it is one.
     pub fn named(name: &str) -> Option<Intrinsic> {
-        Self::ALL.iter().find(|(_, n)| *n == name).map(|(i, _)| *i)
+        let net = net::Op::ALL.iter().map(|&(op, n)| (Intrinsic::Net(op), n));
+        Self::ALL
+            .iter()
+            .copied()
+            .chain(net)
+            .find(|(_, n)| *n == name)
+            .map(|(i, _)| i)
     }
 
     pub fn name(self) -> &'static str {
+        if let Intrinsic::Net(op) = self {
+            return net::Op::ALL.iter().find(|(o, _)| *o == op).unwrap().1;
+        }
         Self::ALL.iter().find(|(i, _)| *i == self).unwrap().1
     }
 }
@@ -144,6 +155,8 @@ pub struct Scheduler {
     timers: BinaryHeap<Reverse<(Instant, u64, TaskId)>>,
     /// How many timers have been set, to order those due at the same time.
     timers_set: u64,
+    /// The sockets, and the tasks waiting on them.
+    pub net: net::Net,
     /// End every turn at its first safepoint, to flush out code that
     /// depends on when switches happen. Used by tests.
     pub stress: bool,
@@ -161,6 +174,7 @@ impl Scheduler {
             free: Vec::new(),
             timers: BinaryHeap::new(),
             timers_set: 0,
+            net: net::Net::new(),
             stress: false,
             #[cfg(test)]
             switches: Vec::new(),
@@ -173,6 +187,7 @@ impl Scheduler {
         self.run_queue.clear();
         self.free.clear();
         self.timers.clear();
+        self.net = net::Net::new();
     }
 
     /// Wake the running task once `after` has passed. It still has to
@@ -206,16 +221,39 @@ impl Scheduler {
         }
     }
 
-    /// The next task to run, waiting for a sleeping one to wake if none
-    /// can run now. `None` if no task can ever run.
+    /// Wake the tasks whose sockets are ready, waiting up to `timeout`
+    /// (forever if `None`) for one to be.
+    fn wake_net(&mut self, timeout: Option<Duration>) {
+        for id in self.net.poll(timeout) {
+            self.wake(id);
+        }
+    }
+
+    /// Queue the tasks the last network operation woke.
+    pub fn wake_net_woken(&mut self) {
+        for id in self.net.take_woken() {
+            self.wake(id);
+        }
+    }
+
+    /// The next task to run, waiting for a sleeping one to wake, or a
+    /// socket to be ready, if none can run now. `None` if no task can ever
+    /// run.
     fn next_task(&mut self) -> Option<TaskId> {
         loop {
             self.wake_sleepers();
             if let Some(next) = self.run_queue.pop_front() {
                 return Some(next);
             }
-            let &Reverse((at, _, _)) = self.timers.peek()?;
-            std::thread::sleep(at.saturating_duration_since(Instant::now()));
+            let until = self
+                .timers
+                .peek()
+                .map(|&Reverse((at, _, _))| at.saturating_duration_since(Instant::now()));
+            if self.net.is_waiting() {
+                self.wake_net(until);
+            } else {
+                std::thread::sleep(until?);
+            }
         }
     }
 
@@ -288,9 +326,13 @@ impl Scheduler {
     /// stack goes in `regs` and `frames`. Every frame's `ip` must be up to
     /// date. Returns whether it switched.
     pub fn end_turn(&mut self, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) -> bool {
-        // Wake the sleepers whose time has come, so they get a turn soon
-        // even while other tasks compute without waiting.
+        // Wake the sleepers whose time has come, and the tasks whose
+        // sockets are ready, so they get a turn soon even while other tasks
+        // compute without waiting.
         self.wake_sleepers();
+        if self.net.is_waiting() {
+            self.wake_net(Some(Duration::ZERO));
+        }
         let Some(next) = self.run_queue.pop_front() else {
             return false;
         };

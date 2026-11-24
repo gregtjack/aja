@@ -1,0 +1,47 @@
+// An echo server: every line a client sends comes back to it. Each
+// connection gets a task of its own, so many clients can talk at once.
+//
+//     cargo run -- examples/net/echo_server.aja
+//     nc 127.0.0.1 7000         (in another terminal; type lines)
+//
+// It runs until it is stopped with Ctrl-C.
+
+import std::io;
+import std::net;
+import std::task;
+
+fn echo(conn: net::TcpStream) -> Result<void, io::Error> {
+    let who = conn.peer_addr();
+    println("{who} connected");
+    for line in conn.lines() {
+        conn.write_line(line?)?;
+    }
+    println("{who} left");
+    Ok(conn.close())
+}
+
+fn serve(listener: net::TcpListener) {
+    task::scope(fn(s) {
+        while true {
+            match listener.accept() {
+                Ok(conn) => {
+                    s.spawn(fn() {
+                        // A client that goes away mid-line only ends its
+                        // own task.
+                        match echo(conn) {
+                            Ok(_) => {}
+                            Err(e) => println("{e.message}"),
+                        }
+                    });
+                }
+                Err(e) => println("accept failed: {e.message}"),
+            }
+        }
+    });
+}
+
+fn main() -> Result<void, io::Error> {
+    let listener = net::listen("127.0.0.1:7000")?;
+    println("listening on {listener.local_addr()}");
+    Ok(serve(listener))
+}

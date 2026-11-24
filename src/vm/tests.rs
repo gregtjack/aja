@@ -2900,3 +2900,117 @@ fn instants_measure_sleeps_in_tasks() {
         assert!((50..200).contains(&elapsed), "took {elapsed} ms");
     }
 }
+
+#[test]
+fn tcp_servers_and_clients_talk_in_tasks() {
+    // Three clients at once, each with a server task of its own, and
+    // reading lines, to the end, and both line endings.
+    assert_eq!(
+        std_value(
+            "import std::io;
+             import std::net;
+             import std::task;
+             fn serve(conn: net::TcpStream) -> Result<int, io::Error> {
+                 var n = 0;
+                 for line in conn.lines() {
+                     conn.write_line(\"<\" + line? + \">\")?;
+                     n = n + 1;
+                 }
+                 conn.close();
+                 Ok(n)
+             }
+             fn main() -> List<str> {
+                 let listener = match net::listen(\"127.0.0.1:0\") { Ok(l) => l, Err(e) => { return [e.message]; } };
+                 let addr = listener.local_addr();
+                 task::scope(fn(s) {
+                     s.spawn(fn() {
+                         for _ in 0..3 {
+                             match listener.accept() {
+                                 Ok(conn) => { s.spawn(fn() { serve(conn) }); }
+                                 Err(e) => println(e.message),
+                             }
+                         }
+                     });
+                     [\"a\", \"b\", \"c\"].map(fn(name) {
+                         s.spawn(fn() -> str {
+                             let reply = net::connect(addr).and_then(fn(c) {
+                                 c.write(name + \"1\\r\\n\" + name + \"2\\n\" + name + \"3\")
+                                     .and_then(fn(_) { c.close_write() })
+                                     .and_then(fn(_) { c.read_to_string() })
+                             });
+                             match reply { Ok(r) => r, Err(e) => e.message }
+                         })
+                     }).map(fn(t) { t.join() })
+                 })
+             }"
+        ),
+        "[\"<a1>\\n<a2>\\n<a3>\\n\", \"<b1>\\n<b2>\\n<b3>\\n\", \"<c1>\\n<c2>\\n<c3>\\n\"]"
+    );
+}
+
+#[test]
+fn tcp_writes_wait_while_the_reader_catches_up() {
+    // Eight megabytes is more than the socket buffers hold, so the write waits
+    // for the reader, in another task, more than once.
+    assert_eq!(
+        std_value(
+            "import std::net;
+             import std::task;
+             fn main() -> (int, int) {
+                 let listener = match net::listen(\"127.0.0.1:0\") { Ok(l) => l, Err(_) => { return (-1, -1); } };
+                 let big = \"0123456789abcdef\".repeat(524_288);
+                 task::scope(fn(s) {
+                     let reader = s.spawn(fn() -> int {
+                         match listener.accept() {
+                             Ok(conn) => match conn.read_to_string() { Ok(all) => all.byte_len(), Err(_) => -2 },
+                             Err(_) => -3,
+                         }
+                     });
+                     let wrote = match net::connect(listener.local_addr()) {
+                         Ok(c) => match c.write(big) {
+                             Ok(_) => { c.close(); big.byte_len() }
+                             Err(_) => -4,
+                         },
+                         Err(_) => -5,
+                     };
+                     (wrote, reader.join())
+                 })
+             }"
+        ),
+        "(8388608, 8388608)"
+    );
+}
+
+#[test]
+fn tcp_errors_say_what_went_wrong() {
+    assert_eq!(
+        std_value(
+            "import std::io;
+             import std::net;
+             import std::task;
+             fn kind(r: Result<net::TcpStream, io::Error>) -> str {
+                 match r { Ok(_) => \"ok\", Err(e) => \"{e.kind == io::ErrorKind::ConnectionRefused} {e.message}\" }
+             }
+             fn main() -> List<str> {
+                 let listener = match net::listen(\"127.0.0.1:0\") { Ok(l) => l, Err(e) => { return [e.message]; } };
+                 let addr = listener.local_addr();
+                 let in_use = match net::listen(addr) {
+                     Ok(_) => \"listened twice\",
+                     Err(e) => if e.kind == io::ErrorKind::AddrInUse { \"in use\" } else { e.message },
+                 };
+                 // Closing the listener wakes a task waiting to accept.
+                 let woken = task::scope(fn(s) {
+                     let waiting = s.spawn(fn() { listener.accept() });
+                     s.spawn(fn() { sleep(20); listener.close(); });
+                     match waiting.join() {
+                         Ok(_) => \"accepted\",
+                         Err(e) => if e.kind == io::ErrorKind::NotConnected { \"woken\" } else { e.message },
+                     }
+                 });
+                 let refused = kind(net::connect(addr));
+                 [in_use, woken, refused.starts_with(\"true could not connect to '127.0.0.1:\").to_str()]
+             }"
+        ),
+        "[\"in use\", \"woken\", \"true\"]"
+    );
+}
