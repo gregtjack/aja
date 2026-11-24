@@ -173,7 +173,9 @@ fn area(s: Shape) -> int {
   `Shape::Circle(r) | Shape::Square(r) => r`, where each alternative must
   bind the same names to values of the same type. `|` works inside other
   patterns too: `Some(0 | 1)`.
-  A `match` is an expression, and its arms are tail positions.
+  A `match` is an expression, and its arms are tail positions. An arm
+  can leave instead of giving a value: `None => return Err(e),`,
+  `_ => break,`, or `_ => continue,`.
 - **`match` is exhaustive.** Leaving a case out is a compile error that names
   the missing cases (`Shape::Empty` not covered), so adding a variant
   points you at every `match` to update. An arm that can never match, because
@@ -573,7 +575,8 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 - **`if`:** `if cond { ... } else { ... }` is an expression; `if` without
   `else` is a statement. Chain conditions with `else if`:
   `if n < 0 { "negative" } else if n == 0 { "zero" } else { "positive" }`.
-  An `if` used as a value needs a final `else`.
+  An `if` used as a value needs a final `else`, and can be an operand
+  like any other value: `text + if done { "" } else { "\n" }`.
 - **`while`:** `while cond { ... }`.
 - **`for`:** `for x in values { ... }` (see [Loops and iterators](#loops-and-iterators)).
   `break` leaves the innermost `while` or `for` loop, and `continue` starts
@@ -850,6 +853,7 @@ fn main() -> Result<void, io::Error> {
 | `connect(addr)` | `Result<TcpStream, io::Error>`, looking up a name first if there is one |
 | `listener.accept()` | `Result<TcpStream, io::Error>`, waiting for the next connection |
 | `stream.read_line()`, `stream.lines()`, `stream.read_to_string()` | As on `io::Reader`; the end is when the other end finishes sending |
+| `stream.read(n)` | `Result<str, io::Error>`: the next `n` bytes, waiting for all of them (fewer only if the other end finishes, `""` at the end), for a length known in advance such as an HTTP `Content-Length` |
 | `stream.write(text)`, `stream.write_line(text)` | `Result<void, io::Error>`, returning once all of it is sent |
 | `stream.close_write()` | Tell the other end nothing more is coming, while still reading |
 | `local_addr()`, `stream.peer_addr()`, `close()` | On both; addresses are `str`s like `"127.0.0.1:7000"` |

@@ -1509,18 +1509,28 @@ where
     /// The block after the head of an `if` or `while`.
     fn parse_body(&mut self) -> ParseResult<Statement> {
         let hint = self.struct_hint.take();
+        let start = self.position;
         let body = self.parse_block();
-        Self::with_struct_hint(hint, body)
+        self.with_struct_hint(hint, start, body)
     }
 
     /// Add a hint to an error in what follows a head that might have
-    /// contained a struct literal.
-    fn with_struct_hint<R>(hint: Option<crate::ast::Id>, result: ParseResult<R>) -> ParseResult<R> {
+    /// contained a struct literal, which began at token `start`. Only an
+    /// error right at the start counts: fields read as a block fail by their
+    /// second token (`{ x: 1 }`, `{ x, y }`, `{ ..p }`), and an error further
+    /// in is about the body itself.
+    fn with_struct_hint<R>(
+        &self,
+        hint: Option<crate::ast::Id>,
+        start: u32,
+        result: ParseResult<R>,
+    ) -> ParseResult<R> {
+        let near_start = self.position - start <= 2;
         result.map_err(|e| match hint {
-            Some(name) => e.help(format!(
+            Some(name) if near_start => e.help(format!(
                 "a struct literal can't appear here without parentheses: `({name} {{ ... }})`"
             )),
-            None => e,
+            _ => e,
         })
     }
 
@@ -1612,14 +1622,10 @@ where
 
     /// Parse an expression
     fn parse_expr(&mut self) -> ParseResult<Expr> {
-        let Some(tok) = self.peek() else {
+        if self.peek().is_none() {
             return Err(self.expected("an expression"));
-        };
-
-        match tok.1 {
-            Token::If => self.parse_if_expr(),
-            _ => self.parse_assignment(),
         }
+        self.parse_assignment()
     }
 
     /// Parse a sequence of expressions,
@@ -1781,7 +1787,9 @@ where
 
     fn parse_return(&mut self) -> ParseResult<Statement> {
         self.consume(Token::Return)?;
-        let res = if tok_matches!(self, Token::Semicolon) {
+        // A `return` without a value ends at a `;`, or, as a match arm, at
+        // the `,` or `}` after it.
+        let res = if tok_matches!(self, Token::Semicolon | Token::Comma | Token::RightBrace) {
             Statement::Return(None)
         } else {
             Statement::Return(Some(self.parse_expr()?))
@@ -2168,12 +2176,16 @@ where
                 Expression::List(items)
             }
             Token::LeftParen => self.with_structs(true, |p| p.parse_paren_expr())?,
+            // An `if` with an `else` is a value like any other, so it can be
+            // an operand: `"\n".join(lines) + if done { "" } else { "\n" }`.
+            Token::If => return self.parse_if_expr(),
             Token::Match => {
                 self.next();
                 let scrutinee = self.parse_head()?;
                 let hint = self.struct_hint.take();
+                let start = self.position;
                 let arms = self.with_structs(true, |p| p.parse_arms());
-                let arms = Self::with_struct_hint(hint, arms)?;
+                let arms = self.with_struct_hint(hint, start, arms)?;
                 Expression::Match(Box::new(scrutinee), arms)
             }
             Token::Fn => {
@@ -2311,6 +2323,10 @@ where
             self.next();
             let (body, is_block) = if tok_matches!(self, Token::LeftBrace) {
                 (self.parse_block()?, true)
+            } else if tok_matches!(self, Token::Return | Token::Break | Token::Continue) {
+                // `None => return Err(e),`: an arm can leave instead of
+                // giving a value, as if its body were `{ return Err(e); }`.
+                (self.parse_stmt()?, false)
             } else {
                 (Statement::Expr(self.parse_expr()?), false)
             };

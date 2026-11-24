@@ -1004,6 +1004,50 @@ fn statements_ending_in_a_block_need_no_semicolon() {
 }
 
 #[test]
+fn match_arms_can_leave() {
+    assert_eq!(
+        main_value(
+            "int",
+            "var total = 0;
+             for x in [1, 2, 3, 4, 5, 6] {
+                 let y = match x % 3 { 0 => continue, _ => x };
+                 match y { 5 => break, _ => {} }
+                 total = total + y;
+             }
+             total"
+        ),
+        "Int(7)"
+    );
+    assert_eq!(
+        std_value(
+            "fn parse(s: str) -> Result<int, str> {
+                 let n = match s.parse_int() { Some(n) => n, None => return Err(s) };
+                 Ok(n)
+             }
+             fn quiet(n: int) {
+                 match n { 0 => return, _ => {} }
+                 println(n);
+             }
+             fn main() -> (Result<int, str>, Result<int, str>) { (parse(\"4\"), parse(\"x\")) }"
+        ),
+        "(Ok(4), Err(\"x\"))"
+    );
+}
+
+#[test]
+fn if_expressions_can_be_operands() {
+    assert_eq!(
+        main_value("int", "let c = false; 1 + if c { 1 } else { 2 } * 10"),
+        "Int(21)"
+    );
+    assert_eq!(
+        // At the start of a statement, an `if` is a statement, as in Rust.
+        main_value("int", "let c = true; let n = if c { 1 } else { 2 } + 100; n"),
+        "Int(101)"
+    );
+}
+
+#[test]
 fn if_expressions_can_be_assigned() {
     assert_eq!(
         main_value("int", "var n = 3; n = if n > 2 { n * 2 } else { 0 }; n"),
@@ -1045,6 +1089,34 @@ fn examples_run() {
             panic!("{} failed: {errors:#?}", path.display());
         }
     }
+}
+
+#[test]
+fn examples_in_subdirectories_compile() {
+    // Some of these are servers that run until stopped, or read standard
+    // input, so they're compiled but not run. `errors` fails on purpose.
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut compiled = 0;
+    for entry in std::fs::read_dir(&examples).unwrap() {
+        let dir = entry.unwrap().path();
+        if !dir.is_dir() || dir.ends_with("errors") {
+            continue;
+        }
+        for path in aja_files(dir.to_str().unwrap()) {
+            let src = std::fs::read_to_string(&path).unwrap();
+            if !src.contains("fn main(") {
+                continue; // a module of a program in several files
+            }
+            let file = path.file_name().unwrap().to_str().unwrap();
+            let (_, program) = crate::module::build(&crate::module::Dir(dir.clone()), file);
+            if let Err(errors) = program {
+                let messages: Vec<_> = errors.into_iter().map(|e| e.message).collect();
+                panic!("{} doesn't compile: {messages:#?}", path.display());
+            }
+            compiled += 1;
+        }
+    }
+    assert!(compiled > 0, "no examples in subdirectories");
 }
 
 #[test]
@@ -2939,6 +3011,51 @@ fn tcp_servers_and_clients_talk_in_tasks() {
              }"
         ),
         "[\"<a1>\\n<a2>\\n<a3>\\n\", \"<b1>\\n<b2>\\n<b3>\\n\", \"<c1>\\n<c2>\\n<c3>\\n\"]"
+    );
+}
+
+#[test]
+fn tcp_reads_a_number_of_bytes() {
+    // As for an HTTP body: a line, then a known number of bytes that don't
+    // end in a newline, without waiting for the client to finish. "é" is
+    // two bytes. Past the end, a read gives what is left, then "".
+    assert_eq!(
+        std_value(
+            "import std::io;
+             import std::net;
+             import std::task;
+             fn serve(conn: net::TcpStream) -> Result<List<str>, io::Error> {
+                 let head = conn.read_line()?.unwrap_or(\"?\");
+                 let a = conn.read(4)?;
+                 let b = conn.read(4)?;
+                 conn.write_line(\"ok\")?;
+                 let c = conn.read(10)?;
+                 let d = conn.read(3)?;
+                 Ok([head, a, b, c, d])
+             }
+             fn main() -> List<str> {
+                 let listener = match net::listen(\"127.0.0.1:0\") { Ok(l) => l, Err(e) => { return [e.message]; } };
+                 task::scope(fn(s) {
+                     let server = s.spawn(fn() {
+                         match listener.accept() {
+                             Ok(conn) => match serve(conn) { Ok(r) => r, Err(e) => [e.message] },
+                             Err(e) => [e.message],
+                         }
+                     });
+                     match net::connect(listener.local_addr()) {
+                         Ok(c) => {
+                             let _ = c.write(\"POST\\r\\nab\\r\\ncd\u{e9}\");
+                             let _ = c.read_line();
+                             let _ = c.write(\"xyz\");
+                             let _ = c.close_write();
+                         }
+                         Err(e) => println(e.message),
+                     }
+                     server.join()
+                 })
+             }"
+        ),
+        "[\"POST\", \"ab\\r\\n\", \"cd\u{e9}\", \"xyz\", \"\"]"
     );
 }
 

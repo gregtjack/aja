@@ -41,6 +41,7 @@ pub enum Op {
     Connect,
     ReadLine,
     ReadAll,
+    Read,
     Write,
     CloseWrite,
     Close,
@@ -49,12 +50,13 @@ pub enum Op {
 }
 
 impl Op {
-    pub const ALL: [(Op, &'static str); 10] = [
+    pub const ALL: [(Op, &'static str); 11] = [
         (Op::Listen, "std::native::tcp_listen"),
         (Op::Accept, "std::native::tcp_accept"),
         (Op::Connect, "std::native::tcp_connect"),
         (Op::ReadLine, "std::native::tcp_read_line"),
         (Op::ReadAll, "std::native::tcp_read_all"),
+        (Op::Read, "std::native::tcp_read"),
         (Op::Write, "std::native::tcp_write"),
         (Op::CloseWrite, "std::native::tcp_close_write"),
         (Op::Close, "std::native::tcp_close"),
@@ -65,7 +67,7 @@ impl Op {
     /// How many arguments it takes.
     pub fn arity(self) -> usize {
         match self {
-            Op::Write => 2,
+            Op::Write | Op::Read => 2,
             _ => 1,
         }
     }
@@ -101,6 +103,14 @@ impl Socket {
             !self.writers.is_empty(),
         )
     }
+}
+
+/// How much a read takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    Line,
+    End,
+    Bytes(usize),
 }
 
 /// A connect's task and ticket, and how it went.
@@ -252,14 +262,17 @@ impl Net {
                 Step::Done(id) => Done::Int(id),
                 Step::Wait => return self.wait_on(task, int(0), true),
             },
-            Op::ReadLine => match self.read(int(0), true) {
-                Step::Done(line) => Done::Str(line),
-                Step::Wait => return self.wait_on(task, int(0), true),
-            },
-            Op::ReadAll => match self.read(int(0), false) {
-                Step::Done(all) => Done::Str(all),
-                Step::Wait => return self.wait_on(task, int(0), true),
-            },
+            Op::ReadLine | Op::ReadAll | Op::Read => {
+                let until = match op {
+                    Op::ReadLine => Until::Line,
+                    Op::ReadAll => Until::End,
+                    _ => Until::Bytes(int(1).max(0) as usize),
+                };
+                match self.read(int(0), until) {
+                    Step::Done(text) => Done::Str(text),
+                    Step::Wait => return self.wait_on(task, int(0), true),
+                }
+            }
             Op::Write => {
                 let id = int(0);
                 let data = || text(heap, 1).into_bytes();
@@ -448,10 +461,13 @@ impl Net {
         }))
     }
 
-    /// The next line from stream `id`, without its line ending, or, if not
-    /// `line`, everything up to the end. At the end, with nothing left,
-    /// the status is `END_OF_INPUT`.
-    fn read(&mut self, id: i64, line: bool) -> Step<String> {
+    /// What `until` asks for from stream `id`: the next line, without its
+    /// line ending; everything up to the end; or the next `n` bytes (fewer
+    /// only if the stream ends first). Reading a line or to the end with
+    /// nothing left sets the status to `END_OF_INPUT`; reading bytes there
+    /// gives "".
+    fn read(&mut self, id: i64, until: Until) -> Step<String> {
+        let line = until == Until::Line;
         let Some(Socket {
             kind: Kind::Stream { tcp, input, eof },
             name,
@@ -461,12 +477,27 @@ impl Net {
             return Step::Done(not_connected("read from"));
         };
         loop {
+            if let Until::Bytes(n) = until {
+                if input.len() >= n || *eof {
+                    let rest = input.split_off(n.min(input.len()));
+                    let taken = std::mem::replace(input, rest);
+                    let result = String::from_utf8(taken).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "the text isn't UTF-8, or a character was cut in two",
+                        )
+                    });
+                    return Step::Done(record_as(result, |e| {
+                        format!("could not read from '{name}': {e}")
+                    }));
+                }
+            }
             let found = if line {
                 input.iter().position(|&b| b == b'\n')
             } else {
                 None
             };
-            if found.is_some() || *eof {
+            if !matches!(until, Until::Bytes(_)) && (found.is_some() || *eof) {
                 if input.is_empty() && found.is_none() {
                     set_status(END_OF_INPUT, String::new());
                     return Step::Done(String::new());

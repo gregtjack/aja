@@ -97,6 +97,10 @@ pub native fn tcp_read_line(id: int) -> str;
 // Everything left to read from stream `id`, up to its end.
 pub native fn tcp_read_all(id: int) -> str;
 
+// The next `n` bytes from stream `id`, or fewer if it ends first ("" at
+// its end). Fails with status 4 if they aren't UTF-8.
+pub native fn tcp_read(id: int, n: int) -> str;
+
 // Send all of `text` on stream `id`.
 pub native fn tcp_write(id: int, text: str);
 
