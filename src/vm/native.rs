@@ -1,12 +1,13 @@
 //! The VM's implementations of the built-in functions declared in
-//! `crate::builtins`, except `sleep`, which the scheduler implements (see
-//! `scheduler::Intrinsic`).
+//! `crate::builtins`, except `sleep` and `std::native::sleep_nanos`, which
+//! the scheduler implements (see `scheduler::Intrinsic`).
 
 use std::{
     cell::RefCell,
     fs,
     io::{self, BufRead, Read, Write},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::OnceLock,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use super::{
@@ -301,6 +302,21 @@ fn read_all(fd: i64) -> io::Result<String> {
     Ok(text)
 }
 
+/// The message of the error that stops a program whose standard output was
+/// closed by its reader (as `aja f.aja | head` does once `head` has its
+/// lines). It is never shown: the program stops quietly instead.
+pub const OUTPUT_CLOSED: &str = "standard output was closed";
+
+/// Write what `print` or `println` prints. Failing stops the program, since
+/// `print` doesn't return a `Result`; `std::io` is for handling it.
+fn print_out(text: String) -> Result<(), String> {
+    match io::stdout().write_all(text.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(OUTPUT_CLOSED.to_string()),
+        Err(e) => Err(format!("could not write to standard output: {e}")),
+    }
+}
+
 fn write(fd: i64, text: &str) -> io::Result<()> {
     match fd {
         1 => io::stdout().write_all(text.as_bytes()),
@@ -327,11 +343,11 @@ fn str_value(heap: &mut Heap, s: String) -> Value {
 /// name they are compiled under (`List::len`, `std::native::write`).
 static NATIVES: &[(&str, NativeFn)] = &[
     ("print", |heap, args| {
-        print!("{}", join(heap, args));
+        print_out(join(heap, args))?;
         Ok(Value::Void)
     }),
     ("println", |heap, args| {
-        println!("{}", join(heap, args));
+        print_out(join(heap, args) + "\n")?;
         Ok(Value::Void)
     }),
     ("clock", |_, _| {
@@ -386,6 +402,13 @@ static NATIVES: &[(&str, NativeFn)] = &[
         };
         record(flush(*fd));
         Ok(Value::Void)
+    }),
+    // ---- Time (`std::time`) ------------------------------------------------
+    ("std::native::monotonic_nanos", |_, _| {
+        // Counted from the first call, so an `int` holds it for centuries.
+        static START: OnceLock<Instant> = OnceLock::new();
+        let start = *START.get_or_init(Instant::now);
+        Ok(Value::Int(start.elapsed().as_nanos() as i64))
     }),
     // ---- The file system (`std::fs`) --------------------------------------
     ("std::native::path_kind", |heap, args| {

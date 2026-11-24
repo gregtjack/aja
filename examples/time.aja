@@ -1,0 +1,57 @@
+// `std::time`: timing a computation with `Instant`, building and showing
+// `Duration`s, and a loop that ticks at a steady rate with `sleep_until`.
+//
+// `Instant::now()` is a moment on a clock that only goes forward, so
+// `start.elapsed()` is how long really passed. Durations show in the largest
+// unit they have at least one of: `1.5s`, `250ms`, `12µs`, `800ns`.
+
+import std::time::{Duration, Instant};
+import std::time;
+
+fn fib(n: int) -> int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+// How long `f` takes, and what it returned.
+fn timed<T>(f: () -> T) -> (T, Duration) {
+    let start = Instant::now();
+    let value = f();
+    (value, start.elapsed())
+}
+
+fn main() {
+    // Durations are made from any unit, and convert back, rounding towards
+    // zero.
+    let spans = [
+        Duration::from_nanos(800),
+        Duration::from_micros(12),
+        Duration::from_millis(250),
+        Duration::from_secs_float(1.5),
+        Duration::from_secs(90),
+    ];
+    for d in spans {
+        println("{d}: {d.as_nanos()} ns, or {d.as_millis()} ms");
+    }
+
+    // They add up, and compare.
+    let total = spans.fold(Duration::zero(), fn(sum, d) { sum.add(d) });
+    println("all together: {total}");
+    println("longest: {spans.max().unwrap_or(Duration::zero())}");
+    println("250ms < 1.5s: {Duration::from_millis(250) < Duration::from_secs_float(1.5)}");
+
+    // Timing a computation. How long it takes varies from run to run.
+    let (n, took) = timed(fn() { fib(20) });
+    println("fib(20) = {n}, in about {took}");
+
+    // Ticks 20 ms apart. Sleeping until each deadline, rather than for 20 ms
+    // each time, keeps the ticks from drifting later as the work between
+    // them adds up.
+    let start = Instant::now();
+    let period = Duration::from_millis(20);
+    var deadline = start;
+    for i in 1..4 {
+        deadline = deadline.add(period);
+        time::sleep_until(deadline);
+        println("tick {i}, {start.elapsed().as_millis()} ms in");
+    }
+}

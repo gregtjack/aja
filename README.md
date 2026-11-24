@@ -441,16 +441,19 @@ fn helper() -> int { ... }      // private: only this file can use it
 // main.aja
 import geo::shapes;             // shapes::area, shapes::Shape::Circle, ...
 import geo::shapes::{Point};    // Point by itself
+import geo::shapes::area;       // so is a single item without braces
 
 fn main() {
     let s = shapes::Shape::Circle(Point { x: 0, y: 0 }, 2);
-    println(shapes::area(s));
+    println(area(s));
 }
 ```
 
 - **`import a::b;`** makes module `a::b`'s items available through its last
   name, `b::item`; **`import a::b::{X, y};`** brings in those names by
-  themselves. A path without braces always names a module. There are no
+  themselves, and **`import a::b::X;`** brings in just `X`. A path
+  without braces names a module if there is one (`a/b/X.aja`), and
+  otherwise an item of the module before it. There are no
   glob imports, so every name in a file is defined there, in the prelude, or
   in an import. Imports come before any definition.
 - **Private by default.** Functions, structs, enums, methods, and struct
@@ -573,7 +576,7 @@ implementation fails the tests and stops the VM at startup. Built-ins named
 
 The standard library is written in Aja (`src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
-it has `std::collections`, `std::io`, `std::fs`, and `std::task`.
+it has `std::collections`, `std::io`, `std::fs`, `std::task`, and `std::time`.
 
 #### `std::collections`
 
@@ -732,6 +735,42 @@ fn main() -> Result<void, io::Error> {
 - To add a module, write `src/stdlib/<name>.aja` and list it in `MODULES`
   in `src/stdlib/mod.rs`.
 
+#### `std::time`
+
+```rust
+import std::time::{Duration, Instant};
+import std::time;
+
+fn main() {
+    let start = Instant::now();
+    time::sleep_for(Duration::from_millis(250));
+    println("took {start.elapsed()}");    // took 250.1ms
+}
+```
+
+| `std::time` | Does |
+|-------------|------|
+| `Duration::from_nanos(n)`, `from_micros`, `from_millis`, `from_secs`, `from_secs_float(1.5)`, `zero()` | A span of time |
+| `d.as_nanos()`, `as_micros()`, `as_millis()`, `as_secs()` | `int`, rounded towards zero; `as_secs_float()` gives a `float` |
+| `d.add(other)`, `sub(other)`, `mul(n)`, `div(n)`, `abs()` | A new `Duration` |
+| `d.is_zero()`, `d.is_negative()` | |
+| `Instant::now()` | The moment it is now, on a clock that only goes forward |
+| `i.elapsed()`, `i.since(earlier)` | The `Duration` from then until now, or from `earlier` until `i` |
+| `i.add(d)`, `i.sub(d)` | The `Instant` `d` later or earlier |
+| `sleep_for(d)`, `sleep_until(instant)` | Pause the calling task (only it), while other tasks run |
+
+- A `Duration` is a whole number of nanoseconds in an `int`, so it reaches
+  about 292 years, and can be negative (`a.since(b)` when `a` came first).
+  Sleeping for a negative duration, or until a moment that has passed,
+  returns straight away.
+- Durations and instants compare with `<`, `==`, and the rest. Durations
+  show in the largest unit they have one of, with up to three decimals:
+  `1.5s`, `250ms`, `12.345µs`, `800ns`.
+- An `Instant` means nothing on its own, only next to another from the same
+  run. There is no calendar time yet; `clock()` still gives milliseconds
+  since 1970.
+- `sleep_for` isn't `sleep` because the built-in `sleep(ms)` has that name.
+
 ## Architecture
 
 ```
@@ -815,7 +854,7 @@ with `Eq`, `Hash`, and `Ord` bounds; ordering with `<` and `compare` on any `Ord
 `Result`, and `Ordering` in the prelude, and `?`; methods and associated functions in `impl` blocks;
 sorting and searching lists;
 modules, with `import` and `pub`; the start of the standard library
-(`std::collections`, `std::io`, `std::fs`, `std::task`); template strings, and methods on strings and
+(`std::collections`, `std::io`, `std::fs`, `std::task`, `std::time`); template strings, and methods on strings and
 numbers; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 

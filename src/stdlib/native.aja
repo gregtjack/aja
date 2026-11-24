@@ -64,3 +64,13 @@ pub native fn rename(from: str, to: str);
 
 // Copy the file at `from` to `to`, replacing a file there.
 pub native fn copy_file(from: str, to: str);
+
+// ---- Time (`std::time`) -------------------------------------------------------
+
+// Nanoseconds on a clock that only goes forward, counted from a moment
+// around when the program started. Never fails.
+pub native fn monotonic_nanos() -> int;
+
+// Sleep the calling task for `nanos` nanoseconds, which must be 0 or more,
+// while the others run.
+pub native fn sleep_nanos(nanos: int);

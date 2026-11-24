@@ -160,10 +160,11 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
 - **Methods live next to their type or their trait.** An `impl` must be in the
   module that defines the type or the trait (Rust's orphan rule), so there is
   exactly one place to look for a method.
-- **A path without braces names a module.** `import a::b;` always imports
-  the module `a::b`; items come in only through braces,
-  `import a::b::{X};`, so an import never depends on whether `b` turns out
-  to be a file or an item. A module is used through the last name of its
+- **A path without braces names a module first.** `import a::b;` imports
+  the module `a::b` if there is one (`a/b.aja`), and otherwise the item `b`
+  of the module `a`, as `import a::{b};` would. A module wins so that adding
+  an item to `a` never changes what an existing import means; the braces
+  say "item" outright. A module is used through the last name of its
   path, so two modules imported whole can't share a last name; import
   what's needed from one of them by name instead. (Rules 5, 10)
 - **A small prelude.** `Option`, `Result`, `Ordering`, `Iter`, `Some`, `None`, `Ok`, `Err`, `List`,
@@ -320,8 +321,9 @@ by a number with a fractional part.
    at its next safepoint (a call or a loop's back edge). Blocking
    intrinsics run on worker threads so that they block only their task.
    Several OS threads, `select`, and timeouts come after. Started: tasks
-   in the VM ✅, `std::task` (scopes, `spawn`, `join`) ✅, and a `sleep`
-   that sleeps only its task ✅.
+   in the VM ✅, `std::task` (scopes, `spawn`, `join`) ✅, a `sleep`
+   that sleeps only its task ✅, and `std::time` (`Duration`, `Instant`,
+   `sleep_for`, `sleep_until`) ✅.
 10. **Cranelift AoT backend** producing native binaries, with the same runtime
     semantics as the VM.
 

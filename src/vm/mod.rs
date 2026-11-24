@@ -25,6 +25,7 @@ pub mod hamt;
 pub mod heap;
 pub mod list;
 mod native;
+pub use native::OUTPUT_CLOSED;
 mod scheduler;
 pub mod sorted;
 pub mod value;
@@ -844,21 +845,26 @@ impl Vm {
                 self.scheduler.spawn(f, proto, Some(handle), Some(s));
                 Outcome::Value(Value::Task(handle))
             }
-            Intrinsic::Sleep => {
-                let Value::Int(ms) = arg(self, 0) else {
+            Intrinsic::Sleep | Intrinsic::SleepNanos => {
+                let Value::Int(n) = arg(self, 0) else {
                     internal_error("Int", &arg(self, 0));
                 };
-                if ms < 0 {
+                let (unit, duration): (_, fn(u64) -> std::time::Duration) = if f == Intrinsic::Sleep
+                {
+                    ("milliseconds", std::time::Duration::from_millis)
+                } else {
+                    ("nanoseconds", std::time::Duration::from_nanos)
+                };
+                if n < 0 {
                     return Outcome::Error(format!(
-                        "cannot sleep for {ms} milliseconds: the time must be 0 or more"
+                        "cannot sleep for {n} {unit}: the time must be 0 or more"
                     ));
                 }
                 // The call runs again when the task wakes, and then returns.
-                if self.scheduler.take_slept() || ms == 0 {
+                if self.scheduler.take_slept() || n == 0 {
                     return Outcome::Value(Value::Void);
                 }
-                self.scheduler
-                    .set_timer(std::time::Duration::from_millis(ms as u64));
+                self.scheduler.set_timer(duration(n as u64));
                 Outcome::Wait
             }
             Intrinsic::Join => {

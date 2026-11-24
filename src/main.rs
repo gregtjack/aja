@@ -58,6 +58,9 @@ fn main() -> ExitCode {
 
     match Vm::new().run_program(&program) {
         Ok(_) => ExitCode::SUCCESS,
+        // Whoever was reading has all they wanted, so there's nothing to
+        // report; the status is that of a program stopped by SIGPIPE.
+        Err(err) if err.message == vm::OUTPUT_CLOSED => ExitCode::from(141),
         Err(err) => {
             report_all(&[err.to_diagnostic_in(&files)], &files);
             ExitCode::FAILURE

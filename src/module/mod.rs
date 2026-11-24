@@ -214,6 +214,10 @@ impl Loader<'_> {
 
         let index = self.loaded.modules.len();
         self.ids.insert(path.clone(), Some(index));
+        let mut program = program;
+        for import in &mut program.imports {
+            self.import_item_by_path(import);
+        }
         let imports: Vec<(Vec<Id>, Span)> = program
             .imports
             .iter()
@@ -237,6 +241,37 @@ impl Loader<'_> {
         }
         self.stack.pop();
         Some(index)
+    }
+
+    /// Make `import a::b::item;` mean `import a::b::{item};` when there is
+    /// no module `a::b::item` but there is a module `a::b`. A module of that
+    /// name wins, so adding an item never changes what an import means.
+    fn import_item_by_path(&self, import: &mut crate::ast::Import) {
+        if import.items.is_some() || import.path.len() < 2 {
+            return;
+        }
+        let path: Vec<Id> = import.path.iter().map(|(s, _)| s.clone()).collect();
+        let parent = &path[..path.len() - 1];
+        if self.module_exists(&path) || !self.module_exists(parent) {
+            return;
+        }
+        let item = import
+            .path
+            .pop()
+            .expect("the path has two segments or more");
+        import.items = Some(vec![item]);
+    }
+
+    /// Whether there is a module at `path`, without loading it. One that
+    /// can't be read counts, so that importing it reports why.
+    fn module_exists(&self, path: &[Id]) -> bool {
+        if self.ids.contains_key(path) || self.stack.iter().any(|(p, _)| p == path) {
+            return true;
+        }
+        if path[0] == "std" {
+            return path.len() > 1 && stdlib::source(&path_name(&path[1..])).is_some();
+        }
+        !matches!(self.root.read(&file_name(path)), Ok(None))
     }
 
     /// Load the module `path`, imported at `span`, unless it is already.

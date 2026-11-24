@@ -606,3 +606,63 @@ fn every_native_function_is_implemented() {
         );
     }
 }
+
+#[test]
+fn a_path_to_an_item_imports_just_that_item() {
+    let main = "
+        import shapes::area;
+        import shapes::Point;
+        fn main() -> int { area(shapes::Shape::Circle(Point::origin(), 2)) }";
+    // `shapes` itself isn't imported, so `shapes::Shape` isn't there.
+    let errs = errors(&[("main.aja", main), ("shapes.aja", SHAPES)]);
+    assert!(errs.iter().any(|e| e.contains("shapes")), "{errs:?}");
+
+    let main = "
+        import shapes;
+        import shapes::area;
+        import shapes::Point;
+        fn main() -> int { area(shapes::Shape::Circle(Point::origin(), 2)) }";
+    assert_eq!(value(&[("main.aja", main), ("shapes.aja", SHAPES)]), "12");
+
+    // And from the standard library.
+    let main = "
+        import std::time::Duration;
+        import std::time::sleep_for;
+        fn main() -> str { sleep_for(Duration::zero()); Duration::from_millis(3).to_str() }";
+    assert_eq!(value(&[("main.aja", main)]), "\"3ms\"");
+}
+
+#[test]
+fn a_module_wins_over_an_item_of_the_same_name() {
+    let fs = [
+        (
+            "main.aja",
+            "import geo::shapes; fn main() -> int { shapes::area() }",
+        ),
+        ("geo.aja", "pub fn shapes() -> int { 1 }"),
+        ("geo/shapes.aja", "pub fn area() -> int { 2 }"),
+    ];
+    assert_eq!(value(&fs), "2");
+}
+
+#[test]
+fn a_path_to_a_missing_or_private_item_says_so() {
+    let fs = [
+        ("main.aja", "import shapes::areas; fn main() {}"),
+        ("shapes.aja", SHAPES),
+    ];
+    let braced = [
+        ("main.aja", "import shapes::{areas}; fn main() {}"),
+        ("shapes.aja", SHAPES),
+    ];
+    assert_eq!(errors(&fs), errors(&braced));
+    let fs = [
+        ("main.aja", "import shapes::width; fn main() {}"),
+        ("shapes.aja", SHAPES),
+    ];
+    assert_eq!(errors(&fs).len(), 1);
+    assert!(errors(&fs)[0].contains("private"), "{:?}", errors(&fs));
+    // With neither a module nor its parent, the error is about the module.
+    let fs = [("main.aja", "import geo::shapes::area; fn main() {}")];
+    assert_eq!(errors(&fs), ["no module named 'geo::shapes::area'"]);
+}

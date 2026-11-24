@@ -143,7 +143,9 @@ impl Program {
 
 /// `import geo::shapes;`, which makes `shapes::area` available, or
 /// `import geo::shapes::{Shape, area};`, which brings in those names
-/// directly. A path without braces always names a module.
+/// directly. A path without braces names a module if there is one, and
+/// otherwise an item of its parent module: `import geo::shapes::area;`,
+/// which the loader rewrites to `import geo::shapes::{area};`.
 #[derive(Debug, Clone)]
 pub struct Import {
     /// The module's path, `geo::shapes`, with where each segment appears.

@@ -82,3 +82,28 @@ fn reads_everything_at_once() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "[a\nb\n]");
 }
+
+#[test]
+fn a_closed_pipe_stops_the_program_quietly() {
+    let dir = std::env::temp_dir().join(format!("aja-io-pipe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("forever.aja");
+    std::fs::write(&file, "fn main() { while true { println(\"y\"); } }\n").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aja"))
+        .arg(&file)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("aja runs");
+    // Read a little, then hang up, as `head` does.
+    let mut stdout = child.stdout.take().unwrap();
+    let mut first = [0; 4];
+    std::io::Read::read_exact(&mut stdout, &mut first).unwrap();
+    assert_eq!(&first, b"y\ny\n");
+    drop(stdout);
+    let out = child.wait_with_output().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(out.status.code(), Some(141));
+}

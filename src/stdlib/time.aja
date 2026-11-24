@@ -1,0 +1,199 @@
+// Measuring time, and waiting for it to pass.
+//
+//     import std::time::{Duration, Instant};
+//     import std::time;
+//
+//     fn main() {
+//         let start = Instant::now();
+//         time::sleep_for(Duration::from_millis(250));
+//         println("took {start.elapsed()}");    // took 250.1ms
+//     }
+//
+// A `Duration` is a span of time, held as a whole number of nanoseconds. It
+// can be negative, like the gap from a later time to an earlier one, and
+// reaches about 292 years either way. Durations compare with `<`, `==`, and
+// the rest, and show as `1.5s`, `250ms`, `12µs`, or `800ns`.
+//
+// An `Instant` is a moment on a clock that only goes forward, whatever is
+// done to the system's clock, so the gap between two of them is how much
+// time really passed. It means nothing on its own: it is only good for
+// comparing with other instants from the same run of the program.
+
+import std::native;
+
+// A span of time, in nanoseconds.
+pub struct Duration {
+    nanos: int,
+}
+
+// A moment, as nanoseconds on the program's clock.
+pub struct Instant {
+    nanos: int,
+}
+
+impl Duration {
+    pub fn from_nanos(nanos: int) -> Duration {
+        Duration { nanos: nanos }
+    }
+
+    pub fn from_micros(micros: int) -> Duration {
+        Duration { nanos: micros * 1_000 }
+    }
+
+    pub fn from_millis(millis: int) -> Duration {
+        Duration { nanos: millis * 1_000_000 }
+    }
+
+    pub fn from_secs(secs: int) -> Duration {
+        Duration { nanos: secs * 1_000_000_000 }
+    }
+
+    // `secs` seconds, to the nearest nanosecond: `from_secs_float(1.5)`.
+    pub fn from_secs_float(secs: float) -> Duration {
+        Duration { nanos: (secs * 1_000_000_000.0).round().to_int() }
+    }
+
+    // No time at all.
+    pub fn zero() -> Duration {
+        Duration { nanos: 0 }
+    }
+
+    // ---- In whole units, rounded towards zero ----
+
+    pub fn as_nanos(self) -> int {
+        self.nanos
+    }
+
+    pub fn as_micros(self) -> int {
+        self.nanos / 1_000
+    }
+
+    pub fn as_millis(self) -> int {
+        self.nanos / 1_000_000
+    }
+
+    pub fn as_secs(self) -> int {
+        self.nanos / 1_000_000_000
+    }
+
+    // In seconds, with the fraction: 1.5 for a second and a half.
+    pub fn as_secs_float(self) -> float {
+        self.nanos.to_float() / 1_000_000_000.0
+    }
+
+    // ---- Arithmetic ----
+
+    pub fn add(self, other: Duration) -> Duration {
+        Duration { nanos: self.nanos + other.nanos }
+    }
+
+    pub fn sub(self, other: Duration) -> Duration {
+        Duration { nanos: self.nanos - other.nanos }
+    }
+
+    pub fn mul(self, n: int) -> Duration {
+        Duration { nanos: self.nanos * n }
+    }
+
+    // It divided into `n` equal parts, rounded towards zero. Stops the
+    // program if `n` is 0.
+    pub fn div(self, n: int) -> Duration {
+        Duration { nanos: self.nanos / n }
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.nanos == 0
+    }
+
+    pub fn is_negative(self) -> bool {
+        self.nanos < 0
+    }
+
+    pub fn abs(self) -> Duration {
+        Duration { nanos: self.nanos.abs() }
+    }
+
+    // In the largest unit it has at least one of, with up to three decimal
+    // places: `1.5s`, `250ms`, `12.345µs`, `800ns`, `-2s`, or `0s`.
+    pub fn to_str(self) -> str {
+        let n = self.nanos;
+        if n == 0 {
+            "0s"
+        } else if n < 0 {
+            let positive = Duration { nanos: -n };
+            "-" + positive.to_str()
+        } else if n < 1_000 {
+            "{n}ns"
+        } else if n < 1_000_000 {
+            decimal(n, 1_000) + "µs"
+        } else if n < 1_000_000_000 {
+            decimal(n, 1_000_000) + "ms"
+        } else {
+            decimal(n, 1_000_000_000) + "s"
+        }
+    }
+}
+
+// `n / unit`, which is at least 1, with up to three decimal places and no
+// trailing zeros: `decimal(1_500, 1_000)` is "1.5". `unit` is a power of
+// ten of at least 1000.
+fn decimal(n: int, unit: int) -> str {
+    let whole = n / unit;
+    // The fraction, in thousandths, without its trailing zeros.
+    var frac = (n % unit) / (unit / 1_000);
+    var digits = 3;
+    while digits > 0 && frac % 10 == 0 {
+        frac = frac / 10;
+        digits = digits - 1;
+    }
+    if digits == 0 {
+        "{whole}"
+    } else {
+        let shown = frac.to_str();
+        "{whole}." + "0".repeat(digits - shown.len()) + shown
+    }
+}
+
+impl Instant {
+    // The moment it is now.
+    pub fn now() -> Instant {
+        Instant { nanos: native::monotonic_nanos() }
+    }
+
+    // How much time has passed since this moment.
+    pub fn elapsed(self) -> Duration {
+        Instant::now().since(self)
+    }
+
+    // How much later this moment is than `earlier`: negative if it was
+    // before it.
+    pub fn since(self, earlier: Instant) -> Duration {
+        Duration { nanos: self.nanos - earlier.nanos }
+    }
+
+    // The moment `d` after this one (or before it, if `d` is negative).
+    pub fn add(self, d: Duration) -> Instant {
+        Instant { nanos: self.nanos + d.nanos }
+    }
+
+    pub fn sub(self, d: Duration) -> Instant {
+        Instant { nanos: self.nanos - d.nanos }
+    }
+}
+
+// Pause the task that calls this for `d`, while the other tasks run. A
+// duration of zero, or a negative one, returns straight away.
+//
+// It isn't called `sleep` because that is the built-in `sleep(ms)`, which
+// takes milliseconds.
+pub fn sleep_for(d: Duration) {
+    if d.nanos > 0 {
+        native::sleep_nanos(d.nanos);
+    }
+}
+
+// Pause the task that calls this until `deadline`, which may have passed
+// already.
+pub fn sleep_until(deadline: Instant) {
+    sleep_for(deadline.since(Instant::now()));
+}

@@ -46,24 +46,29 @@ pub const SLICE: u32 = 2000;
 /// A task's place in [`Scheduler::tasks`].
 pub type TaskId = usize;
 
-/// The functions of `std::task` that the runtime implements itself.
+/// The functions of `std::task`, and the ones that sleep, which the runtime
+/// implements itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intrinsic {
     OpenScope,
     CloseScope,
     Spawn,
     Join,
+    // `sleep(ms)`.
     Sleep,
+    // `std::native::sleep_nanos(nanos)`, for `std::time`.
+    SleepNanos,
 }
 
 impl Intrinsic {
-    const ALL: [(Intrinsic, &'static str); 5] = [
+    const ALL: [(Intrinsic, &'static str); 6] = [
         (Intrinsic::OpenScope, "std::task::open_scope"),
         (Intrinsic::CloseScope, "std::task::close_scope"),
         (Intrinsic::Spawn, "std::task::Scope::spawn"),
         (Intrinsic::Join, "std::task::Task::join"),
         // The built-in, which sleeps only the task that calls it.
         (Intrinsic::Sleep, "sleep"),
+        (Intrinsic::SleepNanos, "std::native::sleep_nanos"),
     ];
 
     /// The intrinsic declared as the native function `name`, if it is one.

@@ -13,6 +13,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("io", include_str!("io.aja")),
     (NATIVE, include_str!("native.aja")),
     ("task", include_str!("task.aja")),
+    ("time", include_str!("time.aja")),
 ];
 
 /// The path of the module of intrinsics, after `std::`.

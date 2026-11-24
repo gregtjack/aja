@@ -2840,3 +2840,63 @@ fn sorted_keys_need_ord() {
         ["type 'std::collections::SortedMap' needs its type argument 'K' to be Ord, but K isn't"]
     );
 }
+
+#[test]
+fn durations_show_in_their_largest_unit() {
+    assert_eq!(
+        std_value(
+            "import std::time::Duration;
+             fn main() -> List<str> {
+                 [Duration::zero(), Duration::from_nanos(800), Duration::from_nanos(12_345),
+                  Duration::from_micros(1_050), Duration::from_millis(250),
+                  Duration::from_secs_float(1.5), Duration::from_nanos(1_000_000_001),
+                  Duration::from_secs(-2), Duration::from_secs(3600)]
+                     .map(fn(d) { d.to_str() })
+             }"
+        ),
+        "[\"0s\", \"800ns\", \"12.345µs\", \"1.05ms\", \"250ms\", \"1.5s\", \"1s\", \"-2s\", \"3600s\"]"
+    );
+}
+
+#[test]
+fn durations_convert_add_and_compare() {
+    assert_eq!(
+        std_value(
+            "import std::time::Duration;
+             fn main() -> (int, int, int, float, str, bool, bool, bool) {
+                 let d = Duration::from_millis(1_500);
+                 (d.as_nanos(), d.as_millis(), d.as_secs(), d.as_secs_float(),
+                  d.add(Duration::from_micros(250)).sub(Duration::from_secs(1)).mul(2).div(4).to_str(),
+                  Duration::from_millis(1_000) == Duration::from_secs(1),
+                  Duration::from_millis(999) < Duration::from_secs(1),
+                  Duration::from_secs(1).sub(d).is_negative())
+             }"
+        ),
+        "(1500000000, 1500, 1, 1.5, \"250.125ms\", true, true, true)"
+    );
+}
+
+#[test]
+fn instants_measure_sleeps_in_tasks() {
+    // Two 50 ms sleeps in tasks of their own overlap, and a deadline
+    // already past returns straight away.
+    let src = "import std::task;
+               import std::time;
+               import std::time::{Duration, Instant};
+               fn main() -> int {
+                   let start = Instant::now();
+                   task::scope(fn(s) {
+                       for _ in 0..2 { s.spawn(fn() { time::sleep_for(Duration::from_millis(50)); }); }
+                   });
+                   time::sleep_until(start);
+                   time::sleep_for(Duration::from_secs(-1));
+                   let later = Instant::now();
+                   assert(later > start && later.since(start) == later.sub(Duration::zero()).since(start));
+                   start.elapsed().as_millis()
+               }";
+    for stress in [false, true] {
+        let (vm, result) = run_std(src, stress);
+        let elapsed: i64 = vm.heap.repr(&result.unwrap()).parse().unwrap();
+        assert!((50..200).contains(&elapsed), "took {elapsed} ms");
+    }
+}
