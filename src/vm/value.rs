@@ -21,6 +21,14 @@ pub enum Value {
     Data(Gc),
     /// A list on the heap.
     List(Gc),
+    /// A `std::collections::Map` on the heap.
+    Map(Gc),
+    /// A `std::collections::Set` on the heap.
+    Set(Gc),
+    /// A `std::collections::SortedMap` on the heap.
+    SortedMap(Gc),
+    /// A `std::collections::SortedSet` on the heap.
+    SortedSet(Gc),
     /// A function implemented by the VM: a built-in, or one declared
     /// `native` in the prelude or standard library. Its name, and its
     /// implementation.
@@ -47,6 +55,10 @@ impl Value {
             | Value::Cell(gc)
             | Value::Data(gc)
             | Value::List(gc)
+            | Value::Map(gc)
+            | Value::Set(gc)
+            | Value::SortedMap(gc)
+            | Value::SortedSet(gc)
             | Value::Scope(gc)
             | Value::Task(gc) => Some(*gc),
             _ => None,
@@ -65,6 +77,10 @@ impl fmt::Debug for Value {
             Value::Fn(gc) => write!(f, "Fn({gc})"),
             Value::Data(gc) => write!(f, "Data({gc})"),
             Value::List(gc) => write!(f, "List({gc})"),
+            Value::Map(gc) => write!(f, "Map({gc})"),
+            Value::Set(gc) => write!(f, "Set({gc})"),
+            Value::SortedMap(gc) => write!(f, "SortedMap({gc})"),
+            Value::SortedSet(gc) => write!(f, "SortedSet({gc})"),
             Value::Native(name, _) => write!(f, "Native({name})"),
             Value::Runtime(i) => write!(f, "Runtime({})", i.name()),
             Value::Scope(gc) => write!(f, "Scope({gc})"),

@@ -49,7 +49,7 @@ pub fn definitions() -> Vec<Definition> {
 }
 
 /// The types the prelude defines.
-pub const TYPES: &[&str] = &["Option", "Result", "Iter", "List"];
+pub const TYPES: &[&str] = &["Option", "Result", "Ordering", "Iter", "List"];
 
 /// Whether `name` is a type the prelude defines.
 pub fn is_prelude_type(name: &str) -> bool {

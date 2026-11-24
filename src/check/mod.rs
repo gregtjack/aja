@@ -21,7 +21,9 @@
 //! Some operators work on more than one type (`+` on `int`, `float`, or
 //! `str`, `==` on any of `int`, `float`, `bool`, `str`). A type variable can carry such a
 //! restriction (a [`Class`]) until it is resolved, much like Rust's
-//! `{integer}`.
+//! `{integer}`. The same mechanism gives type parameters bounds: `T: Hash`
+//! makes each use of a generic create a variable restricted to `Hash`
+//! types, and lets the body use `==` on a `T`.
 //!
 //! Every binding must end up with a fully known type. If one doesn't, the
 //! checker asks for an annotation rather than falling back to a dynamic type.
@@ -43,7 +45,7 @@ mod methods;
 #[cfg(test)]
 mod tests;
 
-use data::{EnumInfo, StructInfo};
+use data::{DeferredBound, EnumInfo, StructInfo};
 use methods::MethodInfo;
 
 /// A type as the checker sees it: like [`Type`], plus inference variables
@@ -73,37 +75,122 @@ pub enum Ty {
     Error,
 }
 
-/// Which types an unresolved type variable may still become.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Class {
-    /// Any type.
-    Any,
-    /// A type that supports `==`: int, float, bool, str, or a struct or
-    /// enum made of such types.
-    Eq,
-    /// A type that supports `+`: int, float, or str (concatenation).
-    Add,
-    /// A type that supports arithmetic and ordering: int or float.
-    Num,
+/// A type parameter of a definition, with the traits its bounds require
+/// (and those they imply): the `K` of `struct Map<K: Hash, V>`.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Generic {
+    pub name: Id,
+    pub bounds: Class,
 }
 
+impl Generic {
+    /// How it is declared: `K: Hash`, or `V`.
+    pub fn declared(&self) -> String {
+        match self.bounds.show() {
+            b if b.is_empty() => self.name.to_string(),
+            b => format!("{}: {b}", self.name),
+        }
+    }
+}
+
+/// What a type must support: the requirements that uses of an unresolved
+/// type variable have put on it, or the bounds declared on a type parameter
+/// (`T: Hash`). It is a set: the requirements of two uses together are both.
+///
+/// `Eq`, `Hash`, and `Ord` are the built-in traits, which a type has by its
+/// shape (see [`Class::admits`] and [`Checker::has_traits`]) and which can be
+/// written as bounds. `ADD` and `NUM` are what `+` and the other arithmetic
+/// operators need; they can't be written, and no type parameter has them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct Class(u8);
+
 impl Class {
-    /// The class of types belonging to both `self` and `other`. The classes
-    /// are nested (Num ⊂ Add ⊂ Eq ⊂ Any), so this is the narrower one.
-    fn meet(self, other: Class) -> Class {
-        self.max(other)
+    /// Any type.
+    pub const ANY: Class = Class(0);
+    /// Supports `==`: int, float, bool, str, and structs, enums, tuples, and
+    /// lists made of such types.
+    pub const EQ: Class = Class(1);
+    /// Can be hashed, for a map's keys: `Eq` without float, since NaN isn't
+    /// equal to itself.
+    pub const HASH: Class = Class(2);
+    /// Has an order: int, bool, str, and structs, enums, tuples, and lists
+    /// made of such types (not float, for the same reason).
+    pub const ORD: Class = Class(4);
+    /// Supports `+`: int, float, or str (concatenation).
+    pub const ADD: Class = Class(8);
+    /// Supports arithmetic: int or float.
+    pub const NUM: Class = Class(16);
+    /// Supports `<` and the other comparisons: int, float, or an `Ord`
+    /// type. (A float has an order, but not one that sorting can rely on.)
+    pub const CMP: Class = Class(32);
+    /// The traits, which bounds can name.
+    const TRAITS: Class = Class(1 | 2 | 4);
+    /// The traits, by the names bounds use for them.
+    pub const NAMES: [(&'static str, Class); 3] = [
+        ("Eq", Class::EQ),
+        ("Hash", Class::HASH),
+        ("Ord", Class::ORD),
+    ];
+
+    /// The types belonging to both `self` and `other`: both sets of
+    /// requirements.
+    pub fn meet(self, other: Class) -> Class {
+        Class(self.0 | other.0)
+    }
+
+    /// Whether `self` includes every requirement of `other`.
+    pub fn has(self, other: Class) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The requirements of `self` that `other` lacks.
+    pub fn minus(self, other: Class) -> Class {
+        Class(self.0 & !other.0)
+    }
+
+    /// Just the traits among the requirements.
+    pub fn traits(self) -> Class {
+        Class(self.0 & Class::TRAITS.0)
+    }
+
+    /// With the traits these imply: a type that is `Hash` or `Ord` is `Eq`.
+    pub fn implied(self) -> Class {
+        if self.0 & (Class::HASH.0 | Class::ORD.0) != 0 {
+            self.meet(Class::EQ)
+        } else {
+            self
+        }
+    }
+
+    /// The traits of `self`, as a bound is written: `Eq + Hash`. An implied
+    /// `Eq` is left out, so `HASH | EQ` is `Hash`.
+    pub fn show(self) -> String {
+        let shown = if self.has(Class::HASH) || self.has(Class::ORD) {
+            self.minus(Class::EQ)
+        } else {
+            self
+        };
+        let names: Vec<&str> = Class::NAMES
+            .iter()
+            .filter(|(_, c)| shown.has(*c))
+            .map(|(n, _)| *n)
+            .collect();
+        names.join(" + ")
     }
 
     /// Whether the concrete type `t` belongs to this class, for types other
-    /// than structs and enums (see [`Checker::admits`]).
+    /// than type parameters, structs, enums, and tuples (see
+    /// [`Checker::admits`]).
     fn admits(self, t: &Ty) -> bool {
-        match (self, t) {
-            (_, Ty::Never | Ty::Error) | (Class::Any, _) => true,
-            (Class::Eq, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) => true,
-            (Class::Add, Ty::Int | Ty::Float | Ty::Str) => true,
-            (Class::Num, Ty::Int | Ty::Float) => true,
-            _ => false,
-        }
+        let supports = match t {
+            Ty::Never | Ty::Error => return true,
+            Ty::Int => Class(u8::MAX),
+            Ty::Float => Class(Class::EQ.0 | Class::ADD.0 | Class::NUM.0 | Class::CMP.0),
+            Ty::Bool => Class(Class::TRAITS.0 | Class::CMP.0),
+            Ty::Str => Class(Class::TRAITS.0 | Class::ADD.0 | Class::CMP.0),
+            _ => Class::ANY,
+        };
+        supports.has(self)
     }
 }
 
@@ -286,7 +373,7 @@ struct Binding {
     kind: BindingKind,
     /// The type parameters of a generic function, which appear in `ty` as
     /// [`Ty::Param`]s and are replaced by fresh variables at each use.
-    generics: Vec<Id>,
+    generics: Vec<Generic>,
 }
 
 /// The function whose body is being checked.
@@ -332,6 +419,9 @@ pub struct Checker {
     errors: Vec<TypeError>,
     /// Set when unification fails because a type would contain itself.
     infinite: bool,
+    /// Set when unification fails because a type lacks what a variable
+    /// requires of it: the type, and the requirements.
+    unmet: Option<(Ty, Class)>,
     /// The operand type of each operator expression, solved once checking
     /// is done.
     operands: Vec<(SpanKey, Ty)>,
@@ -346,7 +436,10 @@ pub struct Checker {
     structs: HashMap<Id, StructInfo>,
     enums: HashMap<Id, EnumInfo>,
     /// The type parameters in scope: those of the definition being checked.
-    type_params: Vec<Id>,
+    type_params: Vec<Generic>,
+    /// While struct and enum definitions are declared: the type arguments
+    /// written in them, whose bounds are checked once all are declared.
+    deferred_bounds: Option<Vec<DeferredBound>>,
     /// How many loops the statement being checked is in, within the
     /// function or closure being checked.
     loop_depth: usize,
@@ -390,6 +483,7 @@ impl Checker {
             pending: Vec::new(),
             errors: Vec::new(),
             infinite: false,
+            unmet: None,
             operands: Vec::new(),
             fields: HashMap::new(),
             tries: HashMap::new(),
@@ -398,6 +492,7 @@ impl Checker {
             structs: HashMap::new(),
             enums: HashMap::new(),
             type_params: Vec::new(),
+            deferred_bounds: None,
             loop_depth: 0,
             for_iters: HashMap::new(),
             templates: HashMap::new(),
@@ -441,7 +536,9 @@ impl Checker {
                         Ty::Float => OperandType::Float,
                         Ty::Bool => OperandType::Bool,
                         Ty::Str => OperandType::Str,
-                        Ty::Named(..) | Ty::Tuple(_) => OperandType::Data,
+                        // A type parameter's values are compared as
+                        // whatever they turn out to be.
+                        Ty::Named(..) | Ty::Tuple(_) | Ty::Param(_) => OperandType::Data,
                         // `never` operands are in code that can't run, and
                         // anything still unknown has been reported.
                         _ => OperandType::Int,
@@ -498,7 +595,7 @@ impl Checker {
                 .iter()
                 .map(|p| match &p.t {
                     Some(t) => self.from_ast(t),
-                    None => self.fresh(Class::Any),
+                    None => self.fresh(Class::ANY),
                 })
                 .collect();
             let ret = rtype.as_ref().map_or(Ty::Void, |t| self.from_ast(t));
@@ -684,7 +781,7 @@ impl Checker {
                 continue;
             }
             reported.extend(free);
-            let numeric = matches!(t, Ty::Var(v) if self.vars[v].1 == Class::Num);
+            let numeric = matches!(t, Ty::Var(v) if self.vars[v].1.has(Class::NUM) || self.vars[v].1.has(Class::CMP));
             let mut err = TypeError::new(
                 format!(
                     "type annotations needed: cannot infer the type of {}",
@@ -748,7 +845,7 @@ impl Checker {
                 let placeholder = value.is_closure().then(|| {
                     let t = match &var.t {
                         Some(annotation) => self.from_ast(annotation),
-                        None => self.fresh(Class::Any),
+                        None => self.fresh(Class::ANY),
                     };
                     self.define(var.name.clone(), t.clone(), kind);
                     t
@@ -948,7 +1045,7 @@ impl Checker {
                         Ty::Bool
                     }
                     Op1::Negate => {
-                        if !self.constrain(&t, Class::Num) {
+                        if !self.constrain(&t, Class::NUM) {
                             let f = self.show(&t);
                             self.error(TypeError::new(
                                 format!("cannot apply '-' to {f}; it expects an int or float"),
@@ -1089,7 +1186,7 @@ impl Checker {
                     .map(|(i, p)| match &p.t {
                         Some(t) => self.from_ast(t),
                         None => {
-                            let t = self.fresh(Class::Any);
+                            let t = self.fresh(Class::ANY);
                             if let Some(ps) = &hinted {
                                 // If they don't fit, the mismatch is reported
                                 // where the closure is passed.
@@ -1107,7 +1204,7 @@ impl Checker {
                     .collect();
                 let ret = match rtype {
                     Some(t) => self.from_ast(t),
-                    None => self.fresh(Class::Any),
+                    None => self.fresh(Class::ANY),
                 };
                 let ctx = FnContext {
                     name: None,
@@ -1121,7 +1218,7 @@ impl Checker {
             }
             Expression::Field(obj, name, name_span) => self.field(obj, name, *name_span, span),
             Expression::List(items) => {
-                let item = self.fresh(Class::Any);
+                let item = self.fresh(Class::ANY);
                 for x in items {
                     let t = self.expr(x);
                     self.expect(&item, &t, x.span, |e, f| {
@@ -1213,8 +1310,8 @@ impl Checker {
         };
         // What the function must return for the `?` to pass on what it got.
         let passes = match &error {
-            None => Ty::Named("Option".into(), vec![self.fresh(Class::Any)]),
-            Some(e) => Ty::Named("Result".into(), vec![self.fresh(Class::Any), e.clone()]),
+            None => Ty::Named("Option".into(), vec![self.fresh(Class::ANY)]),
+            Some(e) => Ty::Named("Result".into(), vec![self.fresh(Class::ANY), e.clone()]),
         };
         let ret = self.resolve(&ctx.ret);
         match (&ret, &error) {
@@ -1295,14 +1392,14 @@ impl Checker {
         }
 
         let (class, result) = match op {
-            Op2::Addition => (Class::Add, None),
+            Op2::Addition => (Class::ADD, None),
             Op2::Subtraction | Op2::Multiplication | Op2::Division | Op2::Modulo => {
-                (Class::Num, None)
+                (Class::NUM, None)
             }
             Op2::LessThan | Op2::LessEqual | Op2::GreaterThan | Op2::GreaterEqual => {
-                (Class::Num, Some(Ty::Bool))
+                (Class::CMP, Some(Ty::Bool))
             }
-            Op2::Equal | Op2::NotEqual => (Class::Eq, Some(Ty::Bool)),
+            Op2::Equal | Op2::NotEqual => (Class::EQ, Some(Ty::Bool)),
             Op2::And | Op2::Or => unreachable!(),
         };
 
@@ -1316,14 +1413,36 @@ impl Checker {
                 _ => None,
             });
             if let Some(p) = param {
-                err = err.note(format!(
-                    "'{p}' is a type parameter, which could be any type, so its values \
-                     can't be compared or used with operators"
-                ));
-            } else if s1 == s2 && class == Class::Eq {
+                let bound = match class {
+                    Class::EQ => Some("Eq"),
+                    Class::CMP => Some("Ord"),
+                    _ => None,
+                };
+                err = match bound {
+                    Some(b) => err
+                        .help(format!("add a bound where '{p}' is declared: `{p}: {b}`"))
+                        .note(format!(
+                            "'{p}' is a type parameter, which could be any type, so its values \
+                             can only be compared if its bounds say they can"
+                        )),
+                    None => err.note(format!(
+                        "'{p}' is a type parameter, which could be any type, so its values \
+                         can't be used with arithmetic operators"
+                    )),
+                };
+            } else if s1 == s2 && class == Class::EQ {
                 err = err.note(
                     "only int, float, bool, and str values, and structs, enums, and tuples made of them, \
                      can be compared with '==' and '!='",
+                );
+            } else if s1 == s2 && class == Class::CMP {
+                let t = self.zonk(&t1);
+                if matches!(t, Ty::Named(..) | Ty::Tuple(_)) {
+                    err = err.note(self.unmet_note(&t, Class::ORD));
+                }
+                err = err.note(
+                    "'<', '<=', '>', and '>=' work on int and float, and on Ord types: bool, str, \
+                     and structs, enums, tuples, and lists made of them (without float)",
                 );
             }
             self.error(err);
@@ -1382,8 +1501,8 @@ impl Checker {
             Ty::Fn(params, ret) => (params.clone(), (**ret).clone()),
             Ty::Var(_) => {
                 // Calling something of unknown type tells us it's a function.
-                let params: Vec<Ty> = args.iter().map(|_| self.fresh(Class::Any)).collect();
-                let ret = self.fresh(Class::Any);
+                let params: Vec<Ty> = args.iter().map(|_| self.fresh(Class::ANY)).collect();
+                let ret = self.fresh(Class::ANY);
                 let f = Ty::Fn(params.clone(), Box::new(ret.clone()));
                 if !self.unify(&callee_ty, &f) {
                     self.not_callable(&callee_ty, &name, callee.span, args);
@@ -1547,16 +1666,21 @@ impl Checker {
         }
     }
 
-    /// A fresh type variable for each of the type parameters `params`.
-    fn fresh_args(&mut self, params: &[Id]) -> (Vec<Ty>, HashMap<Id, Ty>) {
-        let args: Vec<Ty> = params.iter().map(|_| self.fresh(Class::Any)).collect();
-        let map = params.iter().cloned().zip(args.iter().cloned()).collect();
+    /// A fresh type variable for each of the type parameters `params`,
+    /// required to meet the parameter's bounds.
+    fn fresh_args(&mut self, params: &[Generic]) -> (Vec<Ty>, HashMap<Id, Ty>) {
+        let args: Vec<Ty> = params.iter().map(|p| self.fresh(p.bounds)).collect();
+        let map = params
+            .iter()
+            .map(|p| p.name.clone())
+            .zip(args.iter().cloned())
+            .collect();
         (args, map)
     }
 
     /// The type `t` of a generic function, with its type parameters
     /// `generics` replaced by fresh variables for one use of it.
-    fn instantiate(&mut self, generics: &[Id], t: &Ty) -> Ty {
+    fn instantiate(&mut self, generics: &[Generic], t: &Ty) -> Ty {
         let (_, map) = self.fresh_args(generics);
         Self::subst(t, &map)
     }
@@ -1613,6 +1737,7 @@ impl Checker {
         if let Ty::Var(w) = t {
             self.vars[*w].1 = self.vars[*w].1.meet(class);
         } else if !self.admits(class, t) {
+            self.unmet = Some((t.clone(), class));
             return false;
         } else if Self::free_vars(&self.zonk(t)).contains(&v) {
             // `t` contains `v` itself, e.g. `f(f)`: no finite type fits.
@@ -1635,19 +1760,65 @@ impl Checker {
     }
 
     /// Whether the concrete type `t` belongs to `class`. A struct or enum
-    /// supports `==` if its definition allows it and its type arguments do,
-    /// so this may restrict variables among the arguments.
+    /// has a trait if its definition allows it and its type arguments have
+    /// it too, so this may restrict variables among the arguments. A type
+    /// parameter has the traits its bounds name.
     fn admits(&mut self, class: Class, t: &Ty) -> bool {
-        match (class, t) {
-            (Class::Eq, Ty::Named(n, args)) => {
-                self.comparable(n, &mut HashSet::new())
-                    && args.clone().iter().all(|a| self.constrain(a, Class::Eq))
+        // Only int and float can be compared without being `Ord`.
+        let class = match t {
+            Ty::Named(..) | Ty::Tuple(_) | Ty::Param(_) if class.has(Class::CMP) => {
+                class.minus(Class::CMP).meet(Class::ORD.implied())
             }
-            // A tuple supports `==` if each of its types does.
-            (Class::Eq, Ty::Tuple(items)) => {
-                items.clone().iter().all(|t| self.constrain(t, Class::Eq))
+            _ => class,
+        };
+        match t {
+            _ if class == Class::ANY => true,
+            Ty::Named(n, args) => {
+                class == class.traits()
+                    && self.has_traits(n, class, &mut HashSet::new())
+                    && args.clone().iter().all(|a| self.constrain(a, class))
             }
+            // A tuple has a trait if each of its types does.
+            Ty::Tuple(items) => {
+                class == class.traits() && items.clone().iter().all(|t| self.constrain(t, class))
+            }
+            Ty::Param(p) => self.bounds_of(p).has(class),
             _ => class.admits(t),
+        }
+    }
+
+    /// The bounds of the type parameter `name`, which is in scope.
+    pub(super) fn bounds_of(&self, name: &Id) -> Class {
+        self.type_params
+            .iter()
+            .find(|g| g.name == *name)
+            .map_or(Class::ANY, |g| g.bounds)
+    }
+
+    /// A note on why `t` doesn't have the traits in `needed`.
+    pub(super) fn unmet_note(&self, t: &Ty, needed: Class) -> String {
+        let needed = needed.traits();
+        match self.zonk(t) {
+            Ty::Float => format!(
+                "float isn't {}, because NaN isn't equal to itself; \
+                 convert floats to something that is first",
+                needed.minus(Class::EQ).show()
+            ),
+            Ty::Fn(..) => format!("functions aren't {}: they can't be compared", needed.show()),
+            Ty::Param(p) => {
+                let missing = needed.minus(self.bounds_of(&p)).show();
+                format!("'{p}' is a type parameter that could be any type, unless a bound like `{p}: {missing}` says otherwise")
+            }
+            t => {
+                let base = format!("{} isn't {}", self.show(&t), needed.show());
+                match &t {
+                    Ty::Named(n, _) => match self.lacking_field(n, needed) {
+                        Some(why) => format!("{base}, because {why}"),
+                        None => base,
+                    },
+                    _ => base,
+                }
+            }
         }
     }
 
@@ -1662,11 +1833,18 @@ impl Checker {
     ) -> bool {
         let (e, f) = (self.show(expected), self.show(found));
         self.infinite = false;
+        self.unmet = None;
         if self.unify(expected, found) {
             return true;
         }
         let mut err = Self::with_conversion_note(TypeError::new(message(&e, &f), span), &e, &f);
-        err = self.with_param_note(err, expected, found);
+        if let Some((t, class)) = self.unmet.take() {
+            if class.traits() != Class::ANY {
+                err = err.note(self.unmet_note(&t, class));
+            }
+        } else {
+            err = self.with_param_note(err, expected, found);
+        }
         if self.infinite {
             err = err.note("this would need an infinite type, such as a function that takes itself as an argument");
         }
@@ -1753,8 +1931,9 @@ impl Checker {
             }
             Ty::Param(name) => name.to_string(),
             Ty::Var(v) => match self.vars[v].1 {
-                Class::Num => "{number}".into(),
-                Class::Add => "{number or str}".into(),
+                c if c.has(Class::NUM) => "{number}".into(),
+                c if c.has(Class::ADD) => "{number or str}".into(),
+                c if c.traits() != Class::ANY => format!("{{{}}}", c.show()),
                 _ => "_".into(),
             },
             Ty::Fn(params, ret) => {

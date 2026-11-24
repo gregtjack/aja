@@ -8,6 +8,7 @@
 
 /// Each module's path after `std::`, and its source.
 pub const MODULES: &[(&str, &str)] = &[
+    ("collections", include_str!("collections.aja")),
     ("fs", include_str!("fs.aja")),
     ("io", include_str!("io.aja")),
     (NATIVE, include_str!("native.aja")),

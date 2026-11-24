@@ -170,9 +170,10 @@ fn operator_errors() {
         errors[0].notes,
         vec!["int and float are not converted automatically"]
     );
+    // Lists of floats aren't Ord, though floats can be compared.
     assert_eq!(
-        error("fn main() { \"a\" < \"b\"; }").0,
-        "cannot apply '<' to str and str"
+        error("fn main() { [1.5] < [2.5]; }").0,
+        "cannot apply '<' to List<float> and List<float>"
     );
     assert_eq!(
         error("fn main() { -true; }").0,
@@ -740,10 +741,8 @@ fn plus_concatenates_strings() {
         error("fn main() { \"a\" - \"b\"; }").0,
         "cannot apply '-' to str and str"
     );
-    assert_eq!(
-        error("fn main() { \"a\" < \"b\"; }").0,
-        "cannot apply '<' to str and str"
-    );
+    // Strings are Ord, so they can be compared.
+    ok("fn main() -> bool { \"a\" < \"b\" }");
 }
 
 // ---- Generics ------------------------------------------------------------------
@@ -1592,4 +1591,209 @@ fn let_and_for_patterns_must_match_every_value() {
         error("fn main() { let (a, b): (int, str) = (1, 2); }").0,
         "mismatched types: this pattern is declared as (int, str) but was given (int, int)"
     );
+}
+
+#[test]
+fn bounds_let_generic_bodies_compare() {
+    ok("fn contains<T: Eq>(xs: List<T>, x: T) -> bool { xs.any(fn(y) { y == x }) }
+        fn main() -> bool { contains([1, 2], 2) && contains([[\"a\"]], [\"a\"]) && contains([1.5], 1.5) }");
+    // `Hash` and `Ord` imply `Eq`.
+    ok(
+        "fn f<K: Hash, T: Ord>(a: K, b: K, c: T, d: T) -> bool { a == b && c != d }
+        fn main() -> bool { f(\"a\", \"b\", Some(1), None) }",
+    );
+    ok("fn f<T: Eq + Hash>(a: T) -> bool { a == a } fn main() -> bool { f(1) }");
+    // A bounded parameter passes its bounds on, and a bounded generic type
+    // can be compared.
+    ok(
+        "fn f<T: Eq>(a: T) -> bool { g(a) && Some(a) == Some(a) && (a, 1) == (a, 1) }
+        fn g<U: Eq>(b: U) -> bool { b == b }
+        fn main() -> bool { f(true) }",
+    );
+
+    let (msg, text) = error("fn f<T>(a: T) -> bool { a == a } fn main() {}");
+    assert_eq!(
+        (msg.as_str(), text.as_str()),
+        ("cannot apply '==' to T and T", "a == a")
+    );
+    assert_eq!(
+        help("fn f<T>(a: T) -> bool { a == a } fn main() {}"),
+        "add a bound where 'T' is declared: `T: Eq`"
+    );
+    // An `Eq` parameter isn't enough for a `Hash` one.
+    let (msg, _) =
+        error("fn f<T: Eq>(a: T) -> T { g(a) } fn g<K: Hash>(k: K) -> K { k } fn main() {}");
+    assert_eq!(
+        msg,
+        "mismatched types: parameter 'k' of function 'g' expects {Hash}, found T"
+    );
+}
+
+#[test]
+fn bounds_are_checked_where_generics_are_used() {
+    let floats = "fn f<K: Hash>(k: K) -> K { k } fn main() { f(1.5); }";
+    let (msg, text) = error(floats);
+    assert_eq!(
+        msg,
+        "mismatched types: parameter 'k' of function 'f' expects {Hash}, found float"
+    );
+    assert_eq!(text, "1.5");
+    assert!(check(floats).unwrap_err()[0].notes[0].contains("NaN isn't equal to itself"));
+    // `Ord` rules out floats and functions too; `Eq` rules out functions.
+    error("fn f<T: Ord>(x: T) -> T { x } fn main() { f([0.5]); }");
+    error("fn f<T: Eq>(x: T) -> T { x } fn main() { f(fn() { }); }");
+    ok("fn f<T: Eq>(x: T) -> T { x } fn main() { f(0.5); }");
+    ok("fn f<T: Ord + Hash>(x: T) -> T { x } fn main() { f((1, \"a\", [true], Some(2))); }");
+
+    // Through a struct or enum, the field to blame is named.
+    let src = "struct P { x: float } fn f<K: Hash>(k: K) -> K { k } fn main() { f(P { x: 1.0 }); }";
+    let notes = check(src).unwrap_err()[0].notes.join("\n");
+    assert_eq!(notes, "P isn't Hash, because its field 'x' is float");
+
+    // An inferred type argument must meet the bound once it is known.
+    let (msg, _) =
+        error("struct S<K: Hash> { keys: List<K> } fn main() { let t = S { keys: [1.5] }; }");
+    assert_eq!(
+        msg,
+        "mismatched types: field 'keys' of 'S' is List<{Hash}>, but was given List<float>"
+    );
+}
+
+#[test]
+fn bounds_are_checked_in_written_types() {
+    let (msg, text) = error(
+        "struct M<K: Hash, V> { k: List<K>, v: List<V> } fn f(m: M<float, int>) {} fn main() {}",
+    );
+    assert_eq!(
+        msg,
+        "type 'M' needs its type argument 'K' to be Hash, but float isn't"
+    );
+    assert_eq!(text, "M<float, int>");
+    let src =
+        "struct M<K: Hash, V> { k: List<K>, v: List<V> } fn g<K, V>(m: M<K, V>) {} fn main() {}";
+    assert_eq!(help(src), "add a bound where 'K' is declared: `K: Hash`");
+    ok("struct M<K: Hash, V> { k: List<K>, v: List<V> } fn g<K: Hash + Ord, V>(m: M<K, V>) {} fn main() {}");
+    // `Ord` doesn't imply `Hash`.
+    error("struct M<K: Hash, V> { k: List<K>, v: List<V> } fn g<K: Ord, V>(m: M<K, V>) {} fn main() {}");
+    // Fields are checked once every type's fields are known, so a type
+    // declared later counts.
+    let (msg, _) = error(
+        "struct M<K: Hash> { k: List<K> } struct N { m: M<P> } struct P { x: float } fn main() {}",
+    );
+    assert_eq!(
+        msg,
+        "type 'M' needs its type argument 'K' to be Hash, but P isn't"
+    );
+    ok("struct M<K: Hash> { k: List<K> } struct N { m: M<P> } struct P { x: int } fn main() {}");
+    // Recursive types have a trait if the rest of them does.
+    ok("enum Tree { Leaf, Node(Tree, int, Tree) } fn f<K: Ord>(k: K) -> K { k } fn main() { f(Tree::Leaf); }");
+}
+
+#[test]
+fn impls_repeat_their_types_bounds() {
+    let src = "struct M<K: Hash, V> { k: List<K>, v: List<V> } impl<K, V> M<K, V> { fn n(self) -> int { 0 } } fn main() {}";
+    let (msg, text) = error(src);
+    assert_eq!(
+        msg,
+        "type parameter 'K' of the impl for 'M' needs the bounds 'M' gives it"
+    );
+    assert_eq!(text, "K");
+    assert_eq!(
+        help(src),
+        "write `K: Hash`, as in `impl<K: Hash, V> M<K, V>`"
+    );
+    ok("struct M<K: Hash, V> { k: List<K>, v: List<V> }
+        impl<K: Hash, V> M<K, V> { fn has(self, k: K) -> bool { self.k.any(fn(x) { x == k }) } }
+        fn main() -> bool { M { k: [1], v: [2] }.has(1) }");
+    // An impl can ask for more, which its methods' receivers must have.
+    let src = "struct W<T> { x: T }
+        impl<T: Ord> W<T> { fn same(self, o: T) -> bool { self.x == o } }
+        fn main() -> bool { W { x: 1 }.same(1) && W { x: 1.5 }.same(1.5) }";
+    let (msg, text) = error(src);
+    assert_eq!(msg, "'W::same' needs 'T' to be Ord, but here it is float");
+    assert_eq!(text, "W { x: 1.5 }.same");
+    // A method's own type parameters can have bounds.
+    ok("struct W<T> { x: T }
+        impl<T> W<T> { fn eq<U: Eq>(self, a: U, b: U) -> bool { a == b } }
+        fn main() -> bool { W { x: 1 }.eq(\"a\", \"a\") }");
+}
+
+#[test]
+fn bounds_name_traits() {
+    let (msg, text) = error("fn f<T: Show>(x: T) -> T { x } fn main() {}");
+    assert_eq!(
+        (msg.as_str(), text.as_str()),
+        ("cannot find trait 'Show'", "Show")
+    );
+    assert_eq!(
+        help("fn f<T: Ordd>(x: T) -> T { x } fn main() {}"),
+        "did you mean 'Ord'?"
+    );
+}
+
+#[test]
+fn ord_types_can_be_compared_with_less_than() {
+    ok("struct P { x: int, s: str } enum E { A(P), B }
+        fn main() -> bool { \"a\" < \"b\" && false < true && P { x: 1, s: \"a\" } <= P { x: 1, s: \"b\" }
+            && E::A(P { x: 1, s: \"\" }) < E::B && [1, 2] > [1] && (1, \"a\") >= (1, \"a\") && None < Some(1) }");
+    ok("fn max<T: Ord>(a: T, b: T) -> T { if a < b { b } else { a } } fn main() -> str { max(\"a\", \"b\") }");
+    // An unknown type compared with '<' can still turn out to be Ord.
+    ok("fn main() -> bool { let f = fn(a, b) { a < b }; f(\"a\", \"b\") }");
+
+    let (msg, _) = error("fn f<T: Eq>(a: T) -> bool { a < a } fn main() {}");
+    assert_eq!(msg, "cannot apply '<' to T and T");
+    assert_eq!(
+        help("fn f<T>(a: T) -> bool { a < a } fn main() {}"),
+        "add a bound where 'T' is declared: `T: Ord`"
+    );
+    let notes = check("struct P { x: float } fn main() -> bool { P { x: 1.0 } < P { x: 2.0 } }")
+        .unwrap_err()[0]
+        .notes
+        .clone();
+    assert_eq!(notes[0], "P isn't Ord, because its field 'x' is float");
+    error("fn main() -> bool { let f = fn() { }; f < f }");
+    // Floats compare with '<', but aren't Ord.
+    error("fn f<T: Ord>(a: T) -> T { a } fn main() { f(1.0); }");
+}
+
+#[test]
+fn ord_types_have_a_compare_method() {
+    ok("struct P { name: str, age: int }
+        fn by_age(a: P, b: P) -> Ordering { a.age.compare(b.age).then(a.name.compare(b.name)) }
+        fn generic<T: Ord>(a: T, b: T) -> Ordering { a.compare(b).reverse() }
+        fn main() -> bool { generic([1], [2]) == Ordering::Greater && (1, true).compare((1, false)) == Ordering::Greater }");
+    // A type's own `compare` comes first.
+    ok(
+        "struct V { x: int } impl V { fn compare(self, o: V) -> int { self.x - o.x } }
+        fn main() -> int { V { x: 1 }.compare(V { x: 2 }) }",
+    );
+
+    let (msg, text) = error("fn f<T: Eq>(a: T) -> Ordering { a.compare(a) } fn main() {}");
+    assert_eq!(msg, "T has no method 'compare', since it isn't Ord");
+    assert_eq!(text, "a.compare");
+    let (msg, _) = error("fn main() { 1.5.compare(2.5); }");
+    assert_eq!(msg, "float has no method 'compare', since it isn't Ord");
+    let (msg, text) = error("fn main() { 1.compare(\"a\"); }");
+    assert_eq!(
+        msg,
+        "mismatched types: 'compare' compares a value with another int, found str"
+    );
+    assert_eq!(text, "\"a\"");
+    let (msg, _) = error("fn main() { 1.compare(); }");
+    assert_eq!(msg, "method 'compare' takes 1 argument but 0 were given");
+}
+
+#[test]
+fn list_methods_need_their_bounds() {
+    ok("fn f<T: Ord>(xs: List<T>) -> Option<T> { xs.sort().dedup().max() } fn main() {}");
+    let (msg, text) = error("fn main() { [0.5].sort(); }");
+    assert_eq!(
+        msg,
+        "'List::sort' needs 'T' to be Ord, but here it is float"
+    );
+    assert_eq!(text, "[0.5].sort");
+    let (msg, _) = error("fn f<T>(xs: List<T>, x: T) -> bool { xs.contains(x) } fn main() {}");
+    assert_eq!(msg, "'List::contains' needs 'T' to be Eq, but here it is T");
+    // Floats can be compared with `==`, and sorted with `sort_by`.
+    ok("fn main() -> bool { [0.5].contains(0.5) && [0.5, 0.1].sort_by(fn(a, b) { if a < b { Ordering::Less } else { Ordering::Greater } }) == [0.1, 0.5] }");
 }

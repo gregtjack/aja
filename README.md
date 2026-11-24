@@ -102,7 +102,7 @@ println("a literal \{brace}");               // a literal {brace}
   value of any type with a method `to_str(self) -> str`, which the template
   calls. Lists, functions, and values of a type parameter can't, since there
   is no single right way to show them; call a method that makes the string
-  you want. When traits arrive, `to_str` becomes a `Show` trait.
+  you want. Once there is a `Show` trait, `to_str` becomes it.
 - Any expression works, including calls and other strings:
   `"{user.name.to_upper()} has {xs.len()} items"`.
 - `\{` and `\}` write braces. A `}` with no `{` before it is just text.
@@ -219,10 +219,38 @@ fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
   plain `Option`.
 - **A generic body works for every type.** Inside `fn f<T>`, `T` is equal
   only to itself, so the body can pass values of type `T` around but can't
-  add them, compare them, or read their fields. (Traits will let a signature
-  ask for those abilities.) A type parameter must be used in its function's
+  add them, compare them, or read their fields, unless a bound says it can
+  (see below). A type parameter must be used in its function's
   signature, or in its type's fields, since that's the only way to know what
   it is.
+- **Bounds** ask more of a type parameter: `fn contains<T: Eq>(xs: List<T>,
+  x: T) -> bool` can use `==` on its `T`s, and only gets called with types
+  that support it. There are three traits, built in, and a type has them by
+  its shape; programs can't define traits or implement them yet:
+
+  | Trait  | Types that have it | Gives |
+  |--------|--------------------|-------|
+  | `Eq`   | int, float, bool, str, and structs, enums, tuples, and lists made of them | `==`, `!=` |
+  | `Hash` | the same, without float (NaN isn't equal to itself) | `==`, `!=`; for map keys |
+  | `Ord`  | int, bool, str, and structs, enums, tuples, and lists made of them | `==`, `!=`, `<`, `<=`, `>`, `>=`, `a.compare(b)`; for sorting |
+
+  `Hash` and `Ord` each imply `Eq`. Combine bounds with `+`:
+  `<K: Hash + Ord>`. Structs and enums can have bounds too
+  (`struct Index<K: Hash> { ... }`), and every type written with them must
+  meet them, so `fn f<K>(i: Index<K>)` is an error until it says `K: Hash`.
+  An impl repeats its type's bounds (`impl<K: Hash> Index<K>`), and may ask
+  for more, which every value its methods are called on must then meet.
+  When a type falls short, the error says why: `P isn't Hash, because its
+  field 'x' is float`.
+- **What `Ord` means.** Values are ordered by their shape: strings by code
+  point, `false` before `true`, a struct's fields and a tuple's parts in
+  turn, an enum's variants in the order they are declared (then their
+  values), and lists value by value, with a list before any longer list it
+  starts. So `None < Some(0)`, `(1, "b") < (1, "c")`, and `[1, 2] < [1, 2, 0]`.
+  `a.compare(b)` gives an `Ordering` (`Less`, `Equal`, or `Greater`, from
+  the prelude) for any `Ord` values, unless their type has a `compare`
+  method of its own; `o.reverse()` flips one, and `o.then(p)` breaks ties:
+  `a.age.compare(b.age).then(a.name.compare(b.name))`.
 - **`==` on a generic type** works when its contents can be compared:
   `Option<int>` can, `Option<(int) -> int>` can't.
 - Generic code compiles once: every value has the same representation in the
@@ -236,7 +264,7 @@ in the prelude ([`src/prelude.aja`](src/prelude.aja)), which every program
 can use without importing it:
 
 ```rust
-enum Option<T> { Some(T), None }
+enum Option<T> { None, Some(T) }   // None first, so None < Some(x)
 enum Result<T, E> { Ok(T), Err(E) }
 ```
 
@@ -301,8 +329,15 @@ for i in 0..10 {
   what `xs.get(i)`, which returns an `Option`, is for.
 - **Methods:** `len`, `is_empty`, `get`, `first`, `last`, `push`, `set`,
   `drop_last`, `concat`, `slice`, `reverse`, `map`, `filter`, `fold`,
-  `find`, `any`, `all`, `iter`, and `List::repeat(value, count)`.
+  `find`, `any`, `all`, `iter`, `sort_by`, and `List::repeat(value, count)`.
   `iter.collect()` makes a list from an `Iter`.
+- **Methods that need more of the values** (see [Bounds](#generics)):
+  `contains`, `index_of`, and `dedup` (which drops values equal to the one
+  before) for `Eq` values; `sort`, `min`, `max`, and `binary_search` for
+  `Ord` values. A list of floats can't call `sort`, since NaN has no place
+  in the order; `xs.sort_by(cmp)` sorts any list by a function returning an
+  `Ordering`, such as `fn(a, b) { b.compare(a) }` for largest first. Both
+  sorts are stable: equal values keep their order.
 - `for x in xs` goes over a list's values (directly, without making an
   `Iter`). Lists compare with `==` value by value, and print as `[1, 2, 3]`.
 - Every value in a list has the same type. An empty `[]` gets its type from
@@ -340,10 +375,11 @@ println(squares.filter(fn(n) { n % 2 == 0 }).fold(0, fn(a, b) { a + b }));
 - In the head of a `for`, as of an `if` or `while`, a struct literal needs
   parentheses: `for p in (Path { ... }) { ... }`.
 
-There are no traits yet, so `Iter<T>` is a struct rather than a trait, and
-"has a method `iter`" is checked by name. When traits arrive, the loop can
-take any type that implements an iterator trait, and these programs keep
-working.
+The only traits are the built-in `Eq`, `Hash`, and `Ord` (see
+[Generics](#generics)), so `Iter<T>` is a struct rather than a trait, and
+"has a method `iter`" is checked by name. When programs can define traits,
+the loop can take any type that implements an iterator trait, and these
+programs keep working.
 
 ### Methods
 
@@ -511,8 +547,10 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
   and `?`. As in C and Rust, `a == b && c < d` means
   `(a == b) && (c < d)`. `&&` and `||` short-circuit. Integer division or modulo by zero is a
   runtime error.
-  Arithmetic and comparison require both operands to be the same numeric
-  type (no implicit int/float conversion).
+  Arithmetic requires both operands to be the same numeric type (no
+  implicit int/float conversion). `<`, `<=`, `>`, and `>=` work on two ints,
+  two floats, or two values of any `Ord` type, such as strings (see
+  [Generics](#generics)).
 - **Comments:** `// to end of line`.
 
 ### Built-in functions
@@ -535,7 +573,79 @@ implementation fails the tests and stops the VM at startup. Built-ins named
 
 The standard library is written in Aja (`src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
-it has `std::io` and `std::fs`.
+it has `std::collections`, `std::io`, `std::fs`, and `std::task`.
+
+#### `std::collections`
+
+```rust
+import std::collections::{Map, Set};
+
+fn main() {
+    var counts = Map::new();
+    for w in "a b a c a".words() {
+        counts = counts.update(w, fn(n) { Some(n.unwrap_or(0) + 1) });
+    }
+    println(counts.get("a"));              // Some(3)
+    for (word, n) in counts { println("{word}: {n}"); }
+
+    let seen = Set::from([3, 1, 3]);
+    println(seen.contains(1), seen.len());  // true 2
+}
+```
+
+| `Map<K: Hash, V>` | Does |
+|-------------------|------|
+| `Map::new()`, `Map::from(pairs)` | An empty map, or one of a list of `(key, value)` pairs (a repeated key gets its last value) |
+| `len()`, `is_empty()`, `contains_key(k)` | |
+| `get(k)` | `Option<V>` |
+| `insert(k, v)`, `remove(k)` | A new map, with `k` given `v`, or without `k` |
+| `update(k, f)` | A new map where `f(get(k))` decides: `Some(v)` stores `v`, `None` removes `k` |
+| `keys()`, `values()`, `to_list()` | `List<K>`, `List<V>`, `List<(K, V)>`, in the map's order |
+| `iter()` | `Iter<(K, V)>`, so `for (k, v) in m` works |
+| `map_values(f)`, `filter(f)`, `merge(other)` | A new map; `merge` takes `other`'s value for a key both have |
+
+| `Set<T: Hash>` | Does |
+|----------------|------|
+| `Set::new()`, `Set::from(values)` | |
+| `len()`, `is_empty()`, `contains(v)` | |
+| `insert(v)`, `remove(v)` | A new set |
+| `union(other)`, `intersection(other)`, `difference(other)`, `is_subset(other)` | |
+| `to_list()`, `iter()` | The values, in the set's order |
+
+`SortedMap<K: Ord, V>` and `SortedSet<T: Ord>` have the same methods, keep
+their keys in order (so they go over them, and print them, from smallest to
+largest), and add:
+
+| `SortedMap` / `SortedSet` | Does |
+|---------------------------|------|
+| `first()`, `last()` | The entry (or value) with the smallest or largest key, as an `Option` |
+| `range(start, end)` | The entries (or values) with keys from `start` up to, but not including, `end`, in order, as a `List` |
+
+```rust
+let by_time = SortedMap::from([(30, "c"), (10, "a"), (20, "b")]);
+println(by_time.first());                       // Some((10, "a"))
+for (t, e) in by_time.range(15, 35) { ... }     // 20 b, then 30 c
+```
+
+- **Maps and sets never change**, like lists: `m = m.insert(k, v)` on a
+  `var`. Each is a hash array mapped trie (`src/vm/hamt.rs`), so a new
+  version shares all but a handful of nodes with the old one, and
+  inserting, removing, and looking up take a few steps whatever the size.
+- **Keys must be `Hash`** (see [Bounds](#generics)): ints, strings, bools,
+  and structs, enums, tuples, lists, maps, and sets made of them, but not
+  floats or functions. `Map<float, int>` is a compile error that says why.
+- **There is no `m[k]`**: a missing key is an ordinary thing, not a bug, so
+  `get` returns an `Option`.
+- **Order:** entries come in an order decided by their keys' hashes, the
+  same on every run, but not one to rely on; `m.keys().sort()` when order
+  matters. Maps and sets print as `{"a": 1, "b": 2}` and `{1, 2}`.
+- **`==` compares contents**: maps with the same keys and values are equal
+  however they were built, and hash the same, so a `Set<Set<int>>` holds
+  each set once. Maps and sets aren't `Ord`; sorted maps and sets are,
+  entry by entry in key order, as lists of pairs would be.
+- **Use `Map` and `Set` unless order matters.** The sorted ones are
+  weight-balanced binary trees (`src/vm/sorted.rs`), whose steps take
+  about log₂ n comparisons, and need `Ord` keys rather than `Hash` ones.
 
 #### `std::io`
 
@@ -647,6 +757,8 @@ files ──► Loader ──► Lexer ──► Parser ──► Resolver ─�
 | `src/vm/value.rs`     | Runtime values |
 | `src/vm/heap.rs`      | Garbage-collected heap for closures, cells, strings, struct and enum values, and lists |
 | `src/vm/list.rs`      | Lists: persistent vectors that share structure between versions |
+| `src/vm/hamt.rs`      | Maps and sets: hash array mapped tries that share structure between versions |
+| `src/vm/sorted.rs`    | Sorted maps and sets: weight-balanced trees that share structure between versions |
 | `src/vm/native.rs`    | Built-in implementations |
 | `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color), and the source files each location can point into |
 
@@ -679,9 +791,12 @@ Closures, cells, struct and enum values, and strings live on a garbage-collected
 collector is a precise mark-and-sweep: it starts from the registers in use,
 the globals, and the call frames, marks every object reachable from them, and
 frees the rest, so cycles (such as a closure that calls itself through a
-variable it captures) are freed too. It runs when the VM allocates, once the
-heap's size in bytes has doubled since the last collection, so a few large
-strings trigger it as surely as many small objects. String literals are put
+variable it captures) are freed too. It runs when the VM allocates, once as
+many bytes have been allocated since the last collection as survived it, so
+a few large strings trigger it as surely as many small objects. A new version
+of a list counts only the nodes it doesn't share with the one it came from,
+and the collector visits (and counts) a node that versions share once, so
+building a list a value at a time stays linear. String literals are put
 on the heap once, when the code using them is loaded, and kept as roots;
 strings built with `+` are freed once unreachable. A string may be at most
 `i32::MAX` bytes; building a longer one is a runtime error. The VM tests run with the
@@ -695,9 +810,12 @@ the VM forgets to keep reachable is caught.
 `while` loops; `return`; recursion, with guaranteed tail calls; arithmetic, comparison, and logical operators;
 `for` loops over iterators, ranges, `break` and `continue`; immutable lists
 with indexing;
-structs, enums with data, and exhaustive `match`; generic functions, structs, and enums; `Option` and `Result` in the prelude, and `?`; methods and associated functions in `impl` blocks;
+structs, enums with data, and exhaustive `match`; generic functions, structs, and enums,
+with `Eq`, `Hash`, and `Ord` bounds; ordering with `<` and `compare` on any `Ord` type; `Option`,
+`Result`, and `Ordering` in the prelude, and `?`; methods and associated functions in `impl` blocks;
+sorting and searching lists;
 modules, with `import` and `pub`; the start of the standard library
-(`std::io`, `std::fs`); template strings, and methods on strings and
+(`std::collections`, `std::io`, `std::fs`, `std::task`); template strings, and methods on strings and
 numbers; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 

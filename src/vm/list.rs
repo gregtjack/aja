@@ -11,7 +11,7 @@
 //! node only this list uses is changed in place, and a shared one is copied
 //! first. Building a list from scratch therefore copies nothing.
 
-use std::rc::Rc;
+use std::{collections::HashSet, mem::size_of, rc::Rc};
 
 use super::value::Value;
 
@@ -191,6 +191,59 @@ impl List {
         (0..self.len).map(|i| self.get(i).expect("index in range"))
     }
 
+    /// The bytes of the nodes no other list shares: roughly what making this
+    /// list from the one it came from cost. A node only this list holds is
+    /// counted, and so are the nodes below it that only it holds; a shared
+    /// node belongs to another list as well, as does everything below it.
+    pub fn unshared_bytes(&self) -> usize {
+        fn node(n: &Rc<Node>) -> usize {
+            if Rc::strong_count(n) > 1 {
+                return 0;
+            }
+            match &**n {
+                Node::Branch(children) => {
+                    children.len() * size_of::<Rc<Node>>()
+                        + children.iter().map(node).sum::<usize>()
+                }
+                Node::Leaf(values) => values.len() * size_of::<Value>(),
+            }
+        }
+        let tail = if Rc::strong_count(&self.tail) > 1 {
+            0
+        } else {
+            self.tail.len() * size_of::<Value>()
+        };
+        node(&self.root) + tail
+    }
+
+    /// Call `f` with the values in this list's nodes that aren't in `seen`
+    /// (by address), adding them to it, and return the bytes those nodes
+    /// use. The collector marks lists with this, so the nodes that versions
+    /// of a list share are visited, and counted, once.
+    pub fn visit_unseen(&self, seen: &mut HashSet<usize>, mut f: impl FnMut(&Value)) -> usize {
+        fn visit(n: &Rc<Node>, seen: &mut HashSet<usize>, f: &mut impl FnMut(&Value)) -> usize {
+            if !seen.insert(Rc::as_ptr(n) as usize) {
+                return 0;
+            }
+            match &**n {
+                Node::Branch(children) => {
+                    children.len() * size_of::<Rc<Node>>()
+                        + children.iter().map(|c| visit(c, seen, f)).sum::<usize>()
+                }
+                Node::Leaf(values) => {
+                    values.iter().for_each(&mut *f);
+                    values.len() * size_of::<Value>()
+                }
+            }
+        }
+        let mut bytes = visit(&self.root, seen, &mut f);
+        if seen.insert(Rc::as_ptr(&self.tail) as usize) {
+            self.tail.iter().for_each(f);
+            bytes += self.tail.len() * size_of::<Value>();
+        }
+        bytes
+    }
+
     /// Call `f` with every value, faster than [`List::iter`].
     pub fn for_each(&self, mut f: impl FnMut(&Value)) {
         fn visit(node: &Node, f: &mut impl FnMut(&Value)) {
@@ -304,5 +357,25 @@ mod tests {
         assert_eq!(int(changed.get(999).unwrap()), -2);
         assert_eq!(changed.len(), 1001);
         assert_eq!(ints(&shorter), (0..960).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn versions_count_only_what_they_dont_share() {
+        let base: List = (0..10_000).map(Value::Int).collect();
+        // Nothing else holds its nodes.
+        let all = base.unshared_bytes();
+        assert!(all >= 10_000 * size_of::<Value>(), "{all}");
+        // A version made by replacing one value copies one path from the root.
+        let mut changed = base.clone();
+        changed.set(5, Value::Int(-1));
+        let path = changed.unshared_bytes();
+        assert!(path < 4 * 32 * size_of::<Value>(), "{path}");
+        // Marking both visits each shared node once.
+        let mut seen = HashSet::new();
+        let (mut a, mut b) = (0, 0);
+        let first = base.visit_unseen(&mut seen, |_| a += 1);
+        let second = changed.visit_unseen(&mut seen, |_| b += 1);
+        assert_eq!((a, first), (10_000, all));
+        assert!(b <= 64 && second <= path, "{b} values, {second} bytes");
     }
 }

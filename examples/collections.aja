@@ -1,0 +1,75 @@
+// Maps and sets from `std::collections`, with sorting and `compare`.
+
+import std::collections::{Map, Set, SortedMap, SortedSet};
+
+struct Count { word: str, n: int }
+
+// How many times each word appears.
+fn word_counts(text: str) -> Map<str, int> {
+    var counts = Map::new();
+    for w in text.words() {
+        counts = counts.update(w, fn(n) { Some(n.unwrap_or(0) + 1) });
+    }
+    counts
+}
+
+// The words, most frequent first, and alphabetically when counts tie.
+fn ranked(counts: Map<str, int>) -> List<Count> {
+    let all = counts.to_list().map(fn(p) { Count { word: p.0, n: p.1 } });
+    all.sort_by(fn(a, b) { b.n.compare(a.n).then(a.word.compare(b.word)) })
+}
+
+// The words, grouped by their first letter.
+fn by_letter(words: List<str>) -> Map<str, List<str>> {
+    var groups = Map::new();
+    for w in words {
+        groups = groups.update(w.slice(0, 1), fn(g) { Some(g.unwrap_or([]).push(w)) });
+    }
+    groups
+}
+
+fn main() {
+    let text = "the cat sat on the mat and the cow sat on the cat in the sun";
+    let counts = word_counts(text);
+    println("{counts.len()} different words; 'the' appears {counts.get("the").unwrap_or(0)} times");
+    println("'bird' appears: {counts.contains_key("bird")}");
+
+    println("Most frequent:");
+    for c in ranked(counts).slice(0, 3) {
+        println("  {c.word}: {c.n}");
+    }
+
+    // A set holds each value once; sort it for a stable order.
+    let words = Set::from(text.words());
+    println("Words: {", ".join(words.to_list().sort())}");
+
+    let pets = Set::from(["cat", "dog", "fish"]);
+    println("Pets mentioned: {", ".join(words.intersection(pets).to_list().sort())}");
+    println("Pets not mentioned: {", ".join(pets.difference(words).to_list().sort())}");
+
+    // Maps never change: `insert` gives a new one.
+    let groups = by_letter(words.to_list().sort());
+    let more = groups.insert("z", ["zebra"]);
+    println("Groups: {groups.len()}, with a 'z' group: {more.len()}");
+    for letter in groups.keys().sort() {
+        println("  {letter}: {", ".join(groups.get(letter).unwrap_or([]))}");
+    }
+
+    // Sorted maps and sets keep their keys in order, so there's nothing to
+    // sort: here, the words grouped by length.
+    var by_length = SortedMap::new();
+    for w in words {
+        by_length = by_length.update(w.len(), fn(g) { Some(g.unwrap_or(SortedSet::new()).insert(w)) });
+    }
+    println("By length:");
+    for (n, ws) in by_length {
+        println("  {n}: {", ".join(ws.to_list())}");
+    }
+    for (n, ws) in by_length.range(1, 3) {
+        println("Shorter than 3 letters: {", ".join(ws.to_list())}");
+    }
+
+    // Equal maps are equal however they were built.
+    let same = Map::from(counts.to_list().reverse());
+    println("Rebuilt in reverse order, equal: {same == counts}");
+}

@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{key, plural, Checker, Class, FnContext, Ty, TypeError};
+use super::{key, plural, Checker, Class, FnContext, Generic, Ty, TypeError};
 use crate::{
     ast::{types::Type, Definition, Expr, Id, Method, Program, Source, Span},
     diagnostic::closest_match,
@@ -28,7 +28,7 @@ pub(super) struct MethodInfo {
     /// The name it is compiled under, e.g. `Point::norm`.
     pub global: Id,
     /// The impl's type parameters, then the method's own.
-    pub generics: Vec<Id>,
+    pub generics: Vec<Generic>,
     /// How many of `generics` are the impl's.
     pub impl_params: usize,
     /// Its type, a [`Ty::Fn`] whose first parameter is `self` for a method.
@@ -77,7 +77,7 @@ pub(super) struct MethodBody<'p> {
     global: Id,
     params: Vec<Ty>,
     ret: Ty,
-    generics: Vec<Id>,
+    generics: Vec<Generic>,
 }
 
 impl Checker {
@@ -128,7 +128,7 @@ impl Checker {
         local: &HashSet<&Id>,
         in_prelude: bool,
         methods: &[Method],
-    ) -> Option<(Id, Vec<Id>)> {
+    ) -> Option<(Id, Vec<Generic>)> {
         let builtin = match target {
             Type::Int => Some("int"),
             Type::Float => Some("float"),
@@ -184,17 +184,45 @@ impl Checker {
             && args
                 .iter()
                 .zip(&declared)
-                .all(|(a, p)| matches!(a, Type::Named(n, xs, _) if n == p && xs.is_empty()));
+                .all(|(a, p)| matches!(a, Type::Named(n, xs, _) if *n == p.name && xs.is_empty()));
+        let example = if params.is_empty() {
+            format!("impl {name}")
+        } else {
+            let declared: Vec<String> = params.iter().map(Generic::declared).collect();
+            let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+            format!("impl<{}> {name}<{}>", declared.join(", "), names.join(", "))
+        };
         if !matches {
-            let example = if params.is_empty() {
-                format!("impl {name}")
-            } else {
-                format!("impl<{0}> {name}<{0}>", params.join(", "))
-            };
             self.error(
                 TypeError::new(format!("an impl for '{name}' must be for all of it: `{example}`"), *span)
                     .help(format!("write `{example} {{ ... }}`"))
                     .note("an impl declares the type's own type parameters and gives them, in order, as its arguments"),
+            );
+            return None;
+        }
+        // The type's bounds hold for every value of it, but are written
+        // again so the impl says what its methods can rely on. An impl may
+        // ask for more, for methods that need more of the type's arguments.
+        if let Some((d, p)) = declared
+            .iter()
+            .zip(&params)
+            .find(|(d, p)| !d.bounds.has(p.bounds))
+        {
+            let span = type_params
+                .iter()
+                .find(|t| t.name == d.name)
+                .map_or(*span, |t| t.span);
+            let wanted = Generic {
+                name: d.name.clone(),
+                bounds: d.bounds.meet(p.bounds),
+            };
+            self.error(
+                TypeError::new(
+                    format!("type parameter '{}' of the impl for '{name}' needs the bounds '{name}' gives it", d.name),
+                    span,
+                )
+                .help(format!("write `{}`, as in `{example}`", wanted.declared()))
+                .note("an impl repeats the bounds of its type's parameters, so they can be read where its methods are"),
             );
             return None;
         }
@@ -204,7 +232,7 @@ impl Checker {
     fn declare_method<'p>(
         &mut self,
         type_name: &Id,
-        impl_params: &[Id],
+        impl_params: &[Generic],
         m: &'p Method,
     ) -> Option<MethodBody<'p>> {
         let global: Id = format!("{type_name}::{}", m.name).into();
@@ -225,16 +253,24 @@ impl Checker {
             return None;
         }
 
-        let own: Vec<Id> = self
+        let own: Vec<Generic> = self
             .declare_type_params(&m.type_params)
             .into_iter()
             .filter(|p| {
-                let dup = impl_params.contains(p);
+                let dup = impl_params.iter().any(|i| i.name == p.name);
                 if dup {
-                    let span = m.type_params.iter().find(|t| t.name == *p).unwrap().span;
+                    let span = m
+                        .type_params
+                        .iter()
+                        .find(|t| t.name == p.name)
+                        .unwrap()
+                        .span;
                     self.error(
                         TypeError::new(
-                            format!("type parameter '{p}' is already declared by the impl"),
+                            format!(
+                                "type parameter '{}' is already declared by the impl",
+                                p.name
+                            ),
                             span,
                         )
                         .help("use the impl's, or choose a different name"),
@@ -243,12 +279,15 @@ impl Checker {
                 !dup
             })
             .collect();
-        let generics: Vec<Id> = impl_params.iter().chain(&own).cloned().collect();
+        let generics: Vec<Generic> = impl_params.iter().chain(&own).cloned().collect();
         self.type_params = generics.clone();
         let this = builtin_ty(type_name).unwrap_or_else(|| {
             Ty::Named(
                 type_name.clone(),
-                impl_params.iter().map(|p| Ty::Param(p.clone())).collect(),
+                impl_params
+                    .iter()
+                    .map(|p| Ty::Param(p.name.clone()))
+                    .collect(),
             )
         });
         let params: Vec<Ty> = m
@@ -350,6 +389,9 @@ impl Checker {
                 if let Some(info) = self.method(&n, name).cloned() {
                     return Ok(self.call_method(&n, name, info, &targs, callee, args, span));
                 }
+                if name == "compare" {
+                    return Ok(self.compare_method(&t, callee, args));
+                }
                 let is_field = self
                     .structs
                     .get(&n)
@@ -393,6 +435,9 @@ impl Checker {
                 );
                 self.poison(&[&t]);
             }
+            other if name == "compare" && self.method_of(&other, name).is_none() => {
+                return Ok(self.compare_method(&other, callee, args));
+            }
             other => {
                 if let Some(n) = builtin_name(&other) {
                     let n = Id::from(n);
@@ -422,6 +467,72 @@ impl Checker {
         Ok(Ty::Error)
     }
 
+    /// The method a built-in type (`int`, `str`, ...) has named `name`.
+    fn method_of(&self, t: &Ty, name: &Id) -> Option<&MethodInfo> {
+        self.method(&Id::from(builtin_name(t)?), name)
+    }
+
+    /// `a.compare(b)`, for `a` of type `t`: the method every `Ord` type has
+    /// (unless it defines its own), which gives an `Ordering`. It calls the
+    /// prelude's `Ordering::of(a, b)`.
+    fn compare_method(&mut self, t: &Ty, callee: &Expr, args: &[Expr]) -> Ty {
+        let ordering = Ty::Named("Ordering".into(), Vec::new());
+        if !self.constrain(t, Class::ORD.implied()) {
+            let shown = self.show(t);
+            let mut err = TypeError::new(
+                format!("{shown} has no method 'compare', since it isn't Ord"),
+                callee.span,
+            );
+            err = match self.zonk(t) {
+                Ty::Param(p) => {
+                    let wanted = Generic {
+                        bounds: self.bounds_of(&p).meet(Class::ORD.implied()),
+                        name: p.clone(),
+                    };
+                    err.help(format!(
+                        "add a bound where '{p}' is declared: `{}`",
+                        wanted.declared()
+                    ))
+                }
+                Ty::Float => err
+                    .note(self.unmet_note(t, Class::ORD))
+                    .help("compare floats with '<' and '>'"),
+                _ => err.note(self.unmet_note(t, Class::ORD)),
+            };
+            self.error(err);
+            for a in args {
+                self.expr(a);
+            }
+            return ordering;
+        }
+        match args {
+            [other] => {
+                let found = self.expr_expecting(other, t);
+                self.expect(t, &found, other.span, |e, f| {
+                    format!(
+                        "mismatched types: 'compare' compares a value with another {e}, found {f}"
+                    )
+                });
+            }
+            _ => {
+                self.error(TypeError::new(
+                    format!(
+                        "method 'compare' takes 1 argument but {} {} given",
+                        args.len(),
+                        if args.len() == 1 { "was" } else { "were" }
+                    ),
+                    callee.span,
+                ));
+                for a in args {
+                    self.expr(a);
+                }
+            }
+        }
+        self.functions
+            .insert(key(callee.span), "Ordering::of".into());
+        ordering
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn call_method(
         &mut self,
@@ -449,17 +560,18 @@ impl Checker {
         if !info.visible(callee.span, &self.std_sources) {
             self.private_method(type_name, name, &info, callee.span);
         }
+        self.impl_bounds(type_name, &info, targs, callee.span);
         let map: HashMap<Id, Ty> = info
             .generics
             .iter()
             .enumerate()
             .map(|(i, g)| {
                 (
-                    g.clone(),
+                    g.name.clone(),
                     if i < info.impl_params {
                         targs[i].clone()
                     } else {
-                        self.fresh(Class::Any)
+                        self.fresh(g.bounds)
                     },
                 )
             })
@@ -492,6 +604,43 @@ impl Checker {
         }
         self.functions.insert(key(callee.span), info.global);
         *ret
+    }
+
+    /// Check that `targs`, the type arguments of a value whose method `info`
+    /// is called at `span`, meet the bounds of the method's impl, which may
+    /// ask more of them than the type does.
+    fn impl_bounds(&mut self, type_name: &Id, info: &MethodInfo, targs: &[Ty], span: Span) {
+        // The type's own bounds hold already: they are checked wherever the
+        // type is written or made.
+        let own: Vec<Class> = match (self.structs.get(type_name), self.enums.get(type_name)) {
+            (Some(s), _) => s.params.iter().map(|p| p.bounds).collect(),
+            (_, Some(e)) => e.params.iter().map(|p| p.bounds).collect(),
+            _ => Vec::new(),
+        };
+        for (i, (g, t)) in info.generics[..info.impl_params]
+            .iter()
+            .zip(targs)
+            .enumerate()
+        {
+            let extra = g.bounds.minus(own.get(i).copied().unwrap_or(Class::ANY));
+            if extra == Class::ANY || self.constrain(t, g.bounds) {
+                continue;
+            }
+            let shown = self.show(t);
+            let note = self.unmet_note(t, g.bounds);
+            self.error(
+                TypeError::new(
+                    format!(
+                        "'{}' needs '{}' to be {}, but here it is {shown}",
+                        info.global,
+                        g.name,
+                        g.bounds.show()
+                    ),
+                    span,
+                )
+                .note(note),
+            );
+        }
     }
 
     /// `Type::name` for an associated function: its type, for this use. `None`
@@ -617,6 +766,7 @@ impl Checker {
                     );
                     return Ty::Error;
                 };
+                self.impl_bounds(&n, &info, &targs, span);
                 let map: HashMap<Id, Ty> = info
                     .generics
                     .iter()
@@ -625,9 +775,9 @@ impl Checker {
                         let t = if i < info.impl_params {
                             targs[i].clone()
                         } else {
-                            self.fresh(Class::Any)
+                            self.fresh(g.bounds)
                         };
-                        (g.clone(), t)
+                        (g.name.clone(), t)
                     })
                     .collect();
                 let Ty::Fn(params, ret) = Self::subst(&info.ty, &map) else {

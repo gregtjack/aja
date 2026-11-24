@@ -467,7 +467,8 @@ fn main() -> Result<void, io::Error> {
 fn std_modules_must_exist() {
     let fs = [("main.aja", "import std::nope; fn main() {}")];
     assert_eq!(errors(&fs), ["no module named 'std::nope'"]);
-    assert!(rendered(&fs).contains("the standard library's modules are: std::fs, std::io"));
+    assert!(rendered(&fs)
+        .contains("the standard library's modules are: std::collections, std::fs, std::io"));
 }
 
 #[test]

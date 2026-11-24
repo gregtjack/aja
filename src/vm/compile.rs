@@ -1446,6 +1446,7 @@ impl<'a> FnCompiler<'a> {
         let negate = matches!(op, Op2::NotEqual);
         let t = self.types.operand(e);
         let float = t == Float;
+        let int = t == OperandType::Int;
         let op = match op {
             Op2::Addition if float => Op::AddF { dst, a, b },
             Op2::Addition if t == Str => Op::AddS { dst, a, b },
@@ -1459,13 +1460,17 @@ impl<'a> FnCompiler<'a> {
             Op2::Modulo if float => Op::RemF { dst, a, b },
             Op2::Modulo => Op::RemI { dst, a, b },
             Op2::LessThan if float => Op::LtF { dst, a, b },
-            Op2::LessThan => Op::LtI { dst, a, b },
+            Op2::LessThan if int => Op::LtI { dst, a, b },
+            Op2::LessThan => Op::LtD { dst, a, b },
             Op2::LessEqual if float => Op::LeF { dst, a, b },
-            Op2::LessEqual => Op::LeI { dst, a, b },
+            Op2::LessEqual if int => Op::LeI { dst, a, b },
+            Op2::LessEqual => Op::LeD { dst, a, b },
             Op2::GreaterThan if float => Op::LtF { dst, a: b, b: a },
-            Op2::GreaterThan => Op::LtI { dst, a: b, b: a },
+            Op2::GreaterThan if int => Op::LtI { dst, a: b, b: a },
+            Op2::GreaterThan => Op::LtD { dst, a: b, b: a },
             Op2::GreaterEqual if float => Op::LeF { dst, a: b, b: a },
-            Op2::GreaterEqual => Op::LeI { dst, a: b, b: a },
+            Op2::GreaterEqual if int => Op::LeI { dst, a: b, b: a },
+            Op2::GreaterEqual => Op::LeD { dst, a: b, b: a },
             Op2::Equal | Op2::NotEqual => match t {
                 Float => Op::EqF { dst, a, b },
                 Bool => Op::EqB { dst, a, b },

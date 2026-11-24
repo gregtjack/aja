@@ -166,7 +166,7 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
   to be a file or an item. A module is used through the last name of its
   path, so two modules imported whole can't share a last name; import
   what's needed from one of them by name instead. (Rules 5, 10)
-- **A small prelude.** `Option`, `Result`, `Iter`, `Some`, `None`, `Ok`, `Err`, `List`,
+- **A small prelude.** `Option`, `Result`, `Ordering`, `Iter`, `Some`, `None`, `Ok`, `Err`, `List`,
   `print`, `println`, `assert`, and `panic` are in scope everywhere. Everything
   else needs an `import`.
 - **One package layout.** A package is a directory with an `aja.toml` and a
@@ -229,10 +229,13 @@ Before most of this can be written, the language needs:
 1. **Generics** ✅, for `Option<T>`, `Result<T, E>`, `List<T>` ✅, and `Map<K, V>`.
 2. **Methods** ✅ (`impl` blocks), so that `s.trim().split(",")` reads left to
    right and editors and agents can discover an API by typing `.`.
-3. **A few traits**: `Eq`, `Hash`, `Ord`, and `Show`, which map keys, sorting,
-   and printing need.
+3. **A few traits**: `Eq` ✅, `Hash` ✅, `Ord` ✅, and `Show`, which map keys,
+   sorting, and printing need. For now they are built in, usable as bounds
+   (`fn f<K: Hash>`), and a type has them by its shape (see
+   [the collections plan](plans/collections.md)).
 4. **A `for` loop** ✅ over an `Iter` (for now a prelude struct wrapping a
-   "next value" function, until there are traits; see the open question).
+   "next value" function, until programs can define traits; see the open
+   question).
 
 `int` is 64-bit, so lengths, file sizes, and millisecond timestamps all fit
 in it, and library signatures use `int` for them. `float` is 64-bit too
@@ -263,7 +266,8 @@ by a number with a fractional part.
    mark-and-sweep collector, which runs when the heap's size in bytes has
    doubled. String literals are allocated once and kept as roots; strings
    built at runtime (with `+`) are collected. Nothing is reference-counted.
-5. **Language features for libraries.** Generics ✅, methods ✅, the core traits,
+5. **Language features for libraries.** Generics ✅, methods ✅, the core traits
+   (as bounds ✅),
    and `for` loops ✅ with `break` and `continue` (see
    [The standard library](#the-standard-library)).
 6. **Modules and packages.** `import` ✅, `pub` ✅ (on functions, types,
@@ -278,7 +282,9 @@ by a number with a fractional part.
 7. **Standard library**, layer by layer, starting with the prelude and core.
    Started: the library is embedded and imported as `std::...` ✅, the
    intrinsics layer ✅, `std::io` (standard input, output, and error) ✅,
-   `std::fs` (whole-file reads and writes, directories) ✅, and methods on
+   `std::fs` (whole-file reads and writes, directories) ✅,
+   `std::collections` (`Map`, `Set`, `SortedMap`, and `SortedSet`, persistent, see
+   [the plan](plans/collections.md)) ✅, and methods on
    `str`, `int`, `float`, and `bool` in the prelude, with template strings ✅.
 8. **Tooling**, in four parts. The first three are independent; the
    language server builds on all of them.
@@ -342,13 +348,14 @@ by a number with a fractional part.
   (so iterators can be structs with their own state and no closure), and
   does the `iter` method become an `IntoIter` trait? Programs written today
   would keep working either way.
-- **User-defined traits.** Do traits start as a fixed built-in set (`Eq`,
-  `Hash`, `Ord`, `Show`, `Iter`), or can programs define their own from the
-  start?
+- **User-defined traits.** Traits start as a fixed built-in set (`Eq`,
+  `Hash`, `Ord`), which a type has by its shape. When can programs define
+  their own, and can a type then implement `Eq` or `Ord` by hand (say, to
+  order a struct by one field), overriding its shape?
 - **Traits and generics.** How far do generics go (no higher-kinded types is a
   likely non-goal), and are traits implemented nominally or structurally?
-  Today a type parameter has no bounds, so generic code can't use `==` or
-  operators on it; bounds (`fn max<T: Ord>`) come with traits.
+  A type parameter can have bounds (`fn max<T: Ord>`) from the built-in
+  traits.
 - **Tuples** (decided). `(int, str)` is a type and `(1, "a")` a value,
   with two or more parts: `(x)` is just `x`, `(x,)` is an error, and
   `()` is not a value (see "A `void` value"). A part is read by position,

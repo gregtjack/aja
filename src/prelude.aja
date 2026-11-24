@@ -1,14 +1,17 @@
 // The prelude: definitions every Aja program can use without importing them:
-// `Option`, `Result`, `Iter`, and `List`.
+// `Option`, `Result`, `Ordering`, `Iter`, and `List`.
 // Their variants are in scope by themselves, so `Some(1)` means
 // `Option::Some(1)`, and `Some`, `None`, `Ok`, and `Err` can't be used as
 // other names.
 
 // A value that may be absent. Aja has no null: a function that might not have
 // a value to give returns an `Option`.
+//
+// `None` is declared first so that it comes before every `Some` in order:
+// `None < Some(0)`.
 enum Option<T> {
-    Some(T),
     None,
+    Some(T),
 }
 
 impl<T> Option<T> {
@@ -138,6 +141,48 @@ impl<T, E> Result<T, E> {
         match self {
             Ok(x) => Some(x),
             Err(_) => None,
+        }
+    }
+}
+
+// How two values compare: what `a.compare(b)` gives, for `a` and `b` of any
+// `Ord` type. `a.compare(b)` is `Ordering::Less` when `a < b`.
+enum Ordering {
+    Less,
+    Equal,
+    Greater,
+}
+
+impl Ordering {
+    // The opposite order: `Greater` for `Less`, and `Less` for `Greater`.
+    // Sorting by `b.compare(a)`, or `a.compare(b).reverse()`, puts the
+    // biggest first.
+    pub fn reverse(self) -> Ordering {
+        match self {
+            Ordering::Less => Ordering::Greater,
+            Ordering::Equal => Ordering::Equal,
+            Ordering::Greater => Ordering::Less,
+        }
+    }
+
+    // This ordering, unless it is `Equal`, in which case `other`: how to
+    // compare by one thing and then another,
+    // `a.age.compare(b.age).then(a.name.compare(b.name))`.
+    pub fn then(self, other: Ordering) -> Ordering {
+        match self {
+            Ordering::Equal => other,
+            _ => self,
+        }
+    }
+
+    // `a.compare(b)`, which the checker turns calls of into calls of this.
+    fn of<T: Ord>(a: T, b: T) -> Ordering {
+        if a < b {
+            Ordering::Less
+        } else if a == b {
+            Ordering::Equal
+        } else {
+            Ordering::Greater
         }
     }
 }
@@ -450,6 +495,151 @@ impl<T> List<T> {
             out = out.push(value);
         }
         out
+    }
+
+    // The values in the order `cmp` gives: `cmp(a, b)` says how `a`
+    // compares with `b`. Values that compare `Equal` keep their order, so
+    // sorting by one thing and then by another sorts by the second, then
+    // the first. For `Ord` values in their own order, use `sort`.
+    //
+    //     people.sort_by(fn(a, b) { a.age.compare(b.age) })
+    //     xs.sort_by(fn(a, b) { b.compare(a) })      // largest first
+    pub fn sort_by(self, cmp: (T, T) -> Ordering) -> List<T> {
+        // A merge sort from the bottom up: merge runs of 1 value into runs
+        // of 2, those into runs of 4, and so on.
+        let n = self.len();
+        var xs = self;
+        var width = 1;
+        while width < n {
+            var out = [];
+            var start = 0;
+            while start < n {
+                let mid = (start + width).min(n);
+                let end = (start + 2 * width).min(n);
+                var i = start;
+                var j = mid;
+                while i < mid && j < end {
+                    // Take from the right run only if it comes strictly
+                    // first, so equal values keep their order.
+                    if cmp(xs[j], xs[i]) == Ordering::Less {
+                        out = out.push(xs[j]);
+                        j = j + 1;
+                    } else {
+                        out = out.push(xs[i]);
+                        i = i + 1;
+                    }
+                }
+                while i < mid {
+                    out = out.push(xs[i]);
+                    i = i + 1;
+                }
+                while j < end {
+                    out = out.push(xs[j]);
+                    j = j + 1;
+                }
+                start = end;
+            }
+            xs = out;
+            width = width * 2;
+        }
+        xs
+    }
+}
+
+// Methods for lists of values that can be compared with `==`.
+impl<T: Eq> List<T> {
+    // Whether some value is equal to `value`.
+    pub fn contains(self, value: T) -> bool {
+        for x in self {
+            if x == value {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The index of the first value equal to `value`, if there is one.
+    pub fn index_of(self, value: T) -> Option<int> {
+        var i = 0;
+        for x in self {
+            if x == value {
+                return Some(i);
+            }
+            i = i + 1;
+        }
+        None
+    }
+
+    // This list without values equal to the one before them: `[1, 1, 2,
+    // 1]` becomes `[1, 2, 1]`. On a sorted list, that leaves each value once.
+    pub fn dedup(self) -> List<T> {
+        var out = [];
+        for x in self {
+            match out.last() {
+                Some(prev) if prev == x => {}
+                _ => {
+                    out = out.push(x);
+                }
+            }
+        }
+        out
+    }
+}
+
+// Methods for lists of values with an order (see `Ordering`).
+impl<T: Ord> List<T> {
+    // The values from smallest to largest. Equal values keep their order.
+    pub native fn sort(self) -> List<T>;
+
+    // The smallest value (the first, if several are), or `None` if the
+    // list is empty.
+    pub fn min(self) -> Option<T> {
+        var best = self.first();
+        for x in self {
+            match best {
+                Some(b) if b <= x => {}
+                _ => {
+                    best = Some(x);
+                }
+            }
+        }
+        best
+    }
+
+    // The largest value (the last, if several are), or `None` if the list
+    // is empty.
+    pub fn max(self) -> Option<T> {
+        var best = self.first();
+        for x in self {
+            match best {
+                Some(b) if b > x => {}
+                _ => {
+                    best = Some(x);
+                }
+            }
+        }
+        best
+    }
+
+    // The index of a value equal to `value`, in a list sorted from smallest
+    // to largest, or `None` if there is none. It looks at about log2(len)
+    // values, rather than all of them as `index_of` does, but on a list
+    // that isn't sorted its answer means nothing.
+    pub fn binary_search(self, value: T) -> Option<int> {
+        var lo = 0;
+        var hi = self.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let x = self[mid];
+            if x == value {
+                return Some(mid);
+            } else if x < value {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        None
     }
 }
 

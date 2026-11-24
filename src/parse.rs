@@ -376,6 +376,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_bounds() {
+        let src = "struct Map<K: Hash, V> { k: K, v: V }
+                   impl<K: Eq + Hash + Ord, V> Map<K, V> { fn f<U: Ord>(self, u: U) {} }";
+        let program = create_parser(src).parse().unwrap();
+        let bounds = |p: &TypeParam| p.bounds.iter().map(|b| b.0.to_string()).collect::<Vec<_>>();
+        match &program.definitions[0] {
+            Definition::Struct { type_params, .. } => {
+                assert_eq!(bounds(&type_params[0]), ["Hash"]);
+                assert!(type_params[1].bounds.is_empty());
+            }
+            d => panic!("expected a struct, got {d:?}"),
+        }
+        match &program.definitions[1] {
+            Definition::Impl {
+                type_params,
+                methods,
+                ..
+            } => {
+                assert_eq!(bounds(&type_params[0]), ["Eq", "Hash", "Ord"]);
+                assert_eq!(bounds(&methods[0].type_params[0]), ["Ord"]);
+            }
+            d => panic!("expected an impl, got {d:?}"),
+        }
+        let err = create_parser("fn f<T: >(x: T) {}").parse().unwrap_err();
+        assert_eq!(err.message, "expected a trait after ':', found '>'");
+        assert!(create_parser("fn f<T: Eq +>(x: T) {}").parse().is_err());
+    }
+
+    #[test]
     fn test_parse_generics() {
         let src = "enum Option<T> { Some(T), None }
                    struct Pair<A, B> { first: A, second: B }
@@ -1209,9 +1238,32 @@ where
             match self.peek().cloned() {
                 Some((start, Token::Ident(name), end)) => {
                     self.next();
+                    let mut bounds = Vec::new();
+                    if tok_matches!(self, Token::Colon) {
+                        self.next();
+                        loop {
+                            match self.peek().cloned() {
+                                Some((s, Token::Ident(b), e)) => {
+                                    self.next();
+                                    bounds.push((b, Span::new(s, e)));
+                                }
+                                _ => {
+                                    return Err(self.expected("a trait after ':'").help(format!(
+                                    "bounds name traits, e.g. `{name}: Eq` or `{name}: Hash + Ord`"
+                                )))
+                                }
+                            }
+                            if tok_matches!(self, Token::Plus) {
+                                self.next();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
                     params.push(TypeParam {
                         name,
                         span: Span::new(start, end),
+                        bounds,
                     });
                 }
                 Some((_, Token::GreaterThan, _)) if params.is_empty() => {
@@ -1222,7 +1274,7 @@ where
                 _ => {
                     return Err(self
                         .expected("a type parameter name")
-                        .help("type parameters are names, e.g. `<T>` or `<K, V>`"))
+                        .help("type parameters are names, e.g. `<T>` or `<K: Hash, V>`"))
                 }
             }
             if tok_matches!(self, Token::Comma) {

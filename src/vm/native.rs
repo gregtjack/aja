@@ -9,7 +9,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{heap::Heap, value::Value};
+use super::{
+    hamt::Hamt,
+    heap::{Gc, Heap},
+    sorted::Tree,
+    value::Value,
+};
 
 /// Runs a built-in. The type checker has already checked the arguments
 /// against the built-in's signature. The heap is there to read objects the
@@ -695,6 +700,191 @@ static NATIVES: &[(&str, NativeFn)] = &[
         }
         Ok(Value::List(heap.alloc_list(list)))
     }),
+    ("List::sort", |heap, args| {
+        let [Value::List(l)] = args else {
+            return Err(bad_args("List::sort", args));
+        };
+        // The values stay reachable from `l`, in the caller's registers,
+        // while the new list is allocated.
+        let mut values: Vec<Value> = heap.list(*l).iter().cloned().collect();
+        values.sort_by(|a, b| heap.compare(a, b)); // stable
+        let sorted: super::list::List = values.into_iter().collect();
+        Ok(Value::List(heap.alloc_list(sorted)))
+    }),
+    // ---- Maps and sets (`std::collections`) --------------------------------
+    //
+    // Keys are hashed and compared with `Heap::hash` and `Heap::equal`, so
+    // equal keys are one key whatever their history.
+    ("std::collections::Map::new", |heap, _| {
+        Ok(Value::Map(heap.alloc_map(Hamt::default())))
+    }),
+    ("std::collections::Map::len", |heap, args| {
+        let [Value::Map(m)] = args else {
+            return Err(bad_args("Map::len", args));
+        };
+        Ok(Value::Int(heap.hamt(*m).len() as i64))
+    }),
+    ("std::collections::Map::contains_key", |heap, args| {
+        let [Value::Map(m), key] = args else {
+            return Err(bad_args("Map::contains_key", args));
+        };
+        Ok(Value::Bool(lookup(heap, *m, key).is_some()))
+    }),
+    ("std::collections::Map::value", |heap, args| {
+        let [Value::Map(m), key] = args else {
+            return Err(bad_args("Map::value", args));
+        };
+        lookup(heap, *m, key).ok_or_else(|| format!("no key {} in the map", heap.repr(key)))
+    }),
+    ("std::collections::Map::insert", |heap, args| {
+        let [Value::Map(m), key, value] = args else {
+            return Err(bad_args("Map::insert", args));
+        };
+        let map = with_key(heap, *m, key, Some(value));
+        Ok(Value::Map(heap.alloc_map(map)))
+    }),
+    ("std::collections::Map::remove", |heap, args| {
+        let [Value::Map(m), key] = args else {
+            return Err(bad_args("Map::remove", args));
+        };
+        let map = with_key(heap, *m, key, None);
+        Ok(Value::Map(heap.alloc_map(map)))
+    }),
+    ("std::collections::Map::keys", |heap, args| {
+        let [Value::Map(m)] = args else {
+            return Err(bad_args("Map::keys", args));
+        };
+        let mut keys = super::list::List::default();
+        heap.hamt(*m).for_each(|k, _| keys.push(k.clone()));
+        Ok(Value::List(heap.alloc_list(keys)))
+    }),
+    ("std::collections::Map::values", |heap, args| {
+        let [Value::Map(m)] = args else {
+            return Err(bad_args("Map::values", args));
+        };
+        let mut values = super::list::List::default();
+        heap.hamt(*m).for_each(|_, v| values.push(v.clone()));
+        Ok(Value::List(heap.alloc_list(values)))
+    }),
+    ("std::collections::Set::new", |heap, _| {
+        Ok(Value::Set(heap.alloc_set(Hamt::default())))
+    }),
+    ("std::collections::Set::len", |heap, args| {
+        let [Value::Set(s)] = args else {
+            return Err(bad_args("Set::len", args));
+        };
+        Ok(Value::Int(heap.hamt(*s).len() as i64))
+    }),
+    ("std::collections::Set::contains", |heap, args| {
+        let [Value::Set(s), value] = args else {
+            return Err(bad_args("Set::contains", args));
+        };
+        Ok(Value::Bool(lookup(heap, *s, value).is_some()))
+    }),
+    ("std::collections::Set::insert", |heap, args| {
+        let [Value::Set(s), value] = args else {
+            return Err(bad_args("Set::insert", args));
+        };
+        let set = with_key(heap, *s, value, Some(&Value::Void));
+        Ok(Value::Set(heap.alloc_set(set)))
+    }),
+    ("std::collections::Set::remove", |heap, args| {
+        let [Value::Set(s), value] = args else {
+            return Err(bad_args("Set::remove", args));
+        };
+        let set = with_key(heap, *s, value, None);
+        Ok(Value::Set(heap.alloc_set(set)))
+    }),
+    ("std::collections::Set::to_list", |heap, args| {
+        let [Value::Set(s)] = args else {
+            return Err(bad_args("Set::to_list", args));
+        };
+        let mut values = super::list::List::default();
+        heap.hamt(*s).for_each(|k, _| values.push(k.clone()));
+        Ok(Value::List(heap.alloc_list(values)))
+    }),
+    // Sorted maps and sets keep their keys in the order `Heap::compare`
+    // gives. A sorted set is a sorted map whose values are `void`, and its
+    // natives are the map's under another name.
+    ("std::collections::SortedMap::new", |heap, _| {
+        Ok(Value::SortedMap(heap.alloc_sorted_map(Tree::default())))
+    }),
+    ("std::collections::SortedMap::len", |heap, args| {
+        sorted_len(heap, args)
+    }),
+    ("std::collections::SortedMap::contains_key", |heap, args| {
+        let (t, key) = sorted_key(heap, args)?;
+        Ok(Value::Bool(sorted_lookup(heap, t, key).is_some()))
+    }),
+    ("std::collections::SortedMap::value", |heap, args| {
+        let (t, key) = sorted_key(heap, args)?;
+        sorted_lookup(heap, t, key)
+            .ok_or_else(|| format!("no key {} in the sorted map", heap.repr(key)))
+    }),
+    ("std::collections::SortedMap::insert", |heap, args| {
+        let [Value::SortedMap(t), key, value] = args else {
+            return Err(bad_args("SortedMap::insert", args));
+        };
+        let tree = sorted_with_key(heap, *t, key, Some(value));
+        Ok(Value::SortedMap(heap.alloc_sorted_map(tree)))
+    }),
+    ("std::collections::SortedMap::remove", |heap, args| {
+        let (t, key) = sorted_key(heap, args)?;
+        let tree = sorted_with_key(heap, t, key, None);
+        Ok(Value::SortedMap(heap.alloc_sorted_map(tree)))
+    }),
+    ("std::collections::SortedMap::keys", |heap, args| {
+        sorted_part(heap, args, true)
+    }),
+    ("std::collections::SortedMap::values", |heap, args| {
+        sorted_part(heap, args, false)
+    }),
+    ("std::collections::SortedMap::first_key", |heap, args| {
+        sorted_end(heap, args, true)
+    }),
+    ("std::collections::SortedMap::last_key", |heap, args| {
+        sorted_end(heap, args, false)
+    }),
+    ("std::collections::SortedMap::range_keys", |heap, args| {
+        sorted_range(heap, args, true)
+    }),
+    ("std::collections::SortedMap::range_values", |heap, args| {
+        sorted_range(heap, args, false)
+    }),
+    ("std::collections::SortedSet::new", |heap, _| {
+        Ok(Value::SortedSet(heap.alloc_sorted_set(Tree::default())))
+    }),
+    ("std::collections::SortedSet::len", |heap, args| {
+        sorted_len(heap, args)
+    }),
+    ("std::collections::SortedSet::contains", |heap, args| {
+        let (t, key) = sorted_key(heap, args)?;
+        Ok(Value::Bool(sorted_lookup(heap, t, key).is_some()))
+    }),
+    ("std::collections::SortedSet::insert", |heap, args| {
+        let [Value::SortedSet(t), value] = args else {
+            return Err(bad_args("SortedSet::insert", args));
+        };
+        let tree = sorted_with_key(heap, *t, value, Some(&Value::Void));
+        Ok(Value::SortedSet(heap.alloc_sorted_set(tree)))
+    }),
+    ("std::collections::SortedSet::remove", |heap, args| {
+        let (t, value) = sorted_key(heap, args)?;
+        let tree = sorted_with_key(heap, t, value, None);
+        Ok(Value::SortedSet(heap.alloc_sorted_set(tree)))
+    }),
+    ("std::collections::SortedSet::to_list", |heap, args| {
+        sorted_part(heap, args, true)
+    }),
+    ("std::collections::SortedSet::first_value", |heap, args| {
+        sorted_end(heap, args, true)
+    }),
+    ("std::collections::SortedSet::last_value", |heap, args| {
+        sorted_end(heap, args, false)
+    }),
+    ("std::collections::SortedSet::range", |heap, args| {
+        sorted_range(heap, args, true)
+    }),
     ("List::slice", |heap, args| {
         let [Value::List(l), Value::Int(start), Value::Int(end)] = args else {
             return Err(bad_args("List::slice", args));
@@ -741,6 +931,102 @@ pub fn in_range(i: i64, len: usize) -> Result<usize, String> {
 }
 
 /// Arguments the type checker should have rejected.
+/// The value for `key` in the map or set `m`.
+fn lookup(heap: &Heap, m: Gc, key: &Value) -> Option<Value> {
+    heap.hamt(m)
+        .get(heap.hash(key), key, &|a, b| heap.equal(a, b))
+        .cloned()
+}
+
+/// The map or set `m` with `key` given `value`, or removed if `value` is
+/// `None`. The keys and values stay reachable from `m` and the arguments, in
+/// the caller's registers, while the result is allocated.
+fn with_key(heap: &Heap, m: Gc, key: &Value, value: Option<&Value>) -> Hamt {
+    let mut map = heap.hamt(m).clone();
+    let hash = heap.hash(key);
+    let eq = |a: &Value, b: &Value| heap.equal(a, b);
+    match value {
+        Some(v) => map.insert(hash, key.clone(), v.clone(), &eq),
+        None => {
+            map.remove(hash, key, &eq);
+        }
+    }
+    map
+}
+
+/// The tree that the first of `args`, a sorted map or set, holds.
+fn sorted_tree(args: &[Value]) -> Option<Gc> {
+    match args.first() {
+        Some(Value::SortedMap(t) | Value::SortedSet(t)) => Some(*t),
+        _ => None,
+    }
+}
+
+fn sorted_len(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+    let t = sorted_tree(args).ok_or_else(|| bad_args("len", args))?;
+    Ok(Value::Int(heap.tree(t).len() as i64))
+}
+
+/// A sorted map or set, and a key, from `args`.
+fn sorted_key<'a>(_: &Heap, args: &'a [Value]) -> Result<(Gc, &'a Value), String> {
+    match (sorted_tree(args), args) {
+        (Some(t), [_, key]) => Ok((t, key)),
+        _ => Err(bad_args("a sorted map or set's method", args)),
+    }
+}
+
+fn sorted_lookup(heap: &Heap, t: Gc, key: &Value) -> Option<Value> {
+    heap.tree(t).get(key, &|a, b| heap.compare(a, b)).cloned()
+}
+
+/// The sorted map or set `t` with `key` given `value`, or removed if `value`
+/// is `None` (see `with_key`).
+fn sorted_with_key(heap: &Heap, t: Gc, key: &Value, value: Option<&Value>) -> Tree {
+    let mut tree = heap.tree(t).clone();
+    let cmp = |a: &Value, b: &Value| heap.compare(a, b);
+    match value {
+        Some(v) => tree.insert(key.clone(), v.clone(), &cmp),
+        None => {
+            tree.remove(key, &cmp);
+        }
+    }
+    tree
+}
+
+/// The keys (or values) of a sorted map or set, in order.
+fn sorted_part(heap: &mut Heap, args: &[Value], keys: bool) -> Result<Value, String> {
+    let t = sorted_tree(args).ok_or_else(|| bad_args("keys", args))?;
+    let mut out = super::list::List::default();
+    heap.tree(t)
+        .for_each(|k, v| out.push(if keys { k } else { v }.clone()));
+    Ok(Value::List(heap.alloc_list(out)))
+}
+
+/// The smallest (or largest) key of a sorted map or set, which isn't empty.
+fn sorted_end(heap: &mut Heap, args: &[Value], first: bool) -> Result<Value, String> {
+    let t = sorted_tree(args).ok_or_else(|| bad_args("first", args))?;
+    let tree = heap.tree(t);
+    let end = if first { tree.first() } else { tree.last() };
+    end.map(|(k, _)| k.clone())
+        .ok_or_else(|| "the sorted map or set is empty".to_string())
+}
+
+/// The keys (or values) of a sorted map or set whose keys are at least
+/// `args[1]` and less than `args[2]`, in order.
+fn sorted_range(heap: &mut Heap, args: &[Value], keys: bool) -> Result<Value, String> {
+    let (Some(t), [_, lo, hi]) = (sorted_tree(args), args) else {
+        return Err(bad_args("range", args));
+    };
+    let mut out = super::list::List::default();
+    heap.tree(t).for_range(
+        Some(lo),
+        Some(hi),
+        &|a, b| heap.compare(a, b),
+        &mut |k, v| out.push(if keys { k } else { v }.clone()),
+    );
+    Ok(Value::List(heap.alloc_list(out)))
+}
+
 fn bad_args(name: &str, args: &[Value]) -> String {
     let types: Vec<String> = args.iter().map(|a| format!("{a:?}")).collect();
     format!(

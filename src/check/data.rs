@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use ecow::EcoString;
 
-use super::{key, plural, BindingKind, Checker, Class, Ty, TypeError};
+use super::{key, plural, BindingKind, Checker, Class, Generic, Ty, TypeError};
 use crate::{
     ast::{
         types::Type, Arm, Definition, Expr, FieldInit, Id, Pattern, PatternKind, Program, Source,
@@ -34,7 +34,7 @@ use crate::{
 /// order, whose types may mention the parameters.
 #[derive(Debug, Clone)]
 pub(super) struct StructInfo {
-    pub params: Vec<Id>,
+    pub params: Vec<Generic>,
     pub fields: Vec<(Id, Ty)>,
     /// The fields not marked `pub`, which only code in the struct's own
     /// file (or, for the standard library's, in the standard library) can
@@ -78,11 +78,42 @@ pub(super) fn owner(name: &str, source: Source) -> String {
     }
 }
 
+/// The traits a native struct's values have when its type arguments do:
+/// a list's are its values', as are a sorted map's or set's; maps and sets
+/// are equal (and hash the same)
+/// when they hold the same entries, but have no order; and a scope or task
+/// is equal only to itself. A backend's `==`, hashing, and ordering must
+/// handle each of these.
+fn native_traits(name: &str) -> Class {
+    match name {
+        "List" => Class::EQ.meet(Class::HASH).meet(Class::ORD),
+        "std::collections::Map" | "std::collections::Set" => Class::EQ.meet(Class::HASH),
+        // Ordered entry by entry, in key order, as a list of pairs would be.
+        "std::collections::SortedMap" | "std::collections::SortedSet" => {
+            Class::EQ.meet(Class::HASH).meet(Class::ORD)
+        }
+        _ => Class::EQ,
+    }
+}
+
+/// A type argument written in a struct or enum definition, whose bounds are
+/// checked once every definition's fields are known.
+#[derive(Debug, Clone)]
+pub(super) struct DeferredBound {
+    owner: Id,
+    params: Vec<Generic>,
+    index: usize,
+    arg: Ty,
+    span: Span,
+    /// The type parameters in scope where it was written.
+    scope: Vec<Generic>,
+}
+
 /// An enum definition: its type parameters, and its variants in declaration
 /// order with the types of the values each holds.
 #[derive(Debug, Clone)]
 pub(super) struct EnumInfo {
-    pub params: Vec<Id>,
+    pub params: Vec<Generic>,
     pub variants: Vec<(Id, Vec<Ty>)>,
 }
 
@@ -171,8 +202,15 @@ impl Checker {
                 continue;
             }
             // The parameters are checked below, once every type name is
-            // known; their number is needed now, to check uses of the type.
-            let params: Vec<Id> = type_params.iter().map(|p| p.name.clone()).collect();
+            // known; their number and bounds are needed now, to check uses
+            // of the type.
+            let params: Vec<Generic> = type_params
+                .iter()
+                .map(|p| Generic {
+                    name: p.name.clone(),
+                    bounds: Self::bounds(p).0,
+                })
+                .collect();
             if is_struct {
                 self.structs.insert(
                     name.clone(),
@@ -196,6 +234,10 @@ impl Checker {
             accepted.push(def);
         }
 
+        // Whether a type argument in a field meets its parameter's bounds
+        // depends on the fields of every type, so it is checked once they
+        // are all known.
+        self.deferred_bounds = Some(Vec::new());
         for def in accepted {
             let (Definition::Struct { type_params, .. } | Definition::Enum { type_params, .. }) =
                 def
@@ -260,11 +302,100 @@ impl Checker {
             }
             self.type_params.clear();
         }
+        for d in self.deferred_bounds.take().unwrap_or_default() {
+            self.type_params = d.scope;
+            self.check_bound(&d.owner, &d.params, d.index, &d.arg, d.span);
+        }
+        self.type_params.clear();
     }
 
-    /// Check a definition's type parameters, returning their names. A
-    /// parameter can't share its name with another parameter or a type.
-    pub(super) fn declare_type_params(&mut self, params: &[TypeParam]) -> Vec<Id> {
+    /// The traits a type parameter's bounds name, with those they imply, and
+    /// the bounds that aren't traits.
+    fn bounds(p: &TypeParam) -> (Class, Vec<&(Id, Span)>) {
+        let mut class = Class::ANY;
+        let mut unknown = Vec::new();
+        for b in &p.bounds {
+            match Class::NAMES.iter().find(|(n, _)| *n == b.0.as_str()) {
+                Some((_, c)) => class = class.meet(*c),
+                None => unknown.push(b),
+            }
+        }
+        (class.implied(), unknown)
+    }
+
+    /// Check that `arg`, the type argument for parameter `index` of the
+    /// type `owner` (whose parameters are `params`), written at `span`, has
+    /// what that parameter's bounds require.
+    pub(super) fn check_bound(
+        &mut self,
+        owner: &Id,
+        params: &[Generic],
+        index: usize,
+        arg: &Ty,
+        span: Span,
+    ) {
+        let g = &params[index];
+        if self.constrain(arg, g.bounds) {
+            return;
+        }
+        let shown = self.show(arg);
+        let mut err = TypeError::new(
+            format!(
+                "type '{owner}' needs its type argument '{}' to be {}, but {shown} isn't",
+                g.name,
+                g.bounds.show()
+            ),
+            span,
+        );
+        err = match self.zonk(arg) {
+            Ty::Param(p) => {
+                let wanted = Generic {
+                    bounds: self.bounds_of(&p).meet(g.bounds),
+                    name: p.clone(),
+                };
+                err.help(format!(
+                    "add a bound where '{p}' is declared: `{}`",
+                    wanted.declared()
+                ))
+            }
+            _ => err.note(self.unmet_note(arg, g.bounds)),
+        };
+        let declared: Vec<String> = params.iter().map(Generic::declared).collect();
+        self.error(err.note(format!(
+            "'{owner}' is declared as `{owner}<{}>`",
+            declared.join(", ")
+        )));
+    }
+
+    /// Check a definition's type parameters, returning them with their
+    /// bounds. A parameter can't share its name with another parameter or a
+    /// type, and its bounds must name traits.
+    pub(super) fn declare_type_params(&mut self, params: &[TypeParam]) -> Vec<Generic> {
+        let names = self.declare_type_param_names(params);
+        names
+            .into_iter()
+            .map(|name| {
+                let p = params.iter().find(|p| p.name == name).unwrap();
+                let (bounds, unknown) = Self::bounds(p);
+                for (b, span) in unknown {
+                    let traits = Class::NAMES.iter().map(|(n, _)| *n);
+                    let help = match closest_match(b, traits) {
+                        Some(t) => format!("did you mean '{t}'?"),
+                        None => "the traits are Eq, Hash, and Ord".to_string(),
+                    };
+                    self.error(
+                        TypeError::new(format!("cannot find trait '{b}'"), *span)
+                            .help(help)
+                            .note("bounds can name the built-in traits Eq, Hash, and Ord; programs can't define traits yet"),
+                    );
+                }
+                Generic { name, bounds }
+            })
+            .collect()
+    }
+
+    /// The names of a definition's type parameters, reporting clashes.
+    fn declare_type_param_names(&mut self, params: &[TypeParam]) -> Vec<Id> {
         let mut names: Vec<Id> = Vec::new();
         for p in params {
             let err = if names.contains(&p.name) {
@@ -340,7 +471,7 @@ impl Checker {
     /// scope, or a struct or enum. Reports it if unknown or if the number of
     /// arguments is wrong.
     pub(super) fn named_type(&mut self, name: &Id, args: &[Type], span: Span) -> Ty {
-        if self.type_params.contains(name) {
+        if self.type_params.iter().any(|g| g.name == *name) {
             if !args.is_empty() {
                 self.error(
                     TypeError::new(
@@ -360,6 +491,22 @@ impl Checker {
         if let Some(params) = params {
             let args: Vec<Ty> = args.iter().map(|a| self.from_ast(a)).collect();
             if args.len() == params.len() {
+                for (i, (a, g)) in args.iter().zip(&params).enumerate() {
+                    if g.bounds == Class::ANY {
+                        continue;
+                    }
+                    match &mut self.deferred_bounds {
+                        Some(deferred) => deferred.push(DeferredBound {
+                            owner: name.clone(),
+                            params: params.clone(),
+                            index: i,
+                            arg: a.clone(),
+                            span,
+                            scope: self.type_params.clone(),
+                        }),
+                        None => self.check_bound(name, &params, i, a, span),
+                    }
+                }
                 return Ty::Named(name.clone(), args);
             }
             let example = if params.is_empty() {
@@ -382,9 +529,10 @@ impl Checker {
             };
             let mut err = TypeError::new(message, span).help(format!("write `{example}`"));
             if !params.is_empty() {
+                let declared: Vec<String> = params.iter().map(Generic::declared).collect();
                 err = err.note(format!(
                     "'{name}' is declared as `{name}<{}>`",
-                    params.join(", ")
+                    declared.join(", ")
                 ));
             }
             self.error(err);
@@ -395,7 +543,7 @@ impl Checker {
             .structs
             .keys()
             .chain(self.enums.keys())
-            .chain(self.type_params.iter())
+            .chain(self.type_params.iter().map(|g| &g.name))
             .map(|n| n.as_str())
             .chain(builtin)
             .collect();
@@ -407,31 +555,61 @@ impl Checker {
         Ty::Error
     }
 
-    /// Whether values of the struct or enum `name` can be compared with `==`,
-    /// provided its type arguments can be: everything else it holds can be.
-    pub(super) fn comparable(&self, name: &Id, visiting: &mut HashSet<Id>) -> bool {
+    /// Whether values of the struct or enum `name` have the traits in
+    /// `class`, given that its type arguments do: whether every field (or
+    /// value a variant holds) does. A native struct's values have what its
+    /// backend can do with them (see [`native_traits`]).
+    pub(super) fn has_traits(&self, name: &Id, class: Class, visiting: &mut HashSet<Id>) -> bool {
         if !visiting.insert(name.clone()) {
-            return true; // A recursive type is comparable if the rest of it is.
+            return true; // A recursive type has a trait if the rest of it does.
         }
         let tys: Vec<&Ty> = match (self.structs.get(name), self.enums.get(name)) {
+            (Some(s), _) if s.native => return native_traits(name).has(class),
             (Some(s), _) => s.fields.iter().map(|(_, t)| t).collect(),
             (_, Some(e)) => e.variants.iter().flat_map(|(_, ts)| ts).collect(),
             _ => return true,
         };
-        tys.into_iter().all(|t| self.comparable_field(t, visiting))
+        tys.into_iter().all(|t| self.field_has(t, class, visiting))
     }
 
-    /// Whether a field of type `t` (in a definition) can be compared.
-    fn comparable_field(&self, t: &Ty, visiting: &mut HashSet<Id>) -> bool {
+    /// Which field of the struct or enum `name` keeps it from having the
+    /// traits in `class`, for a message: "its field 'x' is float".
+    pub(super) fn lacking_field(&self, name: &Id, class: Class) -> Option<String> {
+        let fields: Vec<(String, &Ty)> = match (self.structs.get(name), self.enums.get(name)) {
+            (Some(s), _) if s.native => return None,
+            (Some(s), _) => s
+                .fields
+                .iter()
+                .map(|(f, t)| (format!("its field '{f}'"), t))
+                .collect(),
+            (_, Some(e)) => e
+                .variants
+                .iter()
+                .flat_map(|(v, ts)| {
+                    ts.iter()
+                        .map(move |t| (format!("its variant '{v}' holds a value that"), t))
+                })
+                .collect(),
+            _ => return None,
+        };
+        fields.into_iter().find_map(|(what, t)| {
+            let mut visiting = HashSet::from([name.clone()]);
+            (!self.field_has(t, class, &mut visiting))
+                .then(|| format!("{what} is {}", self.show(t)))
+        })
+    }
+
+    /// Whether a field of type `t` (in a definition) has the traits in `class`.
+    fn field_has(&self, t: &Ty, class: Class, visiting: &mut HashSet<Id>) -> bool {
         match t {
             Ty::Named(n, args) => {
-                self.comparable(n, visiting)
-                    && args.iter().all(|a| self.comparable_field(a, visiting))
+                self.has_traits(n, class, visiting)
+                    && args.iter().all(|a| self.field_has(a, class, visiting))
             }
-            Ty::Tuple(items) => items.iter().all(|t| self.comparable_field(t, visiting)),
+            Ty::Tuple(items) => items.iter().all(|t| self.field_has(t, class, visiting)),
             // Checked against the type argument wherever the type is used.
             Ty::Param(_) => true,
-            t => Class::Eq.admits(t),
+            t => class.admits(t),
         }
     }
 
@@ -487,7 +665,12 @@ impl Checker {
                 match info.fields.iter().position(|(f, _)| f == name) {
                     Some(i) => {
                         let visible = info.field_visible(name, name_span, &self.std_sources);
-                        let map = info.params.iter().cloned().zip(args).collect();
+                        let map = info
+                            .params
+                            .iter()
+                            .map(|g| g.name.clone())
+                            .zip(args)
+                            .collect();
                         let t = Self::subst(&info.fields[i].1, &map);
                         self.fields.insert(key(span), i as u16);
                         if !visible {
@@ -993,7 +1176,7 @@ impl Checker {
                 let tys = match self.resolve(expected) {
                     Ty::Tuple(tys) if tys.len() == items.len() => tys,
                     _ => {
-                        let tys: Vec<Ty> = items.iter().map(|_| self.fresh(Class::Any)).collect();
+                        let tys: Vec<Ty> = items.iter().map(|_| self.fresh(Class::ANY)).collect();
                         let before = self.errors.len();
                         self.pattern_type(&Ty::Tuple(tys.clone()), expected, p.span);
                         if self.errors.len() != before {
@@ -1385,7 +1568,7 @@ impl Checker {
         if let (Ty::Tuple(items), Ctor::Tuple) = (ty, c) {
             return items.iter().map(|t| self.zonk(t)).collect();
         }
-        let (params, tys): (&[Id], Vec<&Ty>) = match (ty, c) {
+        let (params, tys): (&[Generic], Vec<&Ty>) = match (ty, c) {
             (Ty::Named(n, _), Ctor::Variant(i)) => (
                 &self.enums[n].params,
                 self.enums[n].variants[*i].1.iter().collect(),
@@ -1401,7 +1584,7 @@ impl Checker {
         };
         let map = params
             .iter()
-            .cloned()
+            .map(|g| g.name.clone())
             .zip(args.iter().map(|a| self.zonk(a)))
             .collect();
         tys.into_iter().map(|t| Self::subst(t, &map)).collect()

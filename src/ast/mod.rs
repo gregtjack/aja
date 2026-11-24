@@ -113,12 +113,15 @@ impl Variable {
     }
 }
 
-/// A type parameter of a generic function, struct, or enum: the `T` in
-/// `fn id<T>(x: T) -> T`.
+/// A type parameter of a generic function, struct, enum, or impl: the `T`
+/// in `fn id<T>(x: T) -> T`, or the `K` in `struct Map<K: Hash, V>`.
 #[derive(Debug, Clone)]
 pub struct TypeParam {
     pub name: Id,
     pub span: Span,
+    /// The traits its bounds name (`Hash` in `K: Hash`), with where each
+    /// appears. The checker decides whether they are traits.
+    pub bounds: Vec<(Id, Span)>,
 }
 
 /// A file: its imports, then its definitions.

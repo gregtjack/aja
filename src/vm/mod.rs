@@ -21,10 +21,12 @@ use crate::{
 
 pub mod bytecode;
 pub mod compile;
+pub mod hamt;
 pub mod heap;
 pub mod list;
 mod native;
 mod scheduler;
+pub mod sorted;
 pub mod value;
 
 #[cfg(test)]
@@ -686,6 +688,14 @@ impl Vm {
                 }
                 Op::EqD { dst, a, b } => {
                     let v = self.heap.equal(&reg!(a), &reg!(b));
+                    reg!(dst) = Value::Bool(v);
+                }
+                Op::LtD { dst, a, b } => {
+                    let v = self.heap.compare(&reg!(a), &reg!(b)).is_lt();
+                    reg!(dst) = Value::Bool(v);
+                }
+                Op::LeD { dst, a, b } => {
+                    let v = self.heap.compare(&reg!(a), &reg!(b)).is_le();
                     reg!(dst) = Value::Bool(v);
                 }
                 Op::Not { dst, src } => reg!(dst) = Value::Bool(!get!(Bool, src)),

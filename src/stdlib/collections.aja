@@ -1,0 +1,461 @@
+// Collections: maps and sets, and sorted maps and sets.
+//
+//     import std::collections::{Map, Set};
+//
+//     fn main() {
+//         var counts = Map::new();
+//         for w in "a b a c a".words() {
+//             counts = counts.update(w, fn(n) { Some(n.unwrap_or(0) + 1) });
+//         }
+//         println(counts.get("a"));             // Some(3)
+//         for (word, n) in counts { println("{word}: {n}"); }
+//
+//         let seen = Set::from([3, 1, 3]);
+//         println(seen.contains(1), seen.len()); // true 2
+//     }
+//
+// Like lists, maps and sets never change. `insert` and `remove` give a new
+// one and leave the old one as it was; a `var` can be given the new one,
+// `m = m.insert(k, v)`. The new one shares almost all of its memory with
+// the old, so this costs about as much as changing a map in place would:
+// a handful of steps whatever the size.
+//
+// A key can be of any `Hash` type: ints, strings, bools, and structs,
+// enums, tuples, lists, maps, and sets made of them, but not floats (NaN
+// isn't equal to itself, so it could never be found again) or functions.
+//
+// A map or set goes over its entries in an order that depends on its
+// keys' hashes: the same every time a program runs, but not one to rely
+// on. Sort the keys (`m.keys().sort()`) when order matters.
+//
+// `SortedMap` and `SortedSet` keep their keys in order instead, so they go
+// over them from smallest to largest and can give the smallest, the
+// largest, or those in a range. Their keys must be `Ord` rather than
+// `Hash`, and each step takes a little longer, about log2(len) comparisons.
+// Use `Map` and `Set` unless the order matters.
+
+// Keys of type `K`, each with a value of type `V`.
+pub native struct Map<K: Hash, V>;
+
+// Values of type `T`, each held once.
+pub native struct Set<T: Hash>;
+
+// Keys of type `K`, each with a value of type `V`, in order of the keys.
+pub native struct SortedMap<K: Ord, V>;
+
+// Values of type `T`, each held once, in order.
+pub native struct SortedSet<T: Ord>;
+
+impl<K: Hash, V> Map<K, V> {
+    // An empty map.
+    pub native fn new() -> Map<K, V>;
+
+    // A map of the keys and values in `pairs`. A key that appears more
+    // than once gets its last value.
+    pub fn from(pairs: List<(K, V)>) -> Map<K, V> {
+        var m = Map::new();
+        for (k, v) in pairs {
+            m = m.insert(k, v);
+        }
+        m
+    }
+
+    // How many keys it has.
+    pub native fn len(self) -> int;
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub native fn contains_key(self, key: K) -> bool;
+
+    // The value for `key`, or `None` if it has none.
+    pub fn get(self, key: K) -> Option<V> {
+        if self.contains_key(key) {
+            Some(self.value(key))
+        } else {
+            None
+        }
+    }
+
+    // This map with `key` given `value`, replacing any it had.
+    pub native fn insert(self, key: K, value: V) -> Map<K, V>;
+
+    // This map without `key` (the same map, if it didn't have it).
+    pub native fn remove(self, key: K) -> Map<K, V>;
+
+    // This map with `key`'s value decided by `f`, which is given the value
+    // it has now, if any: `Some(v)` stores `v`, and `None` removes the key.
+    //
+    //     counts.update(word, fn(n) { Some(n.unwrap_or(0) + 1) })
+    pub fn update(self, key: K, f: (Option<V>) -> Option<V>) -> Map<K, V> {
+        match f(self.get(key)) {
+            Some(v) => self.insert(key, v),
+            None => self.remove(key),
+        }
+    }
+
+    // The keys, in the map's order.
+    pub native fn keys(self) -> List<K>;
+
+    // The values, in the same order as `keys`.
+    pub native fn values(self) -> List<V>;
+
+    // Each key with its value, for a `for` loop: `for (k, v) in m { ... }`.
+    pub fn iter(self) -> Iter<(K, V)> {
+        self.to_list().iter()
+    }
+
+    // Each key with its value, in the map's order.
+    pub fn to_list(self) -> List<(K, V)> {
+        pairs(self.keys(), self.values())
+    }
+
+    // The same keys, each with `f` applied to its value.
+    pub fn map_values<U>(self, f: (V) -> U) -> Map<K, U> {
+        var out = Map::new();
+        for (k, v) in self {
+            out = out.insert(k, f(v));
+        }
+        out
+    }
+
+    // The keys and values for which `keep` is true.
+    pub fn filter(self, keep: (K, V) -> bool) -> Map<K, V> {
+        var out = self;
+        for (k, v) in self {
+            if !keep(k, v) {
+                out = out.remove(k);
+            }
+        }
+        out
+    }
+
+    // This map's keys and `other`'s, with `other`'s value for a key both
+    // have.
+    pub fn merge(self, other: Map<K, V>) -> Map<K, V> {
+        var out = self;
+        for (k, v) in other {
+            out = out.insert(k, v);
+        }
+        out
+    }
+
+    // The value for `key`, which the map must have.
+    native fn value(self, key: K) -> V;
+}
+
+impl<T: Hash> Set<T> {
+    // An empty set.
+    pub native fn new() -> Set<T>;
+
+    // A set of the values in `values`, each held once.
+    pub fn from(values: List<T>) -> Set<T> {
+        var s = Set::new();
+        for v in values {
+            s = s.insert(v);
+        }
+        s
+    }
+
+    // How many values it holds.
+    pub native fn len(self) -> int;
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub native fn contains(self, value: T) -> bool;
+
+    // This set with `value` (the same set, if it had it).
+    pub native fn insert(self, value: T) -> Set<T>;
+
+    // This set without `value` (the same set, if it didn't have it).
+    pub native fn remove(self, value: T) -> Set<T>;
+
+    // The values, in the set's order.
+    pub native fn to_list(self) -> List<T>;
+
+    // The values, for a `for` loop.
+    pub fn iter(self) -> Iter<T> {
+        self.to_list().iter()
+    }
+
+    // The values in this set or `other`, or both.
+    pub fn union(self, other: Set<T>) -> Set<T> {
+        // Add the smaller set's values to the larger.
+        var big = self;
+        var small = other;
+        if self.len() < other.len() {
+            big = other;
+            small = self;
+        }
+        var out = big;
+        for v in small {
+            out = out.insert(v);
+        }
+        out
+    }
+
+    // The values in both this set and `other`.
+    pub fn intersection(self, other: Set<T>) -> Set<T> {
+        var out = Set::new();
+        for v in self {
+            if other.contains(v) {
+                out = out.insert(v);
+            }
+        }
+        out
+    }
+
+    // The values in this set but not `other`.
+    pub fn difference(self, other: Set<T>) -> Set<T> {
+        var out = self;
+        for v in other {
+            out = out.remove(v);
+        }
+        out
+    }
+
+    // Whether every value in this set is in `other`.
+    pub fn is_subset(self, other: Set<T>) -> bool {
+        self.len() <= other.len() && self.iter().all(fn(v) { other.contains(v) })
+    }
+}
+
+impl<K: Ord, V> SortedMap<K, V> {
+    // An empty sorted map.
+    pub native fn new() -> SortedMap<K, V>;
+
+    // A sorted map of the keys and values in `pairs`. A key that appears
+    // more than once gets its last value.
+    pub fn from(pairs: List<(K, V)>) -> SortedMap<K, V> {
+        var m = SortedMap::new();
+        for (k, v) in pairs {
+            m = m.insert(k, v);
+        }
+        m
+    }
+
+    // How many keys it has.
+    pub native fn len(self) -> int;
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub native fn contains_key(self, key: K) -> bool;
+
+    // The value for `key`, or `None` if it has none.
+    pub fn get(self, key: K) -> Option<V> {
+        if self.contains_key(key) {
+            Some(self.value(key))
+        } else {
+            None
+        }
+    }
+
+    // This map with `key` given `value`, replacing any it had.
+    pub native fn insert(self, key: K, value: V) -> SortedMap<K, V>;
+
+    // This map without `key` (the same map, if it didn't have it).
+    pub native fn remove(self, key: K) -> SortedMap<K, V>;
+
+    // This map with `key`'s value decided by `f`, as for `Map::update`.
+    pub fn update(self, key: K, f: (Option<V>) -> Option<V>) -> SortedMap<K, V> {
+        match f(self.get(key)) {
+            Some(v) => self.insert(key, v),
+            None => self.remove(key),
+        }
+    }
+
+    // The keys, from smallest to largest.
+    pub native fn keys(self) -> List<K>;
+
+    // The values, in the order of their keys.
+    pub native fn values(self) -> List<V>;
+
+    // Each key with its value, in order, for a `for` loop.
+    pub fn iter(self) -> Iter<(K, V)> {
+        self.to_list().iter()
+    }
+
+    // Each key with its value, in order.
+    pub fn to_list(self) -> List<(K, V)> {
+        pairs(self.keys(), self.values())
+    }
+
+    // The entry with the smallest key, or `None` if the map is empty.
+    pub fn first(self) -> Option<(K, V)> {
+        if self.is_empty() {
+            None
+        } else {
+            let k = self.first_key();
+            Some((k, self.value(k)))
+        }
+    }
+
+    // The entry with the largest key, or `None` if the map is empty.
+    pub fn last(self) -> Option<(K, V)> {
+        if self.is_empty() {
+            None
+        } else {
+            let k = self.last_key();
+            Some((k, self.value(k)))
+        }
+    }
+
+    // The entries whose keys are from `start` up to, but not including,
+    // `end`, in order, as `start..end` counts.
+    //
+    //     for (time, event) in by_time.range(9 * 60, 12 * 60) { ... }
+    pub fn range(self, start: K, end: K) -> List<(K, V)> {
+        pairs(self.range_keys(start, end), self.range_values(start, end))
+    }
+
+    // The same keys, each with `f` applied to its value.
+    pub fn map_values<U>(self, f: (V) -> U) -> SortedMap<K, U> {
+        var out = SortedMap::new();
+        for (k, v) in self {
+            out = out.insert(k, f(v));
+        }
+        out
+    }
+
+    // The keys and values for which `keep` is true.
+    pub fn filter(self, keep: (K, V) -> bool) -> SortedMap<K, V> {
+        var out = self;
+        for (k, v) in self {
+            if !keep(k, v) {
+                out = out.remove(k);
+            }
+        }
+        out
+    }
+
+    // This map's keys and `other`'s, with `other`'s value for a key both
+    // have.
+    pub fn merge(self, other: SortedMap<K, V>) -> SortedMap<K, V> {
+        var out = self;
+        for (k, v) in other {
+            out = out.insert(k, v);
+        }
+        out
+    }
+
+    native fn value(self, key: K) -> V;
+    native fn first_key(self) -> K;
+    native fn last_key(self) -> K;
+    native fn range_keys(self, start: K, end: K) -> List<K>;
+    native fn range_values(self, start: K, end: K) -> List<V>;
+}
+
+impl<T: Ord> SortedSet<T> {
+    // An empty sorted set.
+    pub native fn new() -> SortedSet<T>;
+
+    // A sorted set of the values in `values`, each held once.
+    pub fn from(values: List<T>) -> SortedSet<T> {
+        var s = SortedSet::new();
+        for v in values {
+            s = s.insert(v);
+        }
+        s
+    }
+
+    // How many values it holds.
+    pub native fn len(self) -> int;
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub native fn contains(self, value: T) -> bool;
+
+    // This set with `value` (the same set, if it had it).
+    pub native fn insert(self, value: T) -> SortedSet<T>;
+
+    // This set without `value` (the same set, if it didn't have it).
+    pub native fn remove(self, value: T) -> SortedSet<T>;
+
+    // The values, from smallest to largest.
+    pub native fn to_list(self) -> List<T>;
+
+    // The values in order, for a `for` loop.
+    pub fn iter(self) -> Iter<T> {
+        self.to_list().iter()
+    }
+
+    // The smallest value, or `None` if the set is empty.
+    pub fn first(self) -> Option<T> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self.first_value())
+        }
+    }
+
+    // The largest value, or `None` if the set is empty.
+    pub fn last(self) -> Option<T> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self.last_value())
+        }
+    }
+
+    // The values from `start` up to, but not including, `end`, in order.
+    pub native fn range(self, start: T, end: T) -> List<T>;
+
+    // The values in this set or `other`, or both.
+    pub fn union(self, other: SortedSet<T>) -> SortedSet<T> {
+        var big = self;
+        var small = other;
+        if self.len() < other.len() {
+            big = other;
+            small = self;
+        }
+        var out = big;
+        for v in small {
+            out = out.insert(v);
+        }
+        out
+    }
+
+    // The values in both this set and `other`.
+    pub fn intersection(self, other: SortedSet<T>) -> SortedSet<T> {
+        var out = SortedSet::new();
+        for v in self {
+            if other.contains(v) {
+                out = out.insert(v);
+            }
+        }
+        out
+    }
+
+    // The values in this set but not `other`.
+    pub fn difference(self, other: SortedSet<T>) -> SortedSet<T> {
+        var out = self;
+        for v in other {
+            out = out.remove(v);
+        }
+        out
+    }
+
+    // Whether every value in this set is in `other`.
+    pub fn is_subset(self, other: SortedSet<T>) -> bool {
+        self.len() <= other.len() && self.iter().all(fn(v) { other.contains(v) })
+    }
+
+    native fn first_value(self) -> T;
+    native fn last_value(self) -> T;
+}
+
+// The keys and values, which are as long as each other, paired up in order.
+fn pairs<K, V>(keys: List<K>, values: List<V>) -> List<(K, V)> {
+    var out = [];
+    for i in 0..keys.len() {
+        out = out.push((keys[i], values[i]));
+    }
+    out
+}

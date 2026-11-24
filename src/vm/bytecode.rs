@@ -243,6 +243,19 @@ pub enum Op {
         a: Reg,
         b: Reg,
     },
+    /// Whether `a` comes before `b`, for two values of the same `Ord` type
+    /// other than int (see `Heap::compare`).
+    LtD {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// Whether `a` comes before `b` or is equal to it, as for `LtD`.
+    LeD {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
     Not {
         dst: Reg,
         src: Reg,

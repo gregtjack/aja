@@ -16,6 +16,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [tuples.aja](tuples.aja) | Tuples: returning several values, `.0` / `.1`, patterns in `let`, `for`, and `match`, and comparing with `==` |
 | [generics.aja](generics.aja) | Generic functions, structs, and enums: `Pair`, and a linked list with `map`, `fold`, and `find` |
 | [lists.aja](lists.aja) | Lists: literals, indexing, `get`, `push` and `set` making new lists, `map` / `filter` / `fold`, and sorting |
+| [collections.aja](collections.aja) | `std::collections`: counting words with a `Map` and `update`, ranking them with `sort_by` and `compare(...).then(...)`, `Set` operations, grouping into a `Map` of lists, a `SortedMap` of `SortedSet`s and its `range`, and maps comparing equal however they were built |
 | [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |
 | [iterators.aja](iterators.aja) | `for` loops, ranges, `break` / `continue`, lazy `Iter` methods, an endless iterator, and a tree you can loop over |
 | [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |

@@ -958,6 +958,14 @@ fn long_lists_are_compared_and_shown_without_deep_recursion() {
     assert!(shown.starts_with("Seq::Cons(0, Seq::Cons(1, "));
     assert!(shown.ends_with(&format!("Seq::Cons(199999, Seq::Nil{}", ")".repeat(200000))));
     assert_eq!(run("bool", "range(200000) == range(200000)"), "true");
+    // `Seq::Nil` is declared first, so a shorter sequence sorts first.
+    assert_eq!(
+        run(
+            "bool",
+            "range(200000) <= range(200000) && range(199999) < range(200000)"
+        ),
+        "true"
+    );
 }
 
 #[test]
@@ -2489,5 +2497,346 @@ fn sleep_needs_a_time_of_zero_or_more() {
     assert_eq!(
         failure("fn main() { sleep(-5); }"),
         "cannot sleep for -5 milliseconds: the time must be 0 or more"
+    );
+}
+
+#[test]
+fn bounded_type_parameters_compare_their_values() {
+    let src = "struct P { x: int, s: str }
+        fn index_of<T: Eq>(xs: List<T>, x: T) -> int {
+            var i = 0;
+            for y in xs { if y == x { return i; } i = i + 1; }
+            -1
+        }
+        fn main() -> int {
+            let a = index_of([1, 2, 3], 3);
+            let b = index_of([\"a\", \"b\"], \"b\");
+            let c = index_of([P { x: 1, s: \"a\" }, P { x: 2, s: \"b\" }], P { x: 2, s: \"b\" });
+            let d = index_of([1.5, 2.5], 2.5);
+            let e = index_of([(1, true), (2, false)], (3, true));
+            let f = index_of([Some([1]), None], None);
+            a * 100000 + b * 10000 + c * 1000 + d * 100 + (e + 2) * 10 + f
+        }";
+    assert_eq!(value(src), "Int(211111)");
+}
+
+#[test]
+fn ord_values_compare_structurally() {
+    // Each comparison is one digit: 1 if it holds.
+    let src = "struct P { x: int, s: str }
+        enum E { A(int), B(str), C }
+        fn d(b: bool) -> int { if b { 1 } else { 0 } }
+        fn main() -> str {
+            let checks = [
+                \"apple\" < \"banana\", \"b\" > \"a\", \"é\" > \"z\", \"ab\" < \"b\", \"a\" <= \"a\",
+                false < true, !(true <= false),
+                P { x: 1, s: \"z\" } < P { x: 2, s: \"a\" }, P { x: 1, s: \"a\" } < P { x: 1, s: \"b\" },
+                E::A(9) < E::B(\"a\"), E::B(\"a\") < E::B(\"b\"), E::C > E::A(100),
+                [1, 2] < [1, 2, 0], [1, 3] > [1, 2, 9], [] < [0], [[1], [2]] < [[1], [3]],
+                (1, \"b\") < (1, \"c\"), None < Some(0), Some(1) < Some(2),
+                !(Some(2) < Some(2)), Some(2) <= Some(2), Some(2) >= Some(2),
+            ];
+            \"\".join(checks.map(fn(b) { d(b).to_str() }))
+        }";
+    assert_eq!(value(src), format!("Str({:?})", "1".repeat(22)));
+}
+
+#[test]
+fn compare_gives_an_ordering() {
+    let src = "struct P { name: str, age: int }
+        fn show(o: Ordering) -> str {
+            match o { Ordering::Less => \"<\", Ordering::Equal => \"=\", Ordering::Greater => \">\" }
+        }
+        fn rev<T: Ord>(a: T, b: T) -> Ordering { a.compare(b).reverse() }
+        fn main() -> str {
+            let a = P { name: \"Ada\", age: 36 };
+            let b = P { name: \"Bob\", age: 36 };
+            let os = [1.compare(2), \"b\".compare(\"a\"), (1, 2).compare((1, 2)),
+                a.age.compare(b.age).then(a.name.compare(b.name)), rev([1], []),
+                Ordering::Less.compare(Ordering::Greater), a.compare(b)];
+            \"\".join(os.map(show))
+        }";
+    assert_eq!(value(src), "Str(\"<>=<<<<\")");
+}
+
+#[test]
+fn list_methods_for_eq_values() {
+    let src = "struct P { x: int }
+        fn main() -> str {
+            let xs = [P { x: 3 }, P { x: 1 }, P { x: 3 }];
+            let a = [xs.contains(P { x: 1 }), !xs.contains(P { x: 2 }), [\"a\"].contains(\"a\"),
+                     xs.index_of(P { x: 3 }) == Some(0), xs.index_of(P { x: 2 }) == None,
+                     [1, 1, 2, 2, 2, 1].dedup() == [1, 2, 1], [[1], [1]].dedup() == [[1]],
+                     [].dedup() == [0].slice(0, 0)];
+            \"\".join(a.map(fn(b) { if b { \"1\" } else { \"0\" } }))
+        }";
+    assert_eq!(value(src), "Str(\"11111111\")");
+}
+
+#[test]
+fn list_methods_for_ord_values() {
+    let src = "fn main() -> str {
+            // A shuffle of 0..100, from a linear congruential generator.
+            var xs = [];
+            var seed = 7;
+            for _ in 0..100 { seed = (seed * 1103515245 + 12345) % 2147483648; xs = xs.push(seed % 50); }
+            let sorted = xs.sort();
+            var ok = sorted.len() == 100;
+            for i in 1..sorted.len() { ok = ok && sorted[i - 1] <= sorted[i]; }
+            let by = xs.sort_by(fn(a, b) { a.compare(b) });
+            let down = xs.sort_by(fn(a, b) { b.compare(a) });
+            let checks = [ok, by == sorted, down == sorted.reverse(),
+                xs.min() == sorted.first(), xs.max() == sorted.last(),
+                sorted.binary_search(sorted[37]).map(fn(i) { sorted[i] }) == Some(sorted[37]),
+                sorted.binary_search(50) == None, sorted.binary_search(-1) == None,
+                [\"b\", \"a\", \"c\"].sort() == [\"a\", \"b\", \"c\"], [(2, \"a\"), (1, \"b\")].sort() == [(1, \"b\"), (2, \"a\")]];
+            let e: List<int> = [];
+            let empty = [e.sort() == e, e.min() == None, e.max() == None, e.binary_search(0) == None];
+            \"\".join(checks.concat(empty).map(fn(b) { if b { \"1\" } else { \"0\" } }))
+        }";
+    assert_eq!(value(src), format!("Str({:?})", "1".repeat(14)));
+}
+
+#[test]
+fn sort_by_keeps_equal_values_in_order() {
+    let src = "struct P { name: str, age: int }
+        fn main() -> str {
+            let ps = [P { name: \"c\", age: 30 }, P { name: \"a\", age: 25 }, P { name: \"d\", age: 30 },
+                      P { name: \"b\", age: 25 }, P { name: \"e\", age: 20 }];
+            let by_age = ps.sort_by(fn(a, b) { a.age.compare(b.age) });
+            // Sorting by name and then by age sorts by age, then name.
+            let both = ps.sort_by(fn(a, b) { a.name.compare(b.name) }).sort_by(fn(a, b) { a.age.compare(b.age) });
+            \"\".join(by_age.map(fn(p) { p.name })) + \" \" + \"\".join(both.map(fn(p) { p.name }))
+        }";
+    assert_eq!(value(src), "Str(\"eabcd eabcd\")");
+}
+
+/// The messages of the errors a program using the standard library has.
+fn std_errors(src: &str) -> Vec<String> {
+    let root: std::collections::HashMap<String, String> =
+        [("main.aja".to_string(), src.to_string())].into();
+    match crate::module::build(&root, "main.aja").1 {
+        Ok(_) => Vec::new(),
+        Err(es) => es.into_iter().map(|e| e.message).collect(),
+    }
+}
+
+#[test]
+fn maps_insert_get_and_remove() {
+    let src = "import std::collections::{Map};
+        struct P { x: int, y: int }
+        fn main() -> str {
+            var m = Map::new();
+            for i in 0..300 { m = m.insert(\"k{i}\", i); }
+            let before = m;
+            for i in 0..150 { m = m.remove(\"k{i * 2}\"); }
+            let grid = Map::from([(P { x: 0, y: 0 }, \"o\"), (P { x: 1, y: 2 }, \"a\"), (P { x: 0, y: 0 }, \"O\")]);
+            let checks = [
+                m.len() == 150, before.len() == 300, m.get(\"k3\") == Some(3), m.get(\"k4\") == None,
+                before.get(\"k4\") == Some(4), m.contains_key(\"k299\"), !m.contains_key(\"k300\"),
+                m.remove(\"nope\").len() == 150, m.insert(\"k3\", 33).get(\"k3\") == Some(33),
+                grid.len() == 2, grid.get(P { x: 0, y: 0 }) == Some(\"O\"),
+                m.keys().len() == 150, m.values().fold(0, fn(a, b) { a + b }) == 150 * 150,
+                m.to_list().all(fn(p) { m.get(p.0) == Some(p.1) }),
+            ];
+            \"\".join(checks.map(fn(b) { if b { \"1\" } else { \"0\" } }))
+        }";
+    assert_eq!(std_value(src), format!("{:?}", "1".repeat(14)));
+}
+
+#[test]
+fn map_methods_written_in_aja() {
+    let src = "import std::collections::{Map};
+        fn main() -> str {
+            var counts = Map::new();
+            for w in \"a b a c a b\".words() {
+                counts = counts.update(w, fn(n) { Some(n.unwrap_or(0) + 1) });
+            }
+            let dropped = counts.update(\"c\", fn(n) { None });
+            var seen = \"\";
+            for (k, v) in counts.to_list().sort() { seen = seen + \"{k}{v}\"; }
+            let ten = counts.map_values(fn(n) { n * 10 });
+            let big = counts.filter(fn(k, v) { v > 1 });
+            let merged = counts.merge(Map::from([(\"a\", 0), (\"z\", 9)]));
+            \"{seen} {dropped.len()} {ten.get(\"b\").unwrap_or(0)} {big.len()} {merged.get(\"a\").unwrap_or(-1)} {merged.len()} {counts.is_empty()}\"
+        }";
+    assert_eq!(std_value(src), "\"a3b2c1 2 20 2 0 4 false\"");
+}
+
+#[test]
+fn sets_and_their_operations() {
+    let src = "import std::collections::{Set};
+        fn sorted(s: Set<int>) -> List<int> { s.to_list().sort() }
+        fn main() -> str {
+            let a = Set::from([1, 2, 3, 2, 1]);
+            let b = Set::from([3, 4]);
+            let checks = [
+                a.len() == 3, a.contains(2), !a.contains(4), a.insert(2).len() == 3,
+                a.remove(2).len() == 2, a.remove(9) == a,
+                sorted(a.union(b)) == [1, 2, 3, 4], sorted(b.union(a)) == [1, 2, 3, 4],
+                sorted(a.intersection(b)) == [3], sorted(a.difference(b)) == [1, 2],
+                Set::from([3]).is_subset(a), !b.is_subset(a), Set::new().is_subset(b),
+                Set::from([\"x\"]).iter().count() == 1, Set::new().is_empty(),
+            ];
+            \"\".join(checks.map(fn(b) { if b { \"1\" } else { \"0\" } }))
+        }";
+    assert_eq!(std_value(src), format!("{:?}", "1".repeat(15)));
+}
+
+#[test]
+fn maps_and_sets_compare_and_hash_by_contents() {
+    let src = "import std::collections::{Map, Set};
+        fn main() -> str {
+            // The same entries, put in in different orders and with removals.
+            var a = Map::new();
+            for i in 0..100 { a = a.insert(i, \"v{i}\"); }
+            var b = Map::new();
+            for i in 0..150 { b = b.insert(149 - i, \"v{149 - i}\"); }
+            for i in 100..150 { b = b.remove(i); }
+            let checks = [
+                a == b, a != b.insert(0, \"x\"), a != b.remove(5),
+                Set::from([1, 2]) == Set::from([2, 1]), Set::from([1]) != Set::from([2]),
+                // As keys and values, equal maps and sets are one.
+                Set::from([a, b]).len() == 1, Set::from([Set::from([1, 2]), Set::from([2, 1])]).len() == 1,
+                Map::from([(Set::from([1, 2]), 1)]).get(Set::from([2, 1])) == Some(1),
+                Some(a) == Some(b), [Set::from([1])].contains(Set::from([1])),
+            ];
+            \"\".join(checks.map(fn(b) { if b { \"1\" } else { \"0\" } }))
+        }";
+    assert_eq!(std_value(src), format!("{:?}", "1".repeat(10)));
+}
+
+#[test]
+fn maps_and_sets_print_their_entries() {
+    let (vm, v) = run_std(
+        "import std::collections::{Map, Set};
+         fn main() -> Map<str, Set<str>> { Map::from([(\"a\", Set::from([\"x\"]))]) }",
+        false,
+    );
+    assert_eq!(vm.heap.repr(&v.unwrap()), "{\"a\": {\"x\"}}");
+    let (vm, v) = run_std(
+        "import std::collections::{Set};
+         fn main() -> Set<int> { Set::new() }",
+        false,
+    );
+    assert_eq!(vm.heap.display(&v.unwrap()), "{}");
+}
+
+#[test]
+fn map_keys_need_hash() {
+    assert_eq!(
+        std_errors("import std::collections::{Map}; fn main() { Map::from([(1.5, 1)]); }"),
+        ["mismatched types: argument 1 of function 'std::collections::Map::from' expects List<({Hash}, _)>, found List<(float, int)>"]
+    );
+    assert_eq!(
+        std_errors("import std::collections::{Map}; fn f<K, V>(m: Map<K, V>) -> int { m.len() } fn main() {}"),
+        ["type 'std::collections::Map' needs its type argument 'K' to be Hash, but K isn't"]
+    );
+    assert!(std_errors("import std::collections::{Map}; fn f<K: Hash, V>(m: Map<K, V>) -> int { m.len() } fn main() {}").is_empty());
+    // Maps and sets have no order.
+    assert_eq!(
+        std_errors(
+            "import std::collections::{Set}; fn main() { Set::from([1]) < Set::from([2]); }"
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        std_errors("import std::collections::{Map}; fn main() { let m: Map<str, int> = Map::new(); m.value(\"a\"); }"),
+        ["method 'value' of 'std::collections::Map' is private"]
+    );
+}
+
+#[test]
+fn sorted_maps_keep_keys_in_order() {
+    let src = "import std::collections::{SortedMap};
+        fn main() -> str {
+            // Keys put in out of order, some twice, and some removed.
+            var m = SortedMap::new();
+            for i in 0..200 { m = m.insert((i * 37) % 200, i); }
+            let before = m;
+            for i in 0..100 { m = m.remove(i * 2); }
+            var ordered = true;
+            let keys = m.keys();
+            for i in 1..keys.len() { ordered = ordered && keys[i - 1] < keys[i]; }
+            let checks = [
+                m.len() == 100, before.len() == 200, ordered, keys == before.keys().filter(fn(k) { k % 2 == 1 }),
+                m.first() == Some((1, m.get(1).unwrap_or(-1))), m.last().map(fn(p) { p.0 }) == Some(199),
+                m.range(10, 20).map(fn(p) { p.0 }) == [11, 13, 15, 17, 19], m.range(20, 10) == [],
+                m.get(2) == None, before.get(2) == Some(146),
+                m.to_list().all(fn(p) { m.get(p.0) == Some(p.1) }), m.values().len() == 100,
+                SortedMap::from([(\"b\", 1), (\"a\", 2), (\"b\", 3)]).to_list() == [(\"a\", 2), (\"b\", 3)],
+                m.update(1, fn(v) { None }).first().map(fn(p) { p.0 }) == Some(3),
+                m.filter(fn(k, v) { k < 5 }).keys() == [1, 3], m.map_values(fn(v) { v * 0 }).values().all(fn(v) { v == 0 }),
+                m.merge(SortedMap::from([(0, 0)])).first() == Some((0, 0)),
+            ];
+            let e: SortedMap<str, int> = SortedMap::new();
+            let empty = [e.first() == None, e.last() == None, e.is_empty(), e.range(\"a\", \"z\") == []];
+            \"\".join(checks.concat(empty).map(fn(b) { if b { \"1\" } else { \"0\" } }))
+        }";
+    assert_eq!(std_value(src), format!("{:?}", "1".repeat(21)));
+}
+
+#[test]
+fn sorted_sets_and_their_operations() {
+    let src = "import std::collections::{SortedSet};
+        fn main() -> str {
+            let a = SortedSet::from([\"pear\", \"apple\", \"fig\", \"apple\"]);
+            let b = SortedSet::from([\"fig\", \"kiwi\"]);
+            let checks = [
+                a.to_list() == [\"apple\", \"fig\", \"pear\"], a.len() == 3, a.contains(\"fig\"), !a.contains(\"kiwi\"),
+                a.first() == Some(\"apple\"), a.last() == Some(\"pear\"), a.range(\"b\", \"g\") == [\"fig\"],
+                a.union(b).to_list() == [\"apple\", \"fig\", \"kiwi\", \"pear\"], a.intersection(b).to_list() == [\"fig\"],
+                a.difference(b).to_list() == [\"apple\", \"pear\"], SortedSet::from([\"fig\"]).is_subset(a), !b.is_subset(a),
+                a.remove(\"fig\").remove(\"nope\").len() == 2, a.insert(\"fig\") == a,
+            ];
+            \"\".join(checks.map(fn(b) { if b { \"1\" } else { \"0\" } }))
+        }";
+    assert_eq!(std_value(src), format!("{:?}", "1".repeat(14)));
+}
+
+#[test]
+fn sorted_collections_compare_hash_and_print_in_order() {
+    let src = "import std::collections::{SortedMap, SortedSet, Set};
+        fn main() -> str {
+            var a = SortedMap::new();
+            for i in 0..100 { a = a.insert(i, i * i); }
+            var b = SortedMap::new();
+            for i in 0..150 { b = b.insert(149 - i, (149 - i) * (149 - i)); }
+            for i in 100..150 { b = b.remove(i); }
+            let checks = [
+                a == b, a != b.insert(0, 1), Set::from([a, b]).len() == 1,
+                SortedSet::from([1, 2]) < SortedSet::from([1, 3]), SortedSet::from([1]) < SortedSet::from([1, 2]),
+                SortedMap::from([(1, \"b\")]) > SortedMap::from([(1, \"a\")]),
+                SortedSet::from([SortedSet::from([2]), SortedSet::from([1, 5])]).first() == Some(SortedSet::from([1, 5])),
+                [SortedSet::from([3]), SortedSet::from([1, 2])].sort() == [SortedSet::from([1, 2]), SortedSet::from([3])],
+            ];
+            \"\".join(checks.map(fn(b) { if b { \"1\" } else { \"0\" } }))
+        }";
+    assert_eq!(std_value(src), format!("{:?}", "1".repeat(8)));
+    let (vm, v) = run_std(
+        "import std::collections::{SortedMap, SortedSet};
+         fn main() -> SortedMap<str, SortedSet<int>> {
+             SortedMap::from([(\"b\", SortedSet::from([3, 1])), (\"a\", SortedSet::new())])
+         }",
+        false,
+    );
+    assert_eq!(vm.heap.repr(&v.unwrap()), "{\"a\": {}, \"b\": {1, 3}}");
+}
+
+#[test]
+fn sorted_keys_need_ord() {
+    assert_eq!(
+        std_errors("import std::collections::{SortedSet}; fn main() { SortedSet::from([0.5]); }"),
+        ["mismatched types: argument 1 of function 'std::collections::SortedSet::from' expects List<{Ord}>, found List<float>"]
+    );
+    // A map has no order, so it can't be a sorted map's key.
+    assert_eq!(
+        std_errors("import std::collections::{Map, SortedSet}; fn main() { SortedSet::from([Map::from([(1, 1)])]); }").len(),
+        1
+    );
+    assert_eq!(
+        std_errors("import std::collections::{SortedMap}; fn f<K: Hash>(m: SortedMap<K, int>) {} fn main() {}"),
+        ["type 'std::collections::SortedMap' needs its type argument 'K' to be Ord, but K isn't"]
     );
 }
