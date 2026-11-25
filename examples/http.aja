@@ -1,0 +1,74 @@
+// `std::http`: a server and its client in one program.
+//
+// The server runs in a task of its own and answers with a handler: a
+// function from a `Request` to a `Response`, which matches on the method
+// and path. The client makes requests with `get`, `post`, and `send`, and
+// then closes the listener, which stops the server.
+//
+// For a server to try with curl, see net/http_server.aja.
+
+import std::http::{Request, Response};
+import std::http;
+import std::io;
+import std::net;
+import std::task;
+
+fn handle(req: Request) -> Response {
+    match (req.method, req.path) {
+        ("GET", "/hello") => {
+            let name = req.query.get("name").unwrap_or("stranger");
+            Response::text(200, "Hello, {name}!")
+        }
+        ("POST", "/shout") => Response::text(200, req.body.to_upper()),
+        ("POST", "/form") => {
+            // A form arrives encoded like a query string.
+            let form = http::parse_query(req.body);
+            Response::redirect("/hello?" + http::encode_query([("name", form.get("who").unwrap_or(""))]))
+        }
+        ("GET", "/secret") => match req.header("authorization") {
+            Some("Bearer opensesame") => Response::text(200, "the cake is in the cupboard"),
+            _ => Response::text(401, "who are you?").with_header("WWW-Authenticate", "Bearer"),
+        },
+        _ => Response::text(404, "no page at {req.path}"),
+    }
+}
+
+fn show(r: Result<Response, io::Error>) {
+    match r {
+        Ok(res) => {
+            let location = match res.header("location") {
+                Some(to) => " -> {to}",
+                None => "",
+            };
+            println("{res.status} {http::reason(res.status)}{location}: {res.body}");
+        }
+        Err(e) => println("failed: {e.message}"),
+    }
+}
+
+fn main() {
+    let listener = match net::listen("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => {
+            println(e.message);
+            return;
+        }
+    };
+    let base = "http://{listener.local_addr()}";
+    task::scope(fn(s) {
+        s.spawn(fn() { http::serve(listener, handle) });
+
+        show(http::get(base + "/hello?name=Ada"));                     // 200 OK: Hello, Ada!
+        show(http::get(base + "/hello?" + http::encode_query([("name", "Zoë & co")])));
+        show(http::post(base + "/shout", "text/plain", "quiet please"));
+        show(http::post(base + "/form", "application/x-www-form-urlencoded", "who=Grace+Hopper"));
+        show(http::get(base + "/secret"));                              // 401
+        show(http::send("GET", base + "/secret", [("Authorization", "Bearer opensesame")], ""));
+        show(http::get(base + "/nowhere"));                             // 404
+        show(http::get("https://example.com/"));                        // no TLS yet
+
+        // The server returns once its listener is closed.
+        listener.close();
+    });
+    println("server stopped");
+}

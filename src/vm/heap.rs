@@ -429,11 +429,13 @@ impl Heap {
 
     /// Whether two values of the same type are equal, comparing structs and
     /// enums field by field. Iterative, so long lists can't overflow the stack.
+    ///
+    /// A value isn't taken to equal itself without looking inside: one
+    /// that holds a NaN doesn't, since NaN equals nothing.
     pub fn equal(&self, a: &Value, b: &Value) -> bool {
         let mut work = vec![(a.clone(), b.clone())];
         while let Some((a, b)) = work.pop() {
             let same = match (&a, &b) {
-                (Value::Data(x), Value::Data(y)) if x == y => true,
                 (Value::Data(x), Value::Data(y)) => {
                     let ((lx, fx), (ly, fy)) = (self.data(*x), self.data(*y));
                     if lx.tag != ly.tag {
@@ -446,7 +448,6 @@ impl Heap {
                 (Value::Float(x), Value::Float(y)) => x == y,
                 (Value::Bool(x), Value::Bool(y)) => x == y,
                 (Value::Str(x), Value::Str(y)) => x == y || self.str(*x) == self.str(*y),
-                (Value::List(x), Value::List(y)) if x == y => true,
                 (Value::List(x), Value::List(y)) => {
                     let (lx, ly) = (self.list(*x), self.list(*y));
                     if lx.len() != ly.len() {
@@ -455,7 +456,6 @@ impl Heap {
                     work.extend(lx.iter().cloned().zip(ly.iter().cloned()));
                     true
                 }
-                (Value::Map(x), Value::Map(y)) | (Value::Set(x), Value::Set(y)) if x == y => true,
                 (Value::Map(x), Value::Map(y)) | (Value::Set(x), Value::Set(y)) => {
                     // Equal maps can have differently shaped tries, so each
                     // key of one is looked up in the other.
@@ -478,12 +478,6 @@ impl Heap {
                         return false;
                     }
                     work.extend(pairs);
-                    true
-                }
-                (Value::SortedMap(x), Value::SortedMap(y))
-                | (Value::SortedSet(x), Value::SortedSet(y))
-                    if x == y =>
-                {
                     true
                 }
                 // In key order, equal sorted maps have equal entries in

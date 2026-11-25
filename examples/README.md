@@ -27,8 +27,9 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [sleep.aja](sleep.aja) | Tasks running at the same time: three jobs that wait, done one after another and then at once, timed with `clock()` |
 | [time.aja](time.aja) | `std::time`: timing a computation with `Instant`, making, adding, and comparing `Duration`s, and ticking at a steady rate with `sleep_until` |
 | [net.aja](net.aja) | `std::net`: a server and three clients in one program, each connection in a task, `close_write` and reading to the end, and a refused connection |
+| [http.aja](http.aja) | `std::http`: a server task answering with a handler that matches on method and path, a client using `get`, `post`, and `send`, a posted form and a redirect, headers both ways, and closing the listener to stop the server |
 | [net/echo_server.aja](net/echo_server.aja) | An echo server with a task per connection. Run `cargo run -- examples/net/echo_server.aja`, then `nc 127.0.0.1 7000` in another terminal |
-| [net/http_server.aja](net/http_server.aja) | A small HTTP/1.1 server: request parsing, query strings, keep-alive, routing, and a hit counter owned by one task. Run `cargo run -- examples/net/http_server.aja`, then `curl http://127.0.0.1:8080/` |
+| [net/http_server.aja](net/http_server.aja) | An HTTP server on `std::http`: routing, query strings, HTML, and a hit counter owned by one task, which the handler sends requests over a channel. Run `cargo run -- examples/net/http_server.aja`, then `curl http://127.0.0.1:8080/` |
 | [fs/notes.aja](fs/notes.aja) | `std::fs`: appending to a file, checking it exists, its size, and reading its lines. Run `echo "buy milk" \| cargo run -- examples/fs/notes.aja` (it writes `notes.txt` in the working directory) |
 | [io/greet.aja](io/greet.aja) | `std::io`: a prompt, reading lines until the input ends, standard error, and `main` returning a `Result`. Run `printf 'Ada\nfirst\nsecond\n' \| cargo run -- examples/io/greet.aja` |
 | [modules/](modules) | A program in several files: `import`, `pub`, and a struct whose private field keeps an invariant. Run `cargo run -- examples/modules/main.aja` |

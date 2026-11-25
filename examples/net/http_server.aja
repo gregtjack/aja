@@ -1,6 +1,5 @@
-// A small HTTP/1.1 server. Each connection gets a task of its own, and a
-// connection can carry several requests (keep-alive) until the client says
-// `Connection: close` or goes away.
+// A small HTTP server, on `std::http`, which reads the requests, writes
+// the responses, and gives each connection a task of its own.
 //
 //     cargo run -- examples/net/http_server.aja [port]
 //     curl http://127.0.0.1:8080/
@@ -8,201 +7,20 @@
 //     curl -d 'some text' http://127.0.0.1:8080/echo
 //     curl http://127.0.0.1:8080/count
 //
-// The port is the first argument, or else $PORT, or else 8080. A client
-// gets 10 seconds for each line of a request, and for its body, so one
-// that goes quiet doesn't keep its task forever.
+// The port is the first argument, or else $PORT, or else 8080.
 //
-// The hit counter is shared state, so one task owns it and the connection
-// tasks send it requests over a channel.
+// The hit counter is shared state, and the handler runs in each
+// connection's task, so one task owns the counter and the handler sends it
+// requests over a channel.
 
 import std::channel;
 import std::collections::{Map};
 import std::env;
+import std::http::{Request, Response};
+import std::http;
 import std::io;
 import std::net;
 import std::task;
-import std::time::{Duration};
-
-struct Request {
-    method: str,
-    path: str,
-    query: Map<str, str>,
-    version: str,
-    headers: Map<str, str>,
-    body: str,
-}
-
-impl Request {
-    // A header's value; names are matched without regard to case.
-    fn header(self, name: str) -> Option<str> {
-        self.headers.get(name.to_lower())
-    }
-
-    fn keep_alive(self) -> bool {
-        let conn = self.header("connection").unwrap_or("").to_lower();
-        if self.version == "HTTP/1.0" {
-            conn == "keep-alive"
-        } else {
-            conn != "close"
-        }
-    }
-}
-
-struct Response {
-    status: int,
-    content_type: str,
-    body: str,
-}
-
-impl Response {
-    fn text(status: int, body: str) -> Response {
-        Response { status, content_type: "text/plain; charset=utf-8", body }
-    }
-
-    fn html(body: str) -> Response {
-        Response { status: 200, content_type: "text/html; charset=utf-8", body }
-    }
-}
-
-fn reason(status: int) -> str {
-    match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        408 => "Request Timeout",
-        405 => "Method Not Allowed",
-        411 => "Length Required",
-        413 => "Payload Too Large",
-        _ => "Unknown",
-    }
-}
-
-// ---- Parsing ----------------------------------------------------------------
-
-enum ParseError {
-    // The connection ended before a request began: not an error, just done.
-    Closed,
-    Bad(str),
-    Io(io::Error),
-}
-
-fn read_line(conn: net::TcpStream) -> Result<Option<str>, ParseError> {
-    conn.read_line().map_err(fn(e) { ParseError::Io(e) })
-}
-
-// "%41b+c%C3%A9" -> "Ab cé". Escapes are bytes, so this works on the UTF-8
-// bytes and turns them back into text at the end; if they aren't UTF-8,
-// it leaves `s` as it was.
-fn url_decode(s: str) -> str {
-    let bytes = s.bytes();
-    var out = [];
-    var i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        let escape = if b == 37 && i + 2 < bytes.len() {   // '%'
-            match (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
-                (Some(h), Some(l)) => Some(h * 16 + l),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        match escape {
-            Some(byte) => {
-                out = out.push(byte);
-                i = i + 3;
-            }
-            None => {
-                out = out.push(if b == 43 { 32 } else { b });   // '+' is a space
-                i = i + 1;
-            }
-        }
-    }
-    str::from_utf8(out).unwrap_or(s)
-}
-
-// The value of the hex digit with ASCII code `b`.
-fn hex_digit(b: int) -> Option<int> {
-    if b >= 48 && b <= 57 {
-        Some(b - 48)                       // 0-9
-    } else if b >= 97 && b <= 102 {
-        Some(b - 87)                       // a-f
-    } else if b >= 65 && b <= 70 {
-        Some(b - 55)                       // A-F
-    } else {
-        None
-    }
-}
-
-fn parse_query(q: str) -> Map<str, str> {
-    var m = Map::new();
-    for pair in q.split("&") {
-        if pair.is_empty() {
-            continue;
-        }
-        match pair.find("=") {
-            Some(i) => {
-                m = m.insert(url_decode(pair.slice(0, i)), url_decode(pair.slice(i + 1, pair.len())));
-            }
-            None => {
-                m = m.insert(url_decode(pair), "");
-            }
-        }
-    }
-    m
-}
-
-fn read_request(conn: net::TcpStream) -> Result<Request, ParseError> {
-    let first = match read_line(conn)? {
-        Some(line) => line,
-        None => return Err(ParseError::Closed),
-    };
-    let parts = first.words();
-    if parts.len() != 3 {
-        return Err(ParseError::Bad("malformed request line: {first}"));
-    }
-    let method = parts[0];
-    let target = parts[1];
-    let version = parts[2];
-    if !version.starts_with("HTTP/1.") {
-        return Err(ParseError::Bad("unsupported version {version}"));
-    }
-
-    let (path, query) = match target.find("?") {
-        Some(i) => (target.slice(0, i), parse_query(target.slice(i + 1, target.len()))),
-        None => (target, Map::new()),
-    };
-
-    var headers = Map::new();
-    while true {
-        let line = match read_line(conn)? {
-            Some(line) => line,
-            None => return Err(ParseError::Bad("connection closed in headers")),
-        };
-        if line.is_empty() {
-            break;
-        }
-        match line.find(":") {
-            Some(i) => {
-                let name = line.slice(0, i).trim().to_lower();
-                let value = line.slice(i + 1, line.len()).trim();
-                headers = headers.insert(name, value);
-            }
-            None => return Err(ParseError::Bad("malformed header: {line}")),
-        }
-    }
-
-    let body = match headers.get("content-length") {
-        None => "",
-        Some(n) => match n.parse_int() {
-            Some(len) if len >= 0 && len <= 1_000_000 => conn.read(len).map_err(fn(e) { ParseError::Io(e) })?,
-            Some(_) => return Err(ParseError::Bad("body too large")),
-            None => return Err(ParseError::Bad("bad content-length: {n}")),
-        },
-    };
-
-    Ok(Request { method, path: url_decode(path), query, version, headers, body })
-}
 
 // ---- The hit counter, owned by one task ---------------------------------------
 
@@ -234,7 +52,7 @@ fn escape_html(s: str) -> str {
 fn route(req: Request, counter: channel::Sender<Counter>) -> Response {
     let _ = counter.send(Counter::Hit(req.path));
     match (req.method, req.path) {
-        ("GET", "/") => Response::html(
+        ("GET", "/") => Response::html(200,
             "<!doctype html><title>Aja</title><h1>Hello from Aja</h1>"
             + "<ul><li><a href=\"/hello?name=world\">/hello</a></li>"
             + "<li><a href=\"/count\">/count</a></li>"
@@ -252,66 +70,13 @@ fn route(req: Request, counter: channel::Sender<Counter>) -> Response {
             let _ = counter.send(Counter::Get(reply));
             let counts = answer.recv().unwrap_or([]);
             let lines = counts.map(fn(c) { "{c.1}\t{escape_html(c.0)}" });
-            Response::text(200, "\n".join(lines) + "\n")
+            Response::html(200, "<pre>" + "\n".join(lines) + "</pre>\n")
         }
         ("POST", "/echo") => Response::text(200, req.body),
         (_, "/" | "/hello" | "/headers" | "/count" | "/echo") =>
             Response::text(405, "method {req.method} not allowed on {req.path}\n"),
         _ => Response::text(404, "no page at {req.path}\n"),
     }
-}
-
-// ---- Connections ------------------------------------------------------------------
-
-fn write_response(conn: net::TcpStream, res: Response, keep_alive: bool) -> Result<void, io::Error> {
-    let connection = if keep_alive { "keep-alive" } else { "close" };
-    conn.write(
-        "HTTP/1.1 {res.status} {reason(res.status)}\r\n"
-        + "Content-Type: {res.content_type}\r\n"
-        + "Content-Length: {res.body.byte_len()}\r\n"
-        + "Connection: {connection}\r\n"
-        + "Server: aja\r\n"
-        + "\r\n"
-        + res.body)
-}
-
-fn handle(conn: net::TcpStream, counter: channel::Sender<Counter>) -> Result<void, io::Error> {
-    defer conn.close();
-    let peer = conn.peer_addr();
-    conn.set_timeout(Some(Duration::from_secs(10)))?;
-    while true {
-        match read_request(conn) {
-            Ok(req) => {
-                let res = route(req, counter);
-                let keep = req.keep_alive();
-                println("{peer} {req.method} {req.path} -> {res.status}");
-                write_response(conn, res, keep)?;
-                if !keep {
-                    break;
-                }
-            }
-            Err(ParseError::Closed) => break,
-            // Text that isn't UTF-8 is taken off the stream all the same, so
-            // the connection still works, and can say what was wrong.
-            Err(ParseError::Io(io::Error { kind: io::ErrorKind::InvalidData, .. })) => {
-                println("{peer} bad request: not UTF-8");
-                write_response(conn, Response::text(400, "requests must be UTF-8\n"), false)?;
-                break;
-            }
-            Err(ParseError::Io(io::Error { kind: io::ErrorKind::TimedOut, .. })) => {
-                println("{peer} timed out");
-                write_response(conn, Response::text(408, "too slow\n"), false)?;
-                break;
-            }
-            Err(ParseError::Io(e)) => return Err(e),
-            Err(ParseError::Bad(why)) => {
-                println("{peer} bad request: {why}");
-                write_response(conn, Response::text(400, why + "\n"), false)?;
-                break;
-            }
-        }
-    }
-    Ok(void)
 }
 
 fn main() -> Result<void, io::Error> {
@@ -321,19 +86,11 @@ fn main() -> Result<void, io::Error> {
     let (counter, inbox) = channel::new(64);
     task::scope(fn(s) {
         s.spawn(fn() { run_counter(inbox) });
-        while true {
-            match listener.accept() {
-                Ok(conn) => {
-                    s.spawn(fn() {
-                        match handle(conn, counter) {
-                            Ok(_) => {}
-                            Err(e) => println("connection error: {e.message}"),
-                        }
-                    });
-                }
-                Err(e) => println("accept failed: {e.message}"),
-            }
-        }
+        http::serve(listener, fn(req: Request) -> Response {
+            let res = route(req, counter);
+            println("{req.peer} {req.method} {req.path} -> {res.status}");
+            res
+        });
     });
     Ok(void)
 }

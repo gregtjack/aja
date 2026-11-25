@@ -46,6 +46,9 @@ pub enum ErrorKind {
     NotConnected,
     // A socket's timeout passed before the operation could finish.
     TimedOut,
+    // An argument wasn't one the operation could use, such as a URL that
+    // isn't one.
+    InvalidInput,
     Other,
 }
 
@@ -170,6 +173,7 @@ fn error(code: int) -> Error {
         14 => ErrorKind::AddrNotAvailable,
         15 => ErrorKind::NotConnected,
         16 => ErrorKind::TimedOut,
+        17 => ErrorKind::InvalidInput,
         _ => ErrorKind::Other,
     };
     Error { kind, message: native::error_message() }

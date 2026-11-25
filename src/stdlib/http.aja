@@ -1,0 +1,676 @@
+// HTTP/1.1: a server, and a client.
+//
+//     import std::http::{Request, Response};
+//     import std::http;
+//     import std::io;
+//     import std::net;
+//
+//     fn main() -> Result<void, io::Error> {
+//         let listener = net::listen("127.0.0.1:8080")?;
+//         http::serve(listener, fn(req: Request) -> Response {
+//             match (req.method, req.path) {
+//                 ("GET", "/") => Response::text(200, "Hello!\n"),
+//                 ("GET", "/hello") => {
+//                     let name = req.query.get("name").unwrap_or("stranger");
+//                     Response::text(200, "Hello, {name}!\n")
+//                 }
+//                 ("POST", "/echo") => Response::text(200, req.body),
+//                 _ => Response::text(404, "no page at {req.path}\n"),
+//             }
+//         });
+//         Ok(void)
+//     }
+//
+// and, from another program, or another task of this one:
+//
+//     let res = http::get("http://127.0.0.1:8080/hello?name=Ada")?;
+//     println("{res.status}: {res.body}");     // 200: Hello, Ada!
+//
+// The server gives each connection a task of its own, which reads a
+// request, calls the handler, and writes its response, then waits for the
+// next request on the same connection (keep-alive) until the client says
+// `Connection: close` or goes away. The handler is called from those
+// tasks, so, like any function a task runs, it can't use a `var` of the
+// code that called `serve`: to share state, give it to one task and send
+// it requests over a channel (see examples/net/http_server.aja).
+//
+// The server takes care of the protocol: `Content-Length` and chunked
+// bodies, `Expect: 100-continue`, `HEAD` (the response without its body),
+// and answering requests it can't read with 400, 408, 413, 431, 501, or
+// 505. Bodies are text, which must be UTF-8; bytes wait for a bytes type.
+//
+// There is no TLS, so the client speaks `http://` only.
+
+import std::collections::{Map};
+import std::io;
+import std::net;
+import std::task;
+import std::time;
+import std::time::{Duration};
+
+// ---- Requests and responses -------------------------------------------------
+
+// A request, as the server's handler gets it.
+pub struct Request {
+    // "GET", "POST", and so on, as the client sent it.
+    pub method: str,
+    // The path, without its query, and with %-escapes decoded: "/a b".
+    pub path: str,
+    // The query's parameters, decoded: "?name=Ada&x" gives "name" -> "Ada"
+    // and "x" -> "". A name given twice keeps its last value.
+    pub query: Map<str, str>,
+    // "HTTP/1.1" or "HTTP/1.0".
+    pub version: str,
+    // Each header, by its name in lower case. A header sent several times
+    // has its values joined with ", ".
+    pub headers: Map<str, str>,
+    pub body: str,
+    // The address of the client: "127.0.0.1:53412".
+    pub peer: str,
+}
+
+impl Request {
+    // The value of a header; names are matched without regard to case.
+    pub fn header(self, name: str) -> Option<str> {
+        self.headers.get(name.to_lower())
+    }
+
+    // Whether the client wants the connection kept open after this.
+    fn keep_alive(self) -> bool {
+        let conn = self.header("connection").unwrap_or("").to_lower();
+        if self.version == "HTTP/1.0" {
+            conn == "keep-alive"
+        } else {
+            conn != "close"
+        }
+    }
+}
+
+// A response: what a handler gives, and what the client gets.
+pub struct Response {
+    pub status: int,
+    // Each header as it is sent, in order; a name can appear more than once,
+    // as `Set-Cookie` does. The server works out `Content-Length` and
+    // `Connection` itself, and ignores them here.
+    pub headers: List<(str, str)>,
+    pub body: str,
+}
+
+impl Response {
+    // A response with no headers.
+    pub fn new(status: int, body: str) -> Response {
+        Response { status, headers: [], body }
+    }
+
+    // Plain text.
+    pub fn text(status: int, body: str) -> Response {
+        Response::new(status, body).with_header("Content-Type", "text/plain; charset=utf-8")
+    }
+
+    // A page of HTML.
+    pub fn html(status: int, body: str) -> Response {
+        Response::new(status, body).with_header("Content-Type", "text/html; charset=utf-8")
+    }
+
+    // A redirect to `location`: 303 See Other, which a browser follows with
+    // a GET, as after a form is posted.
+    pub fn redirect(location: str) -> Response {
+        Response::new(303, "").with_header("Location", location)
+    }
+
+    // The same response with one more header.
+    pub fn with_header(self, name: str, value: str) -> Response {
+        Response { headers: self.headers.push((name, value)), ..self }
+    }
+
+    // The value of the first header called `name`, matched without regard
+    // to case.
+    pub fn header(self, name: str) -> Option<str> {
+        let name = name.to_lower();
+        self.headers.find(fn(h: (str, str)) { h.0.to_lower() == name }).map(fn(h: (str, str)) { h.1 })
+    }
+
+    // Whether the status is 2xx.
+    pub fn is_success(self) -> bool {
+        self.status >= 200 && self.status < 300
+    }
+}
+
+// The reason phrase for a status: "Not Found" for 404.
+pub fn reason(status: int) -> str {
+    match status {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        206 => "Partial Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        413 => "Content Too Large",
+        414 => "URI Too Long",
+        415 => "Unsupported Media Type",
+        418 => "I'm a teapot",
+        422 => "Unprocessable Content",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
+        _ => match status / 100 {
+            1 => "Informational",
+            2 => "Success",
+            3 => "Redirection",
+            4 => "Client Error",
+            _ => "Server Error",
+        },
+    }
+}
+
+// ---- The server ---------------------------------------------------------------
+
+// How the server treats its connections.
+pub struct Options {
+    // How long each read or write on a connection may take: the request
+    // line, each header, and the whole body. A client slower than this gets
+    // a 408, and one that sends nothing for this long, between requests, is
+    // disconnected. `None` lets clients take as long as they like.
+    pub timeout: Option<Duration>,
+    // The largest body, in bytes, the server reads; a larger one gets a 413.
+    pub max_body: int,
+}
+
+impl Options {
+    // A 10-second timeout, and bodies of up to 1 MB.
+    pub fn default() -> Options {
+        Options { timeout: Some(Duration::from_secs(10)), max_body: 1_000_000 }
+    }
+}
+
+// Answer each request made to `listener` with `handler`, with the default
+// `Options`. Returns once the listener is closed (by another task), after
+// stopping the connections still open.
+pub fn serve(listener: net::TcpListener, handler: (Request) -> Response) {
+    serve_with(listener, Options::default(), handler);
+}
+
+// `serve`, with `options`.
+pub fn serve_with(listener: net::TcpListener, options: Options, handler: (Request) -> Response) {
+    task::scope(fn(s) {
+        while true {
+            match listener.accept() {
+                Ok(conn) => {
+                    s.spawn(fn() { handle(conn, options, handler) });
+                }
+                Err(io::Error { kind: io::ErrorKind::NotConnected, .. }) => break,
+                // Out of file descriptors, say: wait for some to be closed.
+                Err(_) => time::sleep_for(Duration::from_millis(10)),
+            }
+        }
+        // Connections kept alive would otherwise keep `scope` waiting.
+        s.cancel();
+    });
+}
+
+// Serve the requests on one connection until it ends.
+fn handle(conn: net::TcpStream, options: Options, handler: (Request) -> Response) {
+    defer conn.close();
+    let peer = conn.peer_addr();
+    if conn.set_timeout(options.timeout).is_err() {
+        return;
+    }
+    while true {
+        let (res, keep, head) = match read_request(conn, peer, options.max_body) {
+            Ok(req) => (handler(req), req.keep_alive(), req.method == "HEAD"),
+            Err(ReadError::Closed) => break,
+            Err(ReadError::Bad(status, why)) => (Response::text(status, why + "\n"), false, false),
+            Err(ReadError::Io(e)) => match e.kind {
+                // Text that isn't UTF-8 is taken off the stream all the
+                // same, so the connection can still say what was wrong.
+                io::ErrorKind::InvalidData => (Response::text(400, "requests must be UTF-8\n"), false, false),
+                io::ErrorKind::TimedOut => (Response::text(408, "the request took too long\n"), false, false),
+                _ => break,
+            },
+        };
+        if write_response(conn, res, keep, head).is_err() || !keep {
+            break;
+        }
+    }
+}
+
+// Why a request, or a response, couldn't be read.
+enum ReadError {
+    // The connection ended, or went quiet, before a message began: not an
+    // error, just the end.
+    Closed,
+    // The status to answer with, and why.
+    Bad(int, str),
+    Io(io::Error),
+}
+
+fn failed(e: io::Error) -> ReadError {
+    ReadError::Io(e)
+}
+
+fn read_request(conn: net::TcpStream, peer: str, max_body: int) -> Result<Request, ReadError> {
+    // A client may send blank lines between requests.
+    var first = "";
+    while first.is_empty() {
+        first = match conn.read_line() {
+            Ok(Some(line)) => line,
+            Ok(None) => return Err(ReadError::Closed),
+            Err(io::Error { kind: io::ErrorKind::TimedOut, .. }) => return Err(ReadError::Closed),
+            Err(e) => return Err(ReadError::Io(e)),
+        };
+    }
+    let parts = first.words();
+    if parts.len() != 3 {
+        return Err(ReadError::Bad(400, "malformed request line: {first}"));
+    }
+    let method = parts[0];
+    let target = parts[1];
+    let version = parts[2];
+    if !version.starts_with("HTTP/") {
+        return Err(ReadError::Bad(400, "malformed request line: {first}"));
+    }
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Err(ReadError::Bad(505, "unsupported version {version}"));
+    }
+    let (path, query) = match target.find("?") {
+        Some(i) => (target.slice(0, i), parse_query(target.slice(i + 1, target.len()))),
+        None => (target, Map::new()),
+    };
+    let fields = read_headers(conn)?;
+    var headers = Map::new();
+    for (name, value) in fields {
+        headers = headers.update(name, fn(old: Option<str>) {
+            match old {
+                Some(v) => Some("{v}, {value}"),
+                None => Some(value),
+            }
+        });
+    }
+    if version == "HTTP/1.1" && !headers.contains_key("host") {
+        return Err(ReadError::Bad(400, "an HTTP/1.1 request needs a Host header"));
+    }
+    if headers.get("expect").map(fn(e: str) { e.to_lower() }) == Some("100-continue") {
+        conn.write("HTTP/1.1 100 Continue\r\n\r\n").map_err(failed)?;
+    }
+    let body = read_body(conn, fields, max_body)?;
+    Ok(Request { method, path: percent_decode(path), query, version, headers, body, peer })
+}
+
+fn write_response(conn: net::TcpStream, res: Response, keep_alive: bool, head: bool) -> Result<void, io::Error> {
+    var parts = ["HTTP/1.1 {res.status} {reason(res.status)}\r\n"];
+    for (name, value) in res.headers {
+        let lower = name.to_lower();
+        if lower == "content-length" || lower == "connection" || lower == "transfer-encoding" {
+            continue;
+        }
+        parts = parts.push("{one_line(name)}: {one_line(value)}\r\n");
+    }
+    // These never have a body.
+    let bodiless = res.status < 200 || res.status == 204 || res.status == 304;
+    if !bodiless {
+        parts = parts.push("Content-Length: {res.body.byte_len()}\r\n");
+    }
+    let connection = if keep_alive { "keep-alive" } else { "close" };
+    parts = parts.push("Connection: {connection}\r\n\r\n");
+    if !bodiless && !head {
+        parts = parts.push(res.body);
+    }
+    conn.write("".join(parts))
+}
+
+// `s` with any line breaks turned into spaces, so a header's name or value
+// can't start another header.
+fn one_line(s: str) -> str {
+    s.replace("\r", " ").replace("\n", " ")
+}
+
+// ---- Reading messages, for both ends ----------------------------------------
+
+// The next line, which must be there.
+fn need_line(conn: net::TcpStream) -> Result<str, ReadError> {
+    match conn.read_line().map_err(failed)? {
+        Some(line) => Ok(line),
+        None => Err(ReadError::Bad(400, "the connection closed partway through a message")),
+    }
+}
+
+// Headers up to the blank line that ends them, with lower-case names.
+fn read_headers(conn: net::TcpStream) -> Result<List<(str, str)>, ReadError> {
+    var headers = [];
+    while true {
+        let line = need_line(conn)?;
+        if line.is_empty() {
+            break;
+        }
+        if headers.len() >= 100 {
+            return Err(ReadError::Bad(431, "too many headers"));
+        }
+        match line.find(":") {
+            Some(i) => {
+                headers = headers.push((line.slice(0, i).trim().to_lower(), line.slice(i + 1, line.len()).trim()));
+            }
+            None => return Err(ReadError::Bad(400, "malformed header: {line}")),
+        }
+    }
+    Ok(headers)
+}
+
+// The value of the first header called `name`, which is in lower case.
+fn find_header(headers: List<(str, str)>, name: str) -> Option<str> {
+    headers.find(fn(h: (str, str)) { h.0 == name }).map(fn(h: (str, str)) { h.1 })
+}
+
+// Whether a message with `headers` says how long its body is.
+fn has_length(headers: List<(str, str)>) -> bool {
+    find_header(headers, "transfer-encoding").is_some() || find_header(headers, "content-length").is_some()
+}
+
+// The body that `headers` describe: chunked, or `Content-Length` bytes, or
+// none. At most `max` bytes.
+fn read_body(conn: net::TcpStream, headers: List<(str, str)>, max: int) -> Result<str, ReadError> {
+    match find_header(headers, "transfer-encoding") {
+        Some(te) if te.to_lower() == "chunked" => return read_chunked(conn, max),
+        Some(te) => return Err(ReadError::Bad(501, "unsupported transfer-encoding: {te}")),
+        None => {}
+    }
+    match find_header(headers, "content-length") {
+        None => Ok(""),
+        Some(n) => match n.parse_int() {
+            Some(len) if len > max => Err(ReadError::Bad(413, "the body is larger than {max} bytes")),
+            Some(len) if len >= 0 => {
+                let body = conn.read(len).map_err(failed)?;
+                if body.byte_len() < len {
+                    Err(ReadError::Bad(400, "the connection closed partway through the body"))
+                } else {
+                    Ok(body)
+                }
+            }
+            _ => Err(ReadError::Bad(400, "bad content-length: {n}")),
+        },
+    }
+}
+
+// A chunked body: chunks, each after its size in hex, up to one of size 0,
+// then trailers, which are ignored. A chunk can end partway through a
+// character, so the chunks are read as bytes.
+fn read_chunked(conn: net::TcpStream, max: int) -> Result<str, ReadError> {
+    var bytes = [];
+    while true {
+        let line = need_line(conn)?;
+        let size_part = match line.find(";") {
+            Some(i) => line.slice(0, i),
+            None => line,
+        };
+        let digits = size_part.trim();
+        let size = match parse_hex(digits) {
+            Some(n) => n,
+            None => return Err(ReadError::Bad(400, "bad chunk size: {digits}")),
+        };
+        if size == 0 {
+            break;
+        }
+        if bytes.len() + size > max {
+            return Err(ReadError::Bad(413, "the body is larger than {max} bytes"));
+        }
+        let chunk = conn.read_bytes(size).map_err(failed)?;
+        if chunk.len() < size {
+            return Err(ReadError::Bad(400, "the connection closed partway through the body"));
+        }
+        bytes = bytes.concat(chunk);
+        if !need_line(conn)?.is_empty() {
+            return Err(ReadError::Bad(400, "a chunk was longer than its size"));
+        }
+    }
+    let _ = read_headers(conn)?;
+    match str::from_utf8(bytes) {
+        Some(text) => Ok(text),
+        None => Err(ReadError::Io(io::Error { kind: io::ErrorKind::InvalidData, message: "the body isn't UTF-8" })),
+    }
+}
+
+// "1aF" -> 431. At most 15 digits, so it can't overflow.
+fn parse_hex(s: str) -> Option<int> {
+    if s.is_empty() || s.len() > 15 {
+        return None;
+    }
+    var n = 0;
+    for b in s.bytes() {
+        n = n * 16 + hex_digit(b)?;
+    }
+    Some(n)
+}
+
+// The value of the hex digit with ASCII code `b`.
+fn hex_digit(b: int) -> Option<int> {
+    if b >= 48 && b <= 57 {
+        Some(b - 48)        // 0-9
+    } else if b >= 97 && b <= 102 {
+        Some(b - 87)        // a-f
+    } else if b >= 65 && b <= 70 {
+        Some(b - 55)        // A-F
+    } else {
+        None
+    }
+}
+
+// ---- The client ------------------------------------------------------------------
+
+// GET `url`.
+pub fn get(url: str) -> Result<Response, io::Error> {
+    send("GET", url, [], "")
+}
+
+// POST `body` to `url`, as `content_type`: "application/json", say.
+pub fn post(url: str, content_type: str, body: str) -> Result<Response, io::Error> {
+    send("POST", url, [("Content-Type", content_type)], body)
+}
+
+// Make a request, and give the response, whatever its status. `url` is
+// "http://host[:port][/path][?query]". Fails with `InvalidInput` for a URL
+// it can't use, and with `InvalidData` for a response it can't read. Each
+// read and write may take up to 30 seconds. Redirects aren't followed.
+pub fn send(method: str, url: str, headers: List<(str, str)>, body: str) -> Result<Response, io::Error> {
+    let (host, addr, target) = parse_url(url)?;
+    let conn = net::connect(addr)?;
+    defer conn.close();
+    conn.set_timeout(Some(Duration::from_secs(30)))?;
+
+    var parts = ["{method} {target} HTTP/1.1\r\n", "Host: {host}\r\n"];
+    for (name, value) in headers {
+        let lower = name.to_lower();
+        if lower == "host" || lower == "content-length" || lower == "connection" || lower == "transfer-encoding" {
+            continue;
+        }
+        parts = parts.push("{one_line(name)}: {one_line(value)}\r\n");
+    }
+    if !body.is_empty() || method == "POST" || method == "PUT" || method == "PATCH" {
+        parts = parts.push("Content-Length: {body.byte_len()}\r\n");
+    }
+    parts = parts.push("Connection: close\r\n\r\n").push(body);
+    conn.write("".join(parts))?;
+
+    let bad = fn(why: str) {
+        io::Error { kind: io::ErrorKind::InvalidData, message: "bad response from '{host}': {why}" }
+    };
+    let read = fn(e: ReadError) {
+        match e {
+            ReadError::Closed => bad("the connection closed before a response"),
+            ReadError::Bad(_, why) => bad(why),
+            ReadError::Io(e) => e,
+        }
+    };
+    // Informational responses, such as 100 Continue, come before the real one.
+    var status = 100;
+    var fields = [];
+    while status < 200 {
+        let line = match conn.read_line()? {
+            Some(line) => line,
+            None => return Err(bad("the connection closed before a response")),
+        };
+        status = match (line.starts_with("HTTP/1."), line.slice(9.min(line.len()), 12.min(line.len())).parse_int()) {
+            (true, Some(code)) if code >= 100 && code <= 999 => code,
+            _ => return Err(bad("malformed status line: {line}")),
+        };
+        fields = read_headers(conn).map_err(read)?;
+    }
+    let no_body = method == "HEAD" || status == 204 || status == 304;
+    let text = if no_body {
+        ""
+    } else if has_length(fields) {
+        read_body(conn, fields, 0x7FFF_FFFF_FFFF_FFFF).map_err(read)?
+    } else {
+        conn.read_to_string()?
+    };
+    Ok(Response { status, headers: fields, body: text })
+}
+
+// `url`'s host as the Host header gives it, the address to connect to, and
+// the target to ask for: "http://example.com/a?b" gives "example.com",
+// "example.com:80", and "/a?b".
+fn parse_url(url: str) -> Result<(str, str, str), io::Error> {
+    let invalid = fn(why: str) {
+        Err(io::Error { kind: io::ErrorKind::InvalidInput, message: "bad URL '{url}': {why}" })
+    };
+    let lower = url.to_lower();
+    if lower.starts_with("https://") {
+        return invalid("https isn't supported yet");
+    }
+    if !lower.starts_with("http://") {
+        return invalid("it must start with http://");
+    }
+    var rest = url.slice(7, url.len());
+    match rest.find("#") {
+        Some(i) => { rest = rest.slice(0, i); }
+        None => {}
+    }
+    let end = match (rest.find("/"), rest.find("?")) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => rest.len(),
+    };
+    let host = rest.slice(0, end);
+    let target = match rest.slice(end, rest.len()) {
+        "" => "/",
+        t if t.starts_with("?") => "/" + t,
+        t => t,
+    };
+    if host.is_empty() {
+        return invalid("it has no host");
+    }
+    if host.contains("@") {
+        return invalid("user names and passwords aren't supported");
+    }
+    // The port is after the last ':', unless that is inside an IPv6
+    // address's brackets: "[::1]:8080".
+    let colon = match host.find("]") {
+        Some(i) => host.slice(i + 1, host.len()).find(":").map(fn(j: int) { i + 1 + j }),
+        None => host.find(":"),
+    };
+    let addr = match colon {
+        Some(i) => match host.slice(i + 1, host.len()).parse_int() {
+            Some(port) if port > 0 && port < 65536 => host,
+            _ => return invalid("bad port"),
+        },
+        None => host + ":80",
+    };
+    Ok((host, addr, target))
+}
+
+// ---- URL encoding ----------------------------------------------------------------
+
+// `s` with every byte other than letters, digits, and `-._~` written as a
+// %-escape: "a b&c" gives "a%20b%26c". For a value in a query or a path.
+pub fn percent_encode(s: str) -> str {
+    let digits = "0123456789ABCDEF".bytes();
+    var out = [];
+    for b in s.bytes() {
+        let plain = (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+            || b == 45 || b == 46 || b == 95 || b == 126;
+        if plain {
+            out = out.push(b);
+        } else {
+            out = out.push(37).push(digits[b / 16]).push(digits[b % 16]);
+        }
+    }
+    str::from_utf8(out).unwrap_or("")
+}
+
+// `s` with its %-escapes decoded, and `+` as a space: "%41b+c%C3%A9" gives
+// "Ab cé". If the escapes don't make UTF-8, gives `s` as it was.
+pub fn percent_decode(s: str) -> str {
+    let bytes = s.bytes();
+    var out = [];
+    var i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let escape = if b == 37 && i + 2 < bytes.len() {
+            match (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                (Some(h), Some(l)) => Some(h * 16 + l),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match escape {
+            Some(byte) => {
+                out = out.push(byte);
+                i = i + 3;
+            }
+            None => {
+                out = out.push(if b == 43 { 32 } else { b });
+                i = i + 1;
+            }
+        }
+    }
+    str::from_utf8(out).unwrap_or(s)
+}
+
+// A query string's parameters, decoded: "a=1&b=x%20y&c" gives "a" -> "1",
+// "b" -> "x y", and "c" -> "". For a form posted as
+// `application/x-www-form-urlencoded`, too.
+pub fn parse_query(q: str) -> Map<str, str> {
+    var m = Map::new();
+    for pair in q.split("&") {
+        if pair.is_empty() {
+            continue;
+        }
+        match pair.find("=") {
+            Some(i) => {
+                m = m.insert(percent_decode(pair.slice(0, i)), percent_decode(pair.slice(i + 1, pair.len())));
+            }
+            None => {
+                m = m.insert(percent_decode(pair), "");
+            }
+        }
+    }
+    m
+}
+
+// A query string of `params`, encoded: [("q", "a b"), ("n", "1")] gives
+// "q=a%20b&n=1".
+pub fn encode_query(params: List<(str, str)>) -> str {
+    "&".join(params.map(fn(p: (str, str)) { "{percent_encode(p.0)}={percent_encode(p.1)}" }))
+}

@@ -760,7 +760,9 @@ impl Vm {
                     if get!(Int, b) == 0 {
                         throw!("modulo by zero".to_string());
                     }
-                    int_op!(dst, a, b, checked_rem, "%")
+                    // `int::MIN % -1` is 0, though `int::MIN / -1` overflows.
+                    let v = get!(Int, a).wrapping_rem(get!(Int, b));
+                    reg!(dst) = Value::Int(v);
                 }
                 Op::NegI { dst, src } => match get!(Int, src).checked_neg() {
                     Some(v) => reg!(dst) = Value::Int(v),

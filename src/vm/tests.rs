@@ -596,7 +596,7 @@ fn repl_inputs_share_globals() {
             crate::ast::Location::new(0, 1, 1),
             crate::ast::Location::new(0, 1, 1),
         );
-        let input = compiler.repl(&stmt, &types, span);
+        let input = compiler.repl(&stmt, &types, span).unwrap();
         let v = vm.run_repl(&input).unwrap();
         show(&vm, &v)
     };
@@ -1303,7 +1303,7 @@ fn repl_literals_are_kept_and_renumbered_after_a_failed_input() {
             crate::ast::Location::new(0, 1, 1),
             crate::ast::Location::new(0, 1, 1),
         );
-        let input = compiler.repl(&stmt, &types, span);
+        let input = compiler.repl(&stmt, &types, span).unwrap();
         match vm.run_repl(&input) {
             Ok(v) => show(&vm, &v),
             Err(e) => {
@@ -2170,7 +2170,7 @@ fn repl_let_patterns_define_globals() {
             crate::ast::Location::new(0, 1, 1),
             crate::ast::Location::new(0, 1, 1),
         );
-        let input = compiler.repl(&stmt, &types, span);
+        let input = compiler.repl(&stmt, &types, span).unwrap();
         let v = vm.run_repl(&input).unwrap();
         show(&vm, &v)
     };
@@ -3081,6 +3081,50 @@ fn tcp_reads_a_number_of_bytes() {
 }
 
 #[test]
+fn tcp_reads_bytes_that_cut_a_character_in_two() {
+    // "é" is [195, 169]: read as bytes, one at a time, it can be put back
+    // together. Text and bytes read from the same buffer.
+    assert_eq!(
+        std_value(
+            "import std::io;
+             import std::net;
+             import std::task;
+             fn serve(conn: net::TcpStream) -> Result<(List<int>, List<int>, str, List<int>), io::Error> {
+                 let a = conn.read_bytes(2)?;
+                 let b = conn.read_bytes(1)?;
+                 let line = conn.read_line()?.unwrap_or(\"?\");
+                 let rest = conn.read_bytes(10)?;
+                 Ok((a, b, line, rest))
+             }
+             fn main() -> (str, str, List<int>) {
+                 let listener = match net::listen(\"127.0.0.1:0\") { Ok(l) => l, Err(e) => { return (e.message, \"\", []); } };
+                 task::scope(fn(s) {
+                     let server = s.spawn(fn() {
+                         match listener.accept() {
+                             Ok(conn) => serve(conn),
+                             Err(e) => Err(e),
+                         }
+                     });
+                     match net::connect(listener.local_addr()) {
+                         Ok(c) => {
+                             let _ = c.write(\"x\u{e9}ok\\r\\n\");
+                             let _ = c.close_write();
+                         }
+                         Err(e) => println(e.message),
+                     }
+                     match server.join() {
+                         Ok((a, b, line, rest)) =>
+                             (str::from_utf8(a.concat(b)).unwrap_or(\"bad\"), line, rest),
+                         Err(e) => (e.message, \"\", []),
+                     }
+                 })
+             }"
+        ),
+        "(\"x\u{e9}\", \"ok\", [])"
+    );
+}
+
+#[test]
 fn tcp_timeouts_stop_calls_that_wait_too_long() {
     // A client that trickles bytes without a newline can't hold a read
     // forever: the limit is on the whole call. What did arrive isn't lost,
@@ -3976,4 +4020,75 @@ fn a_task_woken_then_cancelled_forgets_what_woke_it() {
         result.map(|v| vm.heap.repr(&v)).unwrap(),
         "(Some(99), true)"
     );
+}
+
+/// The message of the error that stops `src` being compiled.
+fn compile_error(src: &str) -> String {
+    let root: std::collections::HashMap<String, String> =
+        [("main.aja".to_string(), src.to_string())].into();
+    match crate::module::build(&root, "main.aja").1 {
+        Ok(_) => panic!("the program compiled"),
+        Err(mut errors) => errors.swap_remove(0).message,
+    }
+}
+
+#[test]
+fn a_function_that_needs_too_many_registers_is_an_error() {
+    let items = vec!["1"; 70_000].join(", ");
+    let msg = compile_error(&format!("fn main() -> int {{ [{items}].len() }}"));
+    assert!(msg.starts_with("this function is too large"), "{msg}");
+}
+
+#[test]
+fn a_method_call_with_255_arguments_is_an_error() {
+    // The value it is called on makes 256, one more than a call can pass.
+    let params: Vec<String> = (0..255).map(|i| format!("a{i}: int")).collect();
+    let args = vec!["1"; 255].join(", ");
+    let src = format!(
+        "struct P {{ x: int }}
+         impl P {{ fn f(self, {}) -> int {{ self.x }} }}
+         fn main() -> int {{ P {{ x: 1 }}.f({args}) }}",
+        params.join(", ")
+    );
+    let msg = compile_error(&src);
+    assert!(
+        msg.starts_with("a method call cannot have more than 254"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn a_value_holding_nan_does_not_equal_itself() {
+    // As `nan == nan` is false, so it is for what holds one, compared with
+    // itself or with a copy.
+    let (vm, result) = run_vm(
+        "struct P { x: float }
+         fn main() -> List<bool> {
+             let nan = 0.0 / 0.0;
+             let p = P { x: nan };
+             let q = P { x: nan };
+             let xs = [nan];
+             let one = P { x: 1.0 };
+             [nan == nan, p == p, p == q, xs == xs, (1, nan) == (1, nan), one == one]
+         }",
+    );
+    assert_eq!(
+        result.map(|v| vm.heap.repr(&v)).unwrap(),
+        "[false, false, false, false, false, true]"
+    );
+}
+
+#[test]
+fn the_remainder_of_the_least_int_by_minus_one_is_zero() {
+    let (vm, result) =
+        run_vm("fn main() -> int { let least = -9223372036854775807 - 1; least % -1 }");
+    assert_eq!(result.map(|v| vm.heap.repr(&v)).unwrap(), "0");
+    let msg = failure("fn main() -> int { let least = -9223372036854775807 - 1; least / -1 }");
+    assert!(msg.starts_with("integer overflow in '/'"), "{msg}");
+}
+
+#[test]
+fn native_functions_keep_strings_within_the_longest() {
+    let msg = failure("fn main() -> int { \"ab\".repeat(1_500_000_000).len() }");
+    assert!(msg.starts_with("'repeat' would make a string"), "{msg}");
 }

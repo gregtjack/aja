@@ -57,6 +57,9 @@ pub struct Compiler {
     /// Native functions declared since the last unit was finished, with
     /// their slots, for the VM to define.
     new_natives: Vec<(u32, Id)>,
+    /// The first thing in the unit being compiled that the bytecode can't
+    /// express, if any: what was compiled is then not for running.
+    error: Option<Diagnostic>,
 }
 
 /// How a struct or enum is laid out at runtime.
@@ -113,6 +116,7 @@ impl Compiler {
             new_literals: Vec::new(),
             new_functions: Vec::new(),
             new_natives: Vec::new(),
+            error: None,
         };
         for b in BUILTINS {
             compiler.define_global(b.name.into());
@@ -316,6 +320,9 @@ impl Compiler {
         all.extend(functions);
         let functions = all;
 
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
         let main = main.ok_or_else(|| {
             Diagnostic::new("no 'main' function found; add `fn main() { ... }` as the entry point")
         })?;
@@ -331,16 +338,24 @@ impl Compiler {
 
     /// Compile one REPL input as a function that takes no arguments and
     /// returns the input's value. Its top-level `let` defines a global.
-    pub fn repl(&mut self, stmt: &Statement, types: &Types, span: Span) -> ReplInput {
+    pub fn repl(
+        &mut self,
+        stmt: &Statement,
+        types: &Types,
+        span: Span,
+    ) -> Result<ReplInput, Diagnostic> {
         let captured = captured_locals(&[], stmt, true);
         let mut fc = FnCompiler::new(self, types, &captured, true);
         let proto = Rc::new(fc.function(None, &[], None, stmt, span));
-        ReplInput {
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
+        Ok(ReplInput {
             proto,
             literals: std::mem::take(&mut self.new_literals),
             functions: std::mem::take(&mut self.new_functions),
             natives: std::mem::take(&mut self.new_natives),
-        }
+        })
     }
 }
 
@@ -628,12 +643,35 @@ impl<'a> FnCompiler<'a> {
     fn alloc(&mut self) -> Reg {
         let f = self.cur();
         let reg = f.next;
-        f.next = f
-            .next
-            .checked_add(1)
-            .expect("a function needs more registers than the VM has");
+        match f.next.checked_add(1) {
+            Some(next) => f.next = next,
+            // Out of registers: the last one is used again, which makes
+            // code that is wrong, and is reported instead of run.
+            None => {
+                let span = f.span;
+                self.fail(
+                    span,
+                    format!(
+                        "this function is too large: it needs more than {} values at once",
+                        Reg::MAX
+                    ),
+                    "split it into smaller functions, or build a long list in parts",
+                );
+            }
+        }
+        let f = self.cur();
         f.max = f.max.max(f.next);
         reg
+    }
+
+    /// Note that the code at `span` can't be compiled, unless something
+    /// before it couldn't be either.
+    fn fail(&mut self, span: Span, message: String, help: &str) {
+        self.compiler.error.get_or_insert_with(|| {
+            Diagnostic::new(message)
+                .with_span(span.start, span.end)
+                .with_help(Some(help.into()))
+        });
     }
 
     /// `n` consecutive registers; the first one.
@@ -1568,7 +1606,16 @@ impl<'a> FnCompiler<'a> {
                         self.emit(Op::GetGlobal { dst: base, index }, callee.span);
                         let r = self.alloc();
                         self.expr(obj, r);
-                        argc += 1;
+                        // The value the method is called on is an argument
+                        // too, and the parser allows 255 without it.
+                        argc = argc.checked_add(1).unwrap_or_else(|| {
+                            self.fail(
+                                span,
+                                "a method call cannot have more than 254 arguments".to_string(),
+                                "pass some of them together, in a struct or a list",
+                            );
+                            argc
+                        });
                     }
                     _ => self.expr(callee, base),
                 }

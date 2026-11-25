@@ -27,7 +27,7 @@ From writing [examples/net/http_server.aja](../examples/net/http_server.aja).
 
 ## Found since
 
-- [ ] No hex literals: `0x1F600` doesn't lex
+- [x] No hex literals: `0x1F600` doesn't lex
 - [ ] `var` is a keyword, so `std::env` has `get` where Rust has `var`
 - [ ] `return`/`break`/`continue` still can't be operands outside a match
       arm (`x.unwrap_or(return 0)`)
@@ -37,3 +37,22 @@ From writing [examples/net/http_server.aja](../examples/net/http_server.aja).
 
 - [x] Tests only run top-level examples, so `examples/net/*.aja` is never
       even type-checked
+
+## Since `std::http`
+
+The server's parsing moved into [`std::http`](../src/stdlib/http.aja),
+with a client. It needed:
+
+- [x] `stream.read_bytes(n)`, since a chunk of a chunked body can end
+      partway through a character
+- [x] `io::ErrorKind::InvalidInput`, for a URL the client can't use
+
+Still to do:
+
+- [ ] TLS, for `https://`
+- [ ] A bytes type, so bodies needn't be UTF-8 text (images, gzip)
+- [ ] Streaming bodies, in both directions, rather than whole strings
+- [ ] Connection pooling in the client, and following redirects
+- [ ] A timeout on connecting, which the client needs too
+- [ ] Calendar time, for a `Date` header
+- [ ] Closing a server gracefully: today it cancels the requests in flight

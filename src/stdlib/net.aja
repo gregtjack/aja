@@ -139,6 +139,15 @@ impl TcpStream {
         io::checked(native::tcp_read(self.id, n))
     }
 
+    // The next `n` bytes, as bytes, waiting until they have all come. Gives
+    // fewer only if the other end finishes sending first, and none once
+    // everything is read. For data that may not be text, or text cut into
+    // pieces that may split a character, as HTTP's chunked bodies are:
+    // join the pieces, then `str::from_utf8` them.
+    pub fn read_bytes(self, n: int) -> Result<List<int>, io::Error> {
+        io::checked(native::tcp_read_bytes(self.id, n))
+    }
+
     // Send `text`, returning once all of it is sent.
     pub fn write(self, text: str) -> Result<void, io::Error> {
         io::checked(native::tcp_write(self.id, text))

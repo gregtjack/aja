@@ -12,7 +12,7 @@ use std::{
 
 use super::{
     hamt::Hamt,
-    heap::{Gc, Heap},
+    heap::{Gc, Heap, MAX_STR_LEN},
     sorted::Tree,
     value::Value,
 };
@@ -46,6 +46,7 @@ const ADDR_IN_USE: i64 = 13;
 const ADDR_NOT_AVAILABLE: i64 = 14;
 pub(super) const NOT_CONNECTED: i64 = 15;
 pub(super) const TIMED_OUT: i64 = 16;
+const INVALID_INPUT: i64 = 17;
 
 /// The arguments the program was run with, after its file, for
 /// `std::env::args`. Unset (no arguments) in the REPL and in tests.
@@ -110,6 +111,8 @@ pub(super) fn record_as<T: Default>(
                 io::ErrorKind::AddrInUse => ADDR_IN_USE,
                 io::ErrorKind::AddrNotAvailable => ADDR_NOT_AVAILABLE,
                 io::ErrorKind::NotConnected => NOT_CONNECTED,
+                io::ErrorKind::TimedOut => TIMED_OUT,
+                io::ErrorKind::InvalidInput => INVALID_INPUT,
                 _ => OTHER,
             };
             set_status(code, message(describe(&e)));
@@ -194,11 +197,6 @@ fn read_dir(path: &str) -> io::Result<Vec<String>> {
 fn lines(text: &str) -> Vec<String> {
     text.lines().map(str::to_string).collect()
 }
-
-/// The longest string a native function will make, in bytes, so a
-/// mistake like `"x".repeat(n)` with a huge `n` stops the program instead
-/// of exhausting memory.
-const MAX_STR_BYTES: usize = 1 << 32;
 
 /// The string argument of a string method that takes no others.
 fn str_arg<'h>(heap: &'h Heap, name: &str, args: &[Value]) -> Result<&'h str, String> {
@@ -304,9 +302,12 @@ fn byte_list(heap: &Heap, name: &str, args: &[Value]) -> Result<Option<Vec<u8>>,
     Ok(Some(bytes))
 }
 
-fn str_list(heap: &mut Heap, items: Vec<String>) -> Value {
-    let list: super::list::List = items.into_iter().map(|s| str_value(heap, s)).collect();
-    Value::List(heap.alloc_list(list))
+fn str_list(heap: &mut Heap, items: Vec<String>) -> Result<Value, String> {
+    let list = items
+        .into_iter()
+        .map(|s| str_value(heap, s))
+        .collect::<Result<super::list::List, _>>()?;
+    Ok(Value::List(heap.alloc_list(list)))
 }
 
 /// The arguments of a file system intrinsic that takes one path.
@@ -407,8 +408,15 @@ fn flush(fd: i64) -> io::Result<()> {
 }
 
 /// A string for a native function to return.
-pub(super) fn str_value(heap: &mut Heap, s: String) -> Value {
-    Value::Str(heap.alloc_str(s.into_boxed_str()))
+pub(super) fn str_value(heap: &mut Heap, s: String) -> Result<Value, String> {
+    if s.len() > MAX_STR_LEN {
+        return Err(format!(
+            "string too long: this would make a string of {} bytes, but the most is {}",
+            s.len(),
+            MAX_STR_LEN
+        ));
+    }
+    Ok(Value::Str(heap.alloc_str(s.into_boxed_str())))
 }
 
 /// The functions the VM implements, by name: the built-ins, and the
@@ -440,11 +448,11 @@ static NATIVES: &[(&str, NativeFn)] = &[
     }),
     ("std::native::error_message", |heap, _| {
         let message = STATUS.with(|s| s.borrow().1.clone());
-        Ok(str_value(heap, message))
+        str_value(heap, message)
     }),
     ("std::native::args", |heap, _| {
         let args = ARGS.get().cloned().unwrap_or_default();
-        Ok(str_list(heap, args))
+        str_list(heap, args)
     }),
     ("std::native::has_env", |heap, args| {
         let name = str_arg(heap, "has_env", args)?;
@@ -453,7 +461,7 @@ static NATIVES: &[(&str, NativeFn)] = &[
     ("std::native::env_var", |heap, args| {
         let name = str_arg(heap, "env_var", args)?;
         let value = env_var(name).unwrap_or_default();
-        Ok(str_value(heap, value))
+        str_value(heap, value)
     }),
     ("std::native::read_line", |heap, args| {
         let [Value::Int(fd)] = args else {
@@ -466,14 +474,14 @@ static NATIVES: &[(&str, NativeFn)] = &[
             }
             result => record(result).unwrap_or_default(),
         };
-        Ok(str_value(heap, line))
+        str_value(heap, line)
     }),
     ("std::native::read_all", |heap, args| {
         let [Value::Int(fd)] = args else {
             return Err(bad_args("read_all", args));
         };
         let text = record(read_all(*fd));
-        Ok(str_value(heap, text))
+        str_value(heap, text)
     }),
     ("std::native::write", |heap, args| {
         let [Value::Int(fd), Value::Str(text)] = args else {
@@ -516,12 +524,12 @@ static NATIVES: &[(&str, NativeFn)] = &[
     ("std::native::read_file", |heap, args| {
         let path = path_arg(heap, "read_file", args)?;
         let text = record_fs(fs::read_to_string(path), "read", path);
-        Ok(str_value(heap, text))
+        str_value(heap, text)
     }),
     ("std::native::read_file_lines", |heap, args| {
         let path = path_arg(heap, "read_file_lines", args)?;
         let text = record_fs(fs::read_to_string(path), "read", path);
-        Ok(str_list(heap, lines(&text)))
+        str_list(heap, lines(&text))
     }),
     ("std::native::write_file", |heap, args| {
         let [Value::Str(path), Value::Str(text), Value::Bool(append)] = args else {
@@ -534,7 +542,7 @@ static NATIVES: &[(&str, NativeFn)] = &[
     ("std::native::read_dir", |heap, args| {
         let path = path_arg(heap, "read_dir", args)?;
         let names = record_fs(read_dir(path), "read the directory", path);
-        Ok(str_list(heap, names))
+        str_list(heap, names)
     }),
     ("std::native::create_dir", |heap, args| {
         let [Value::Str(path), Value::Bool(all)] = args else {
@@ -600,7 +608,7 @@ static NATIVES: &[(&str, NativeFn)] = &[
     ("str::from_utf8_unchecked", |heap, args| {
         let bytes = byte_list(heap, "str::from_utf8_unchecked", args)?;
         match bytes.map(String::from_utf8) {
-            Some(Ok(s)) => Ok(str_value(heap, s)),
+            Some(Ok(s)) => str_value(heap, s),
             _ => Err("str::from_utf8_unchecked: the bytes aren't UTF-8".to_string()),
         }
     }),
@@ -629,12 +637,12 @@ static NATIVES: &[(&str, NativeFn)] = &[
         };
         let s = heap.str(*s);
         let part = char_slice(s, *start, *end)?.to_string();
-        Ok(str_value(heap, part))
+        str_value(heap, part)
     }),
     ("str::chars", |heap, args| {
         let s = str_arg(heap, "chars", args)?;
         let chars = s.chars().map(String::from).collect();
-        Ok(str_list(heap, chars))
+        str_list(heap, chars)
     }),
     ("str::split", |heap, args| {
         let (s, sep) = two_strs(heap, "split", args)?;
@@ -643,37 +651,37 @@ static NATIVES: &[(&str, NativeFn)] = &[
         } else {
             s.split(sep).map(str::to_string).collect()
         };
-        Ok(str_list(heap, parts))
+        str_list(heap, parts)
     }),
     ("str::lines", |heap, args| {
         let s = str_arg(heap, "lines", args)?;
         let lines = lines(s);
-        Ok(str_list(heap, lines))
+        str_list(heap, lines)
     }),
     ("str::words", |heap, args| {
         let s = str_arg(heap, "words", args)?;
         let words = s.split_whitespace().map(str::to_string).collect();
-        Ok(str_list(heap, words))
+        str_list(heap, words)
     }),
     ("str::trim", |heap, args| {
         let s = str_arg(heap, "trim", args)?.trim().to_string();
-        Ok(str_value(heap, s))
+        str_value(heap, s)
     }),
     ("str::trim_start", |heap, args| {
         let s = str_arg(heap, "trim_start", args)?.trim_start().to_string();
-        Ok(str_value(heap, s))
+        str_value(heap, s)
     }),
     ("str::trim_end", |heap, args| {
         let s = str_arg(heap, "trim_end", args)?.trim_end().to_string();
-        Ok(str_value(heap, s))
+        str_value(heap, s)
     }),
     ("str::to_upper", |heap, args| {
         let s = str_arg(heap, "to_upper", args)?.to_uppercase();
-        Ok(str_value(heap, s))
+        str_value(heap, s)
     }),
     ("str::to_lower", |heap, args| {
         let s = str_arg(heap, "to_lower", args)?.to_lowercase();
-        Ok(str_value(heap, s))
+        str_value(heap, s)
     }),
     ("str::replace", |heap, args| {
         let [Value::Str(s), Value::Str(from), Value::Str(to)] = args else {
@@ -685,7 +693,7 @@ static NATIVES: &[(&str, NativeFn)] = &[
         } else {
             s.replace(from, to)
         };
-        Ok(str_value(heap, out))
+        str_value(heap, out)
     }),
     ("str::repeat", |heap, args| {
         let [Value::Str(s), Value::Int(count)] = args else {
@@ -693,14 +701,14 @@ static NATIVES: &[(&str, NativeFn)] = &[
         };
         let s = heap.str(*s);
         let count = (*count).max(0) as usize;
-        if s.len().checked_mul(count).is_none_or(|n| n > MAX_STR_BYTES) {
+        if s.len().checked_mul(count).is_none_or(|n| n > MAX_STR_LEN) {
             return Err(format!(
                 "'repeat' would make a string of {count} copies of {} bytes, which is too long",
                 s.len()
             ));
         }
         let out = s.repeat(count);
-        Ok(str_value(heap, out))
+        str_value(heap, out)
     }),
     ("str::join", |heap, args| {
         let [Value::Str(sep), Value::List(parts)] = args else {
@@ -716,7 +724,7 @@ static NATIVES: &[(&str, NativeFn)] = &[
             };
             out.push_str(heap.str(*part));
         }
-        Ok(str_value(heap, out))
+        str_value(heap, out)
     }),
     ("str::is_int", |heap, args| {
         let s = str_arg(heap, "is_int", args)?;
@@ -743,7 +751,7 @@ static NATIVES: &[(&str, NativeFn)] = &[
         let [Value::Int(n)] = args else {
             return Err(bad_args("int::to_str", args));
         };
-        Ok(str_value(heap, n.to_string()))
+        str_value(heap, n.to_string())
     }),
     ("int::to_float", |_, args| {
         let [Value::Int(n)] = args else {
@@ -762,7 +770,7 @@ static NATIVES: &[(&str, NativeFn)] = &[
             return Err(bad_args("int::to_char_unchecked", args));
         };
         match code_point(*n) {
-            Some(c) => Ok(str_value(heap, c.to_string())),
+            Some(c) => str_value(heap, c.to_string()),
             None => Err(format!("int::to_char_unchecked: {n} isn't a code point")),
         }
     }),
@@ -776,7 +784,7 @@ static NATIVES: &[(&str, NativeFn)] = &[
         let [Value::Float(x)] = args else {
             return Err(bad_args("float::to_str", args));
         };
-        Ok(str_value(heap, format!("{x:?}")))
+        str_value(heap, format!("{x:?}"))
     }),
     ("float::to_int", |_, args| {
         let [Value::Float(x)] = args else {

@@ -208,7 +208,14 @@ impl Repl {
             Ok(types) => types,
             Err(errors) => return report_type_errors(&errors, history, "<repl>"),
         };
-        let input = self.compiler.repl(stmt, &types, input_span(history));
+        let input = match self.compiler.repl(stmt, &types, input_span(history)) {
+            Ok(input) => input,
+            Err(err) => {
+                report(&err, history, "<repl>");
+                (self.checker, self.compiler) = saved;
+                return;
+            }
+        };
         match self.vm.run_repl(&input) {
             Ok(Value::Void) => {}
             Ok(value) => println!("{}", self.vm.heap.repr(&value)),

@@ -632,7 +632,7 @@ implementation fails the tests and stops the VM at startup. Built-ins named
 
 The standard library is written in Aja (`src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
-it has `std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::net`, `std::task`, and `std::time`.
+it has `std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::http`, `std::net`, `std::task`, and `std::time`.
 
 #### `std::channel`
 
@@ -796,7 +796,7 @@ fn main() -> Result<void, io::Error> {
 | `reader.read_to_string()`          | `Result<str, Error>`: everything left |
 | `writer.write(text)`, `writer.write_line(text)` | `Result<void, Error>` |
 | `writer.flush()`                   | Write out buffered output now |
-| `Error { kind, message }`, `ErrorKind` | Why an operation failed: `NotFound`, `PermissionDenied`, `InvalidData`, `BrokenPipe`, `AlreadyExists`, `NotADirectory`, `IsADirectory`, `DirectoryNotEmpty`, or `Other` |
+| `Error { kind, message }`, `ErrorKind` | Why an operation failed: `NotFound`, `PermissionDenied`, `InvalidData`, `BrokenPipe`, `AlreadyExists`, `NotADirectory`, `IsADirectory`, `DirectoryNotEmpty`, `InvalidInput`, the network's kinds (see [`std::net`](#stdnet)), or `Other` |
 
 - Everything that can fail returns a `Result`. **`main` can return a
   `Result`**, so `?` works there: if it returns an `Err`, the program prints
@@ -857,6 +857,63 @@ fn main() -> Result<void, io::Error> {
 - To add a module, write `src/stdlib/<name>.aja` and list it in `MODULES`
   in `src/stdlib/mod.rs`.
 
+#### `std::http`
+
+```rust
+import std::http::{Request, Response};
+import std::http;
+import std::io;
+import std::net;
+
+fn main() -> Result<void, io::Error> {
+    let listener = net::listen("127.0.0.1:8080")?;
+    http::serve(listener, fn(req: Request) -> Response {
+        match (req.method, req.path) {
+            ("GET", "/hello") => {
+                let name = req.query.get("name").unwrap_or("stranger");
+                Response::text(200, "Hello, {name}!\n")
+            }
+            ("POST", "/echo") => Response::text(200, req.body),
+            _ => Response::text(404, "no page at {req.path}\n"),
+        }
+    });
+    Ok(void)
+}
+```
+
+| `std::http` | Does |
+|-------------|------|
+| `serve(listener, handler)` | Answer each request with `handler: (Request) -> Response`, a task per connection; returns once the listener is closed |
+| `serve_with(listener, options, handler)` | The same, with `Options { timeout, max_body }` (`Options::default()`: 10 seconds, 1 MB) |
+| `Request { method, path, query, version, headers, body, peer }` | `path` and `query` are decoded; `headers` is a `Map` by lower-case name; `req.header(name)` matches any case |
+| `Response::text(status, body)`, `html(status, body)`, `new(status, body)`, `redirect(to)` | A response; `res.with_header(name, value)` adds a header, `res.header(name)` reads one |
+| `get(url)`, `post(url, content_type, body)`, `send(method, url, headers, body)` | `Result<Response, io::Error>`: a request to an `http://` URL, whatever the status |
+| `reason(status)` | `"Not Found"` for 404 |
+| `percent_encode(s)`, `percent_decode(s)`, `parse_query(q)`, `encode_query(pairs)` | URL encoding, for queries, paths, and posted forms |
+
+- **The handler runs in each connection's task**, so, as for any task, it
+  can't use a `var` of the code that called `serve`. To share state, one
+  task owns it and the handler sends it requests over a channel (see
+  [examples/net/http_server.aja](examples/net/http_server.aja)).
+- **The server handles the protocol:** keep-alive and pipelined requests,
+  `Content-Length` and chunked bodies, `Expect: 100-continue`, and `HEAD`
+  (the handler sees `"HEAD"`, and the body it gives isn't sent). It
+  answers requests it can't read itself: 400 for malformed ones and text
+  that isn't UTF-8, 408 when a read takes longer than the timeout, 413
+  past `max_body`, 431, 501 for transfer encodings other than chunked,
+  and 505 for versions other than 1.0 and 1.1. A connection that sends
+  nothing for the timeout is closed without one.
+- **It sets `Content-Length` and `Connection`**, ignoring them among the
+  handler's headers, and turns line breaks in header names and values
+  into spaces, so a value can't add a header.
+- **To stop a server**, close its listener from another task: `serve`
+  stops accepting, cancels the connections still open, and returns.
+- **The client** sends `Connection: close` and reads the response to its
+  end, with 30 seconds for each read and write. It doesn't follow
+  redirects. A URL it can't use fails with `InvalidInput`, and a response
+  it can't read with `InvalidData`. There is no TLS, so no `https://`.
+- Bodies are text, which must be UTF-8, until there is a bytes type.
+
 #### `std::net`
 
 ```rust
@@ -893,6 +950,7 @@ fn main() -> Result<void, io::Error> {
 | `listener.accept()` | `Result<TcpStream, io::Error>`, waiting for the next connection |
 | `stream.read_line()`, `stream.lines()`, `stream.read_to_string()` | As on `io::Reader`; the end is when the other end finishes sending |
 | `stream.read(n)` | `Result<str, io::Error>`: the next `n` bytes, waiting for all of them (fewer only if the other end finishes, `""` at the end), for a length known in advance such as an HTTP `Content-Length` |
+| `stream.read_bytes(n)` | `Result<List<int>, io::Error>`: the same, as bytes, for data that may cut a character in two (HTTP's chunked bodies); `str::from_utf8` the pieces once joined |
 | `stream.write(text)`, `stream.write_line(text)` | `Result<void, io::Error>`, returning once all of it is sent |
 | `stream.close_write()` | Tell the other end nothing more is coming, while still reading |
 | `set_timeout(Option<Duration>)` | On both: the longest each accept, read, or write may wait; past it, it fails with `TimedOut` |
@@ -908,7 +966,8 @@ fn main() -> Result<void, io::Error> {
   line or character that arrives in pieces comes out whole. Text that
   isn't UTF-8 fails with `InvalidData`, but is taken off the stream all
   the same, so the connection can still be used (to answer with an
-  error, say). Bytes wait for a bytes type.
+  error, say). `read_bytes` reads bytes, as a `List<int>`, until there
+  is a bytes type.
 - Errors are `io::Error`s naming the address, with the kinds
   `ConnectionRefused`, `ConnectionReset`, `AddrInUse`, `AddrNotAvailable`,
   `NotConnected` (a closed socket), and `TimedOut`. Closing a socket wakes
@@ -1115,7 +1174,7 @@ with `Eq`, `Hash`, and `Ord` bounds; ordering with `<` and `compare` on any `Ord
 `Result`, and `Ordering` in the prelude, and `?`; methods and associated functions in `impl` blocks;
 sorting and searching lists;
 modules, with `import` and `pub`; the start of the standard library
-(`std::channel`, `std::collections`, `std::io`, `std::fs`, `std::net`, `std::task`, `std::time`); template strings, and methods on strings and
+(`std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::http`, `std::net`, `std::task`, `std::time`); template strings, and methods on strings and
 numbers; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 

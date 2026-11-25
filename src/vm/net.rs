@@ -42,6 +42,7 @@ pub enum Op {
     ReadLine,
     ReadAll,
     Read,
+    ReadBytes,
     Write,
     CloseWrite,
     Close,
@@ -51,13 +52,14 @@ pub enum Op {
 }
 
 impl Op {
-    pub const ALL: [(Op, &'static str); 12] = [
+    pub const ALL: [(Op, &'static str); 13] = [
         (Op::Listen, "std::native::tcp_listen"),
         (Op::Accept, "std::native::tcp_accept"),
         (Op::Connect, "std::native::tcp_connect"),
         (Op::ReadLine, "std::native::tcp_read_line"),
         (Op::ReadAll, "std::native::tcp_read_all"),
         (Op::Read, "std::native::tcp_read"),
+        (Op::ReadBytes, "std::native::tcp_read_bytes"),
         (Op::Write, "std::native::tcp_write"),
         (Op::CloseWrite, "std::native::tcp_close_write"),
         (Op::Close, "std::native::tcp_close"),
@@ -69,7 +71,7 @@ impl Op {
     /// How many arguments it takes.
     pub fn arity(self) -> usize {
         match self {
-            Op::Write | Op::Read | Op::SetTimeout => 2,
+            Op::Write | Op::Read | Op::ReadBytes | Op::SetTimeout => 2,
             _ => 1,
         }
     }
@@ -116,6 +118,8 @@ enum Until {
     Line,
     End,
     Bytes(usize),
+    /// The next `n` bytes, as bytes rather than text.
+    Raw(usize),
 }
 
 /// A connect's task and ticket, and how it went.
@@ -308,16 +312,18 @@ impl Net {
                     None => Done::Int(0),
                 },
             },
-            Op::ReadLine | Op::ReadAll | Op::Read => {
+            Op::ReadLine | Op::ReadAll | Op::Read | Op::ReadBytes => {
                 let until = match op {
                     Op::ReadLine => Until::Line,
                     Op::ReadAll => Until::End,
-                    _ => Until::Bytes(int(1).max(0) as usize),
+                    Op::Read => Until::Bytes(int(1).max(0) as usize),
+                    _ => Until::Raw(int(1).max(0) as usize),
                 };
                 match self.read(int(0), until) {
-                    Step::Done(text) => Done::Str(text),
+                    Step::Done(done) => done,
                     Step::Wait => match self.wait_on(task, int(0), true) {
                         Some(wait) => return wait,
+                        None if matches!(until, Until::Raw(_)) => Done::Bytes(Vec::new()),
                         None => Done::Str(String::new()),
                     },
                 }
@@ -365,7 +371,15 @@ impl Net {
         self.deadlines.remove(&task);
         Outcome::Value(match result {
             Done::Int(n) => Value::Int(n),
-            Done::Str(s) => str_value(heap, s),
+            Done::Str(s) => match str_value(heap, s) {
+                Ok(v) => v,
+                Err(msg) => return Outcome::Error(msg),
+            },
+            Done::Bytes(bytes) => {
+                let list: super::list::List =
+                    bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
+                Value::List(heap.alloc_list(list))
+            }
             Done::Void => Value::Void,
         })
     }
@@ -554,10 +568,10 @@ impl Net {
 
     /// What `until` asks for from stream `id`: the next line, without its
     /// line ending; everything up to the end; or the next `n` bytes (fewer
-    /// only if the stream ends first). Reading a line or to the end with
-    /// nothing left sets the status to `END_OF_INPUT`; reading bytes there
-    /// gives "".
-    fn read(&mut self, id: i64, until: Until) -> Step<String> {
+    /// only if the stream ends first), as text or as bytes. Reading a line
+    /// or to the end with nothing left sets the status to `END_OF_INPUT`;
+    /// reading bytes there gives "" or no bytes.
+    fn read(&mut self, id: i64, until: Until) -> Step<Done> {
         let line = until == Until::Line;
         let Some(Socket {
             kind: Kind::Stream { tcp, input, eof },
@@ -565,22 +579,29 @@ impl Net {
             ..
         }) = self.sockets.get_mut(&id)
         else {
-            return Step::Done(not_connected("read from"));
+            return Step::Done(match until {
+                Until::Raw(_) => Done::Bytes(not_connected("read from")),
+                _ => Done::Str(not_connected("read from")),
+            });
         };
         loop {
-            if let Until::Bytes(n) = until {
+            if let Until::Bytes(n) | Until::Raw(n) = until {
                 if input.len() >= n || *eof {
                     let rest = input.split_off(n.min(input.len()));
                     let taken = std::mem::replace(input, rest);
+                    if let Until::Raw(_) = until {
+                        set_status(OK, String::new());
+                        return Step::Done(Done::Bytes(taken));
+                    }
                     let result = String::from_utf8(taken).map_err(|_| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
                             "the text isn't UTF-8, or a character was cut in two",
                         )
                     });
-                    return Step::Done(record_as(result, |e| {
+                    return Step::Done(Done::Str(record_as(result, |e| {
                         format!("could not read from '{name}': {e}")
-                    }));
+                    })));
                 }
             }
             let found = if line {
@@ -588,10 +609,10 @@ impl Net {
             } else {
                 None
             };
-            if !matches!(until, Until::Bytes(_)) && (found.is_some() || *eof) {
+            if matches!(until, Until::Line | Until::End) && (found.is_some() || *eof) {
                 if input.is_empty() && found.is_none() {
                     set_status(END_OF_INPUT, String::new());
-                    return Step::Done(String::new());
+                    return Step::Done(Done::Str(String::new()));
                 }
                 let mut bytes: Vec<u8> = match found {
                     Some(at) => {
@@ -611,9 +632,9 @@ impl Net {
                 let result = String::from_utf8(bytes).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "the text isn't UTF-8")
                 });
-                return Step::Done(record_as(result, |e| {
+                return Step::Done(Done::Str(record_as(result, |e| {
                     format!("could not read from '{name}': {e}")
-                }));
+                })));
             }
             let mut buf = [0; 8192];
             match tcp.read(&mut buf) {
@@ -622,9 +643,11 @@ impl Net {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Step::Wait,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => {
-                    return Step::Done(record_as(Err(e), |e| {
-                        format!("could not read from '{name}': {e}")
-                    }))
+                    let message = |e| format!("could not read from '{name}': {e}");
+                    return Step::Done(match until {
+                        Until::Raw(_) => Done::Bytes(record_as(Err(e), message)),
+                        _ => Done::Str(record_as(Err(e), message)),
+                    });
                 }
             }
         }
@@ -740,6 +763,7 @@ enum Step<T> {
 enum Done {
     Int(i64),
     Str(String),
+    Bytes(Vec<u8>),
     Void,
 }
 

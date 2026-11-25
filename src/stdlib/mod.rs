@@ -12,6 +12,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("collections", include_str!("collections.aja")),
     ("env", include_str!("env.aja")),
     ("fs", include_str!("fs.aja")),
+    ("http", include_str!("http.aja")),
     ("io", include_str!("io.aja")),
     (NATIVE, include_str!("native.aja")),
     ("net", include_str!("net.aja")),
