@@ -771,6 +771,14 @@ impl Checker {
         }
         let ctx = self.fns.last().unwrap();
         let err = match (&ctx.name, ctx.ret_declared) {
+            (Some(name), false) if crate::ast::test_of(name).is_some() => TypeError::new(
+                format!(
+                    "mismatched types: {} has no return type, so it returns void, but this is {f}",
+                    describe_fn(name)
+                ),
+                span,
+            )
+            .help("a test gives no value: put a `;` after this to leave it unused"),
             (Some(name), false) => {
                 let mut err = TypeError::new(
                     format!(
@@ -785,11 +793,16 @@ impl Checker {
                 err
             }
             (Some(name), true) => TypeError::new(
-                format!("mismatched types: function '{name}' is declared to return {e}, but this is {f}"),
+                format!(
+                    "mismatched types: {} is declared to return {e}, but this is {f}",
+                    describe_fn(name)
+                ),
                 span,
             ),
             (None, true) => TypeError::new(
-                format!("mismatched types: this closure is declared to return {e}, but this is {f}"),
+                format!(
+                    "mismatched types: this closure is declared to return {e}, but this is {f}"
+                ),
                 span,
             ),
             (None, false) => TypeError::new(
@@ -1375,7 +1388,7 @@ impl Checker {
             return value;
         };
         let what = match &ctx.name {
-            Some(name) => format!("function '{name}'"),
+            Some(name) => describe_fn(name),
             None => "this closure".to_string(),
         };
         let kind = match on {
@@ -1423,7 +1436,23 @@ impl Checker {
                     span,
                 );
                 let other_kind = matches!(&ret, Ty::Named(n, _) if n == "Result" || n == "Option");
+                let in_test = ctx
+                    .name
+                    .as_ref()
+                    .is_some_and(|n| crate::ast::test_of(n).is_some());
                 err = match (&ctx.name, &error) {
+                    (_, None) if in_test => err.help(
+                        "turn the None into an error the test fails with, as in \
+                         `.ok_or(\"no value\")?`, in a test declared `-> Result<void, str>`",
+                    ),
+                    (_, Some(e)) if in_test && ret == Ty::Void => err.help(format!(
+                        "declare the test `-> Result<void, {}>`, so an error fails it, \
+                         and end it with `Ok(void)`",
+                        self.show_example(e)
+                    )),
+                    (_, Some(_)) if in_test => err.help(
+                        "use `.map_err(...)` to turn the error into the test's kind of error",
+                    ),
                     (_, _) if other_kind => err.help("use `match` to handle it here"),
                     (Some(name), _) if name == "main" => err.help(format!(
                         "handle the {} with `match` instead",
@@ -2178,5 +2207,14 @@ fn plural(n: usize, word: &str) -> String {
         format!("1 {word}")
     } else {
         format!("{n} {word}s")
+    }
+}
+
+/// How messages name the function `name`: `function 'area'`, or, for a
+/// test's, `test "adds"`.
+fn describe_fn(name: &str) -> String {
+    match crate::ast::test_of(name) {
+        Some((_, test)) => format!("test {test:?}"),
+        None => format!("function '{name}'"),
     }
 }

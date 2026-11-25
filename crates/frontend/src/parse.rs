@@ -340,6 +340,69 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tests() {
+        let program = create_parser(
+            "fn test() -> int { 1 }\n\
+             test \"adds\" { assert(test() == 1); }\n\
+             test \"reads\" -> Result<void, str> { Ok(void) }",
+        )
+        .parse()
+        .unwrap();
+        let names: Vec<(String, bool)> = program
+            .definitions
+            .iter()
+            .map(|d| match d {
+                Definition::Function {
+                    name,
+                    params,
+                    rtype,
+                    ..
+                } => {
+                    assert!(params.is_empty());
+                    (name.to_string(), rtype.is_some())
+                }
+                _ => panic!("expected functions"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("test".to_string(), true),
+                ("test \"adds\"".to_string(), false),
+                ("test \"reads\"".to_string(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_bad_tests() {
+        let message = |src: &str| create_parser(src).parse().unwrap_err().message;
+        assert_eq!(
+            message("test adds {}"),
+            "expected the test's name, a string, after 'test', found 'adds'"
+        );
+        assert_eq!(message("test \"\" {}"), "a test's name can't be empty");
+        assert_eq!(
+            message("test \"a {1}\" {}"),
+            "a test's name can't hold expressions"
+        );
+        assert_eq!(
+            message("test \"a\" {} test \"a\" {}"),
+            "there is already a test named \"a\" in this file"
+        );
+        assert_eq!(
+            message("test \"a\" -> int { 1 }"),
+            "a test returns 'void' or a 'Result<void, E>', not 'int'"
+        );
+        assert_eq!(
+            message("test \"a\" -> Result<int, str> { Ok(1) }"),
+            "a test returns 'void' or a 'Result<void, E>', not 'Result<int, str>'"
+        );
+        // Only where a definition could start.
+        assert!(create_parser("fn f() { test \"a\" {} }").parse().is_err());
+    }
+
+    #[test]
     fn test_parse_reports_bad_input_without_panicking() {
         // `any` is not a type
         assert!(create_parser("fn main() { let x: any = 1; x }")
@@ -993,6 +1056,8 @@ where
     pub fn parse(&mut self) -> ParseResult<Program> {
         let mut imports = Vec::new();
         let mut ds = Vec::new();
+        // The names of this file's tests, which must differ.
+        let mut tests: Vec<Id> = Vec::new();
         loop {
             if tok_matches!(self, Token::Import) {
                 if !ds.is_empty() {
@@ -1008,6 +1073,8 @@ where
             ) || self.at_native()
             {
                 ds.push(self.parse_defn()?);
+            } else if self.at_test() {
+                ds.push(self.parse_test(&mut tests)?);
             } else {
                 break;
             }
@@ -1016,7 +1083,7 @@ where
         if !tok_matches!(self, Token::Eof) && self.peek().is_some() {
             return Err(self
                 .expected("a definition")
-                .help("only imports and 'fn', 'struct', 'enum', and 'impl' definitions are allowed at the top level of a file"));
+                .help("only imports, 'test' blocks, and 'fn', 'struct', 'enum', and 'impl' definitions are allowed at the top level of a file"));
         }
 
         Ok(Program {
@@ -1105,6 +1172,79 @@ where
     /// as a name (as in `import std::native;`).
     fn at_native(&mut self) -> bool {
         tok_matches!(self, Token::Ident(ref n) if n == "native")
+    }
+
+    /// Whether the next token is `test`, which starts a test where a
+    /// definition could. Like `native`, it is a keyword only there, so it
+    /// can still be used as a name.
+    fn at_test(&mut self) -> bool {
+        tok_matches!(self, Token::Ident(ref n) if n == "test")
+    }
+
+    /// `test "name" { ... }`, or `test "name" -> Result<void, E> { ... }` to
+    /// use `?` in it, as a function no code can call (see
+    /// [`crate::ast::test_fn_name`]). `names` are the file's tests so far.
+    fn parse_test(&mut self, names: &mut Vec<Id>) -> ParseResult<Definition> {
+        let (start, _, _) = self.next().expect("at 'test'");
+        let tok = self.peek().cloned();
+        let (name, end) = match tok.clone() {
+            Some((_, Token::String(name), end)) => {
+                self.next();
+                (name, end)
+            }
+            Some((_, Token::TemplateStart(_), _)) => {
+                return Err(self
+                    .error(tok, "a test's name can't hold expressions".to_string())
+                    .help("write the name as plain text, with `\\{` for a brace"));
+            }
+            _ => {
+                return Err(self
+                    .expected("the test's name, a string, after 'test'")
+                    .help("name the test by what it checks: `test \"adds two numbers\" { ... }`"));
+            }
+        };
+        if name.trim().is_empty() {
+            return Err(self
+                .error(tok, "a test's name can't be empty".to_string())
+                .help("name the test by what it checks, which is shown when it fails"));
+        }
+        if names.contains(&name) {
+            return Err(self
+                .error(
+                    tok,
+                    format!("there is already a test named {name:?} in this file"),
+                )
+                .help("give each test a name of its own, so a failure says which one it was"));
+        }
+        names.push(name.clone());
+
+        let arrow = self.peek().cloned();
+        let rtype = self.parse_fn_return_type_annotation()?;
+        if let Some(t) = &rtype {
+            let ok = matches!(t, Type::Named(n, args, _)
+                if n == "Result" && args.len() == 2 && args[0] == Type::Void);
+            if !ok {
+                let mut err = self.error(
+                    arrow,
+                    format!("a test returns 'void' or a 'Result<void, E>', not '{t}'"),
+                );
+                err.end = self.prev_token.as_ref().map_or(err.end, |(_, _, e)| *e);
+                return Err(err.help(
+                    "leave out the return type, or write `-> Result<void, E>` to use `?` in the test",
+                ));
+            }
+        }
+        let body = self.parse_block()?;
+        Ok(Definition::Function {
+            public: false,
+            native: false,
+            name: crate::ast::test_fn_name(&name),
+            name_span: Span::new(start, end),
+            type_params: Vec::new(),
+            params: Vec::new(),
+            body,
+            rtype,
+        })
     }
 
     /// `native` before a definition or a function in an impl, if it is

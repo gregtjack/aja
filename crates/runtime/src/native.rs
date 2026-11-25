@@ -440,6 +440,29 @@ static NATIVES: &[(&str, NativeFn)] = &[
         [Value::Bool(false)] => Err("assertion failed".to_string()),
         _ => Err(bad_args("assert", args)),
     }),
+    ("std::testing::assert_eq", |heap, args| match args {
+        [actual, expected] if heap.equal(actual, expected) => Ok(Value::Void),
+        [actual, expected] => Err(differ(
+            "assertion failed: the values are not equal",
+            &[
+                ("expected", heap.repr(expected)),
+                ("found", heap.repr(actual)),
+            ],
+        )),
+        _ => Err(bad_args("assert_eq", args)),
+    }),
+    ("std::testing::assert_ne", |heap, args| match args {
+        [actual, unexpected] if !heap.equal(actual, unexpected) => Ok(Value::Void),
+        [actual, _] => Err(differ(
+            "assertion failed: the values are equal",
+            &[("both", heap.repr(actual))],
+        )),
+        _ => Err(bad_args("assert_ne", args)),
+    }),
+    ("std::testing::fail", |heap, args| {
+        let message = str_arg(heap, "fail", args)?;
+        Err(format!("test failed: {message}"))
+    }),
     ("std::native::status", |_, _| {
         Ok(Value::Int(STATUS.with(|s| s.borrow().0)))
     }),
@@ -1059,6 +1082,23 @@ static NATIVES: &[(&str, NativeFn)] = &[
 /// The implementation of the function called `name`, and its name.
 pub fn implementation(name: &str) -> Option<(&'static str, NativeFn)> {
     NATIVES.iter().find(|(n, _)| *n == name).copied()
+}
+
+/// A failed assertion's message, `what`, then each of `values` on a line of
+/// its own, labelled, with the labels lined up:
+///
+/// ```text
+/// assertion failed: the values are not equal
+///   expected: 4
+///      found: 5
+/// ```
+fn differ(what: &str, values: &[(&str, String)]) -> String {
+    let width = values.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    let mut message = what.to_string();
+    for (label, value) in values {
+        message.push_str(&format!("\n  {label:>width$}: {value}"));
+    }
+    message
 }
 
 fn join(heap: &Heap, args: &[Value]) -> String {

@@ -1,5 +1,5 @@
-//! The `aja` tool's commands: `run`, `check`, and `repl`. (`build` is in
-//! `aot.rs`.)
+//! The `aja` tool's commands: `run`, `check`, `test`, and `repl`.
+//! (`build` is in `aot.rs`.)
 
 use std::{
     io::Write,
@@ -177,4 +177,98 @@ fn repl_evaluates_what_it_is_given() {
     assert!(stdout.contains("> 42\n"), "{stdout}");
     assert!(stdout.ends_with("Goodbye!\n"), "{stdout}");
     assert_eq!((stderr.as_str(), status), ("", Some(0)));
+}
+
+#[test]
+fn test_runs_each_test_and_reports_failures() {
+    let dir = Dir::new("test");
+    std::fs::write(
+        dir.0.join("half.aja"),
+        "pub fn half(n: int) -> int { n / 2 }
+test \"halves\" { assert(half(4) == 2); }",
+    )
+    .unwrap();
+    let file = dir.program(
+        "import half::{half};
+import std::testing::{assert_eq};
+test \"prints\" { println(\"hi\"); }
+test \"is wrong\" { assert_eq(half(5), 3); }
+test \"divides by zero\" { println(10 / (half(1))); }",
+    );
+    let (out, err, code) = run(aja().arg("test").arg(&file), "");
+    // Each test's line comes after what it printed. (The summary says how
+    // long the tests took, so it's checked apart.)
+    let lines: Vec<&str> = out.lines().filter(|l| !l.contains(" passed, ")).collect();
+    assert_eq!(
+        lines,
+        [
+            "hi",
+            "pass \"prints\"",
+            "FAIL \"is wrong\"",
+            "FAIL \"divides by zero\"",
+            "pass half: \"halves\"",
+            "",
+            "failed:",
+            "    \"is wrong\"",
+            "    \"divides by zero\"",
+        ]
+    );
+    assert!(out.contains("\n2 passed, 2 failed ("), "{out}");
+    assert!(
+        err.contains(
+            "error: assertion failed: the values are not equal
+  expected: 3
+     found: 2
+ --> "
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("4 | test \"is wrong\" { assert_eq(half(5), 3); }"),
+        "{err}"
+    );
+    assert!(err.contains("= note: in test \"is wrong\""), "{err}");
+    assert!(err.contains("error: division by zero"), "{err}");
+    assert_eq!(code, Some(1));
+
+    // A filter runs only the tests whose names contain it.
+    let (out, err, code) = run(aja().arg("test").arg(&file).arg("halve"), "");
+    assert!(
+        out.starts_with("pass half: \"halves\"\n\n1 passed, 0 failed, 3 filtered out ("),
+        "{out}"
+    );
+    assert_eq!((err.as_str(), code), ("", Some(0)));
+}
+
+#[test]
+fn test_fails_when_there_are_no_tests_to_run() {
+    let dir = Dir::new("test-none");
+    let file = dir.program("fn main() {}");
+    let (_, err, code) = run(aja().arg("test").arg(&file), "");
+    assert!(err.starts_with("error: no tests found in "), "{err}");
+    assert_eq!(code, Some(1));
+    let file = dir.program("test \"a\" {}");
+    let (_, err, code) = run(aja().arg("test").arg(&file).arg("b"), "");
+    assert!(err.contains("have \"b\" in their names"), "{err}");
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn test_reports_errors_in_tests_before_running_any() {
+    let dir = Dir::new("test-errors");
+    let file = dir.program("test \"a\" { assert(true); }\ntest \"b\" { 1 + \"x\"; }");
+    let (out, err, code) = run(aja().arg("test").arg(&file), "");
+    assert_eq!(out, "");
+    assert!(err.starts_with("error: "), "{err}");
+    assert_eq!(code, Some(1));
+    // `run` and `check` find them too.
+    let (_, _, code) = run(aja().arg("check").arg(&file), "");
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn the_testing_example_passes() {
+    let (out, err, code) = run(aja().arg("test").arg("../../examples/testing.aja"), "");
+    assert_eq!((err.as_str(), code), ("", Some(0)), "{out}");
+    assert!(out.contains("\n4 passed, 0 failed ("), "{out}");
 }

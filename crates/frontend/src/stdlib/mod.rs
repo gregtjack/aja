@@ -17,6 +17,7 @@ pub const MODULES: &[(&str, &str)] = &[
     (NATIVE, include_str!("native.aja")),
     ("net", include_str!("net.aja")),
     ("task", include_str!("task.aja")),
+    ("testing", include_str!("testing.aja")),
     ("time", include_str!("time.aja")),
 ];
 

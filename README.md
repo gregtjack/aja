@@ -50,12 +50,14 @@ The `aja` tool has a command for each thing you do with a program
 | `aja run main.aja [args]` | Compiles the program to a native executable, runs it with `args`, and removes the executable afterwards. Needs a C compiler, `cc`, to link. |
 | `aja build main.aja [-o out]` | Compiles the program to a native executable and keeps it. Needs `cc` too. |
 | `aja check main.aja` | Type-checks the program and the modules it imports, and prints the errors. Runs nothing; prints nothing if there are none. |
+| `aja test main.aja [filter]` | Runs the `test` blocks in the program and the modules it imports (see [Tests](#tests)), or only those whose names contain `filter`, on the bytecode interpreter. |
 | `aja repl` | Starts an interactive session on the bytecode interpreter. |
 | `aja main.aja [args]` | Runs the program on the bytecode interpreter, without compiling it to native code. |
 
 ```bash
 cargo run -- run examples/hello.aja
 cargo run -- check examples/hello.aja
+cargo run -- test examples/testing.aja
 cargo run -- build examples/hello.aja -o hello && ./hello
 cargo run -- repl
 ```
@@ -77,7 +79,8 @@ cargo test
 ### Programs
 
 A program is a sequence of top-level `fn`, `struct`, `enum`, and `impl`
-definitions, in any order, after any `import`s (see [Modules](#modules)).
+definitions and `test` blocks, in any order, after any `import`s (see
+[Modules](#modules) and [Tests](#tests)).
 Execution starts at `fn main` in the file being run, which takes no
 parameters. Its return value is not printed; use `println` for output.
 
@@ -531,6 +534,85 @@ fn main() {
 
 [examples/modules](examples/modules) is a program in several files.
 
+### Tests
+
+A test is a block at the top level of a file, named by a string, beside
+the code it checks. `aja test` runs every test in the file it's given and
+in the modules that file imports, one at a time, each on a fresh VM:
+
+```rust
+import std::testing::{assert_eq};
+
+// `x`, kept between `low` and `high`.
+fn clamp(x: int, low: int, high: int) -> int {
+    if x < low { low } else if x > high { low } else { x }
+}
+
+test "clamp keeps a number in range" {
+    assert_eq(clamp(5, 0, 10), 5);
+}
+
+test "clamp raises a number below" {
+    assert_eq(clamp(-5, 0, 10), 0);
+}
+
+test "clamp lowers a number above" {
+    assert_eq(clamp(15, 0, 10), 10);
+}
+
+// With a `Result` return type, `?` works, and an `Err` fails the test.
+test "clamp a number read from text" -> Result<void, str> {
+    let n = "7".parse_int().ok_or("not a number")?;
+    assert_eq(clamp(n, 0, 10), 7);
+    Ok(void)
+}
+```
+
+```
+$ aja test main.aja
+pass "clamp keeps a number in range"
+pass "clamp raises a number below"
+FAIL "clamp lowers a number above"
+error: assertion failed: the values are not equal
+  expected: 10
+     found: 0
+  --> main.aja:17:5
+   |
+17 |     assert_eq(clamp(15, 0, 10), 10);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: in test "clamp lowers a number above"
+
+pass "clamp a number read from text"
+
+3 passed, 1 failed (0.00s)
+failed:
+    "clamp lowers a number above"
+```
+
+- **A test passes if it runs to its end.** It fails at the first assertion
+  that fails, at any runtime error that would stop a program (with the
+  same call trace), or by returning an `Err`.
+- **Its name is what a failure is reported by**, so it says what the test
+  checks. It is plain text (no `{expressions}`), and the names in a file
+  differ. `aja test main.aja roman` runs only the tests whose names contain
+  `roman`. A test in an imported module is shown with the module's name:
+  `geo::shapes: "area of a circle"`.
+- **A test is in its module**, so it can use the module's private
+  functions, types, and fields. Nothing can call a test, and it takes no
+  parameters.
+- **Tests are checked, but only run by `aja test`.** `aja run`, `aja
+  build`, and `aja check` report errors in tests too, so tests can't rot,
+  but leave them out of what they run or build. `aja test` doesn't need a
+  `main`.
+- **It fails when nothing ran.** With no tests, or a filter that matches
+  none, `aja test` exits with an error, so a typo isn't taken for a pass.
+- **Output isn't captured.** What a test prints appears as it runs, before
+  its `pass` or `FAIL` line.
+
+The assertions are in [`std::testing`](#stdtesting), with `assert` in the
+prelude. `test` is a keyword only at the top level, where a definition
+could start, so it can still be a name.
+
 ### Type checking
 
 Every program is type-checked before it runs, and every type error is
@@ -639,7 +721,7 @@ implementation fails the tests and stops the VM at startup. Built-ins named
 
 The standard library is written in Aja (`crates/frontend/src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
-it has `std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::http`, `std::net`, `std::task`, and `std::time`.
+it has `std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::http`, `std::net`, `std::task`, `std::testing`, and `std::time`.
 
 #### `std::channel`
 
@@ -1059,6 +1141,33 @@ fn main() {
   deadlock (every task waiting on another) stops it too, saying what each
   task waits for and where.
 
+#### `std::testing`
+
+Assertions for [tests](#tests). Each failure points at the assertion, not
+at the library, and shows the values it compared.
+
+```rust
+import std::testing::{assert_eq, assert_ne, fail};
+
+test "parsing" {
+    assert_eq("42".parse_int(), Some(42));
+    assert_ne("4 2".parse_int(), Some(42));
+    match "x".parse_int() {
+        Some(n) => fail("parsed 'x' as {n}"),
+        None => {}
+    }
+}
+```
+
+| Function | What it does |
+|---|---|
+| `assert_eq(actual, expected)` | Fails unless the two are equal (`==`), showing both: `expected: 4` / `found: 5`. Takes any `Eq` type. |
+| `assert_ne(actual, unexpected)` | Fails if the two are equal, showing the value. |
+| `fail(message)` | Fails with `message`: for a branch a test reaches only when what it checks is wrong. |
+
+They work outside tests too: in a program, a failed assertion stops it
+with the same error.
+
 #### `std::time`
 
 ```rust
@@ -1184,8 +1293,8 @@ structs, enums with data, and exhaustive `match`; generic functions, structs, an
 with `Eq`, `Hash`, and `Ord` bounds; ordering with `<` and `compare` on any `Ord` type; `Option`,
 `Result`, and `Ordering` in the prelude, and `?`; methods and associated functions in `impl` blocks;
 sorting and searching lists;
-modules, with `import` and `pub`; the start of the standard library
-(`std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::http`, `std::net`, `std::task`, `std::time`); template strings, and methods on strings and
+modules, with `import` and `pub`; `test` blocks, run by `aja test`; the start of the standard library
+(`std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::http`, `std::net`, `std::task`, `std::testing`, `std::time`); template strings, and methods on strings and
 numbers; static type checking with inference inside function bodies; built-ins (`print`, `clock`, `sleep`,
 `assert`); a REPL; parser, type checker, and VM unit tests.
 

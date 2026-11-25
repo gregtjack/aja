@@ -1,0 +1,78 @@
+// Tests: `test` blocks beside the code they check, and the assertions in
+// `std::testing`. Run the program with `cargo run -- examples/testing.aja`,
+// and its tests with `cargo run -- test examples/testing.aja`, or only some
+// of them with `cargo run -- test examples/testing.aja roman`.
+
+import std::testing::{assert_eq, assert_ne, fail};
+
+// The Roman numeral for `n`, from 1 to 3999.
+fn roman(n: int) -> Result<str, str> {
+    if n < 1 || n > 3999 {
+        return Err("{n} has no Roman numeral");
+    }
+    let values = [
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
+        (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    ];
+    var left = n;
+    var out = "";
+    for (value, numeral) in values {
+        while left >= value {
+            out = out + numeral;
+            left = left - value;
+        }
+    }
+    Ok(out)
+}
+
+enum Token {
+    Number(int),
+    Word(str),
+}
+
+fn tokens(text: str) -> List<Token> {
+    text.words().map(fn(w) {
+        match w.parse_int() {
+            Some(n) => Token::Number(n),
+            None => Token::Word(w),
+        }
+    })
+}
+
+fn main() {
+    for n in [4, 9, 14, 1994, 2026] {
+        match roman(n) {
+            Ok(r) => println("{n} is {r}"),
+            Err(e) => println(e),
+        }
+    }
+}
+
+test "roman numerals of small numbers" {
+    assert_eq(roman(1), Ok("I"));
+    assert_eq(roman(4), Ok("IV"));
+    assert_eq(roman(9), Ok("IX"));
+    assert_ne(roman(6), Ok("IIIIII"));
+}
+
+// A test that returns a `Result` can use `?`, and fails if it returns an
+// `Err`.
+test "roman numerals of years" -> Result<void, str> {
+    assert_eq(roman(1994)?, "MCMXCIV");
+    assert_eq(roman(2026)?, "MMXXVI");
+    Ok(void)
+}
+
+test "roman numerals only go so far" {
+    assert_eq(roman(0), Err("0 has no Roman numeral"));
+    assert(roman(4000).is_err());
+}
+
+test "words and numbers" {
+    assert_eq(tokens("take 2 eggs"), [Token::Word("take"), Token::Number(2), Token::Word("eggs")]);
+    match tokens("12")[0] {
+        Token::Number(n) => assert_eq(n, 12),
+        // A case the test reaches only if `tokens` is wrong.
+        Token::Word(w) => fail("expected a number, found the word {w}"),
+    }
+}

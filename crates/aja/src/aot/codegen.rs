@@ -103,7 +103,7 @@ pub fn compile(program: &Compiled, files: &Files) -> Result<Vec<u8>, String> {
             .iter()
             .map(|(slot, name)| (*slot, name.to_string()))
             .collect(),
-        main: program.main,
+        main: program.main.expect("a program to build has a 'main'"),
         main_result: program.main_result,
         prelude: crate::prelude::SOURCE.to_string(),
         library: program

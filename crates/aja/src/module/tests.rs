@@ -667,3 +667,126 @@ fn a_path_to_a_missing_or_private_item_says_so() {
     let fs = [("main.aja", "import geo::shapes::area; fn main() {}")];
     assert_eq!(errors(&fs), ["no module named 'geo::shapes::area'"]);
 }
+
+/// Each test of a program whose files are `fs`, as its module and name,
+/// with `None` if it passed, or its error's message.
+fn test_results(fs: &[(&str, &str)]) -> Vec<(String, String, Option<String>)> {
+    let (files, compiled) = build_tests(&files(fs), "main.aja");
+    let compiled = match compiled {
+        Ok(compiled) => compiled,
+        Err(errors) => {
+            let msgs: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+            panic!("program failed to build: {msgs:#?}")
+        }
+    };
+    compiled
+        .tests
+        .iter()
+        .map(|t| {
+            let mut vm = Vm::new();
+            vm.heap.stress = true;
+            let result = vm
+                .run_test(&compiled, t)
+                .err()
+                .map(|e| e.to_diagnostic_in(&files).message);
+            (t.module.clone(), t.name.clone(), result)
+        })
+        .collect()
+}
+
+#[test]
+fn tests_are_found_in_every_module_and_run_one_by_one() {
+    let fs = [
+        (
+            "main.aja",
+            "import geo::point::{Point, add};
+import std::testing::{assert_eq};
+fn main() {}
+test \"main's own\" { assert_eq(add(Point { x: 1, y: 2 }, Point { x: 1, y: 2 }).x, 2); }
+test \"fails\" { assert_eq(1 + 1, 3); }",
+        ),
+        (
+            "geo/point.aja",
+            "import std::testing::{assert_ne, fail};
+pub struct Point { pub x: int, pub y: int }
+pub fn add(a: Point, b: Point) -> Point { Point { x: a.x + b.x, y: a.y + b.y } }
+fn secret() -> int { 7 }
+test \"sees private items\" { assert_ne(secret(), 8); }
+test \"fails on purpose\" { fail(\"no\"); }
+test \"returns an error\" -> Result<void, str> { Err(\"bad\") }",
+        ),
+    ];
+    let results = test_results(&fs);
+    let as_strs: Vec<(&str, &str, Option<&str>)> = results
+        .iter()
+        .map(|(m, n, r)| (m.as_str(), n.as_str(), r.as_deref()))
+        .collect();
+    assert_eq!(
+        as_strs,
+        [
+            // The file being run's first, then the modules it imports'.
+            ("", "main's own", None),
+            (
+                "",
+                "fails",
+                Some("assertion failed: the values are not equal\n  expected: 3\n     found: 2")
+            ),
+            ("geo::point", "sees private items", None),
+            ("geo::point", "fails on purpose", Some("test failed: no")),
+            (
+                "geo::point",
+                "returns an error",
+                Some("the test returned an error: \"bad\"")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_program_runs_without_its_tests_and_tests_run_without_main() {
+    // A test is checked, but left out of a program built to run, so a
+    // failing one doesn't change what the program does.
+    let fs = [(
+        "main.aja",
+        "fn main() -> int { 1 } test \"never runs\" { assert(false); }",
+    )];
+    assert_eq!(value(&fs), "1");
+    let (_, compiled) = build(&files(&fs), "main.aja");
+    assert!(compiled.unwrap().tests.is_empty());
+    // A test's errors are found by any build.
+    let fs = [("main.aja", "fn main() {} test \"t\" { nope(); }")];
+    assert_eq!(errors(&fs), ["cannot find variable 'nope' in this scope"]);
+    // Tests need no `main`.
+    let fs = [("main.aja", "test \"t\" { assert(true); }")];
+    assert_eq!(test_results(&fs), [(String::new(), "t".to_string(), None)]);
+}
+
+#[test]
+fn a_failed_assertion_points_at_the_test() {
+    let fs = [(
+        "main.aja",
+        "import std::testing::{assert_eq};
+fn check(xs: List<str>) { assert_eq(xs, [\"a\"]); }
+test \"t\" { check([\"b\"]); }",
+    )];
+    let (files, compiled) = build_tests(&files(&fs), "main.aja");
+    let compiled = compiled.unwrap();
+    let err = Vm::new()
+        .run_test(&compiled, &compiled.tests[0])
+        .unwrap_err();
+    let span = err.span.unwrap();
+    // The call of `assert_eq`, not the library's code, with the call that
+    // led there in the trace.
+    assert_eq!(
+        (span.start.source, span.start.line),
+        (crate::ast::Source::MAIN, 2)
+    );
+    assert_eq!(
+        err.to_diagnostic_in(&files).notes,
+        ["in function 'check', called at line 3, column 12"]
+    );
+    assert_eq!(
+        err.message,
+        "assertion failed: the values are not equal\n  expected: [\"a\"]\n     found: [\"b\"]"
+    );
+}

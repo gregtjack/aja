@@ -179,7 +179,8 @@ it:
   what's needed from one of them by name instead. (Rules 5, 10)
 - **A small prelude.** `Option`, `Result`, `Ordering`, `Iter`, `Some`, `None`, `Ok`, `Err`, `List`,
   `print`, `println`, `assert`, and `panic` are in scope everywhere. Everything
-  else needs an `import`.
+  else needs an `import`, including the other assertions, which are in
+  `std::testing`.
 - **One package layout.** A package is a directory with an `aja.toml` and a
   `src/`, built and run by one tool (`aja run`, `aja build`, `aja test`).
   Dependency management comes later, but import paths leave room for it: a
@@ -313,12 +314,25 @@ by a number with a fractional part.
       line and column, help, and notes, the same data the rustc-like
       rendering shows. A `check` command that stops after type checking,
       for editors and CI, comes with it.
-   3. **Test runner** (`aja test`). Functions marked as tests (syntax to
-      decide: an attribute, or a `test` block) are found in a program's
-      modules and run one by one, each failure reported with its
-      assertion and call trace, and a summary at the end. `assert` gains
-      `assert_eq`, which shows both values. Doc comment examples run as
-      tests later (see "Documented with examples that run").
+   3. **Test runner** (`aja test`) ✅. A test is a block at the top level,
+      `test "what it checks" { ... }`, not an attribute on a function:
+      Aja has no attributes, and a test is never called, so it needs no
+      function name, only a description, which is what a failure is
+      reported by. `test` is a keyword only where a definition could
+      start, as `native` is. A test may be declared `-> Result<void, E>`,
+      as `main` may, so `?` works in it and an `Err` fails it. It is in
+      its module, so it sees private items. Every build checks tests, so
+      they can't rot (rule 1), but only `aja test` compiles and runs
+      them. The tests of the file given and of the modules it imports
+      (not the standard library's) run one by one on the VM, each on a
+      fresh one, so no test sees another's state; each failure is reported
+      with its assertion and call trace, then a summary. Running none,
+      with no tests or a filter that matches none, is a failure, so a typo
+      isn't taken for a pass. `std::testing` has `assert_eq` (which shows
+      both values), `assert_ne`, and `fail`; they are native, so a
+      failure points at the assertion rather than into the library. Still
+      to come: running tests in parallel, capturing their output, and doc
+      comment examples as tests (see "Documented with examples that run").
    4. **Language server** (`aja lsp`). Diagnostics as you type from the
       checker, then hover (a value's type), go to definition, completion
       of methods and fields, and formatting through the formatter. It needs

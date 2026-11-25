@@ -405,3 +405,19 @@ fn compiled_examples_run_the_same_under_stress() {
         assert_eq!(outcome(&stressed), outcome(&usual), "{name}");
     }
 }
+
+#[test]
+fn compiled_assertions_fail_as_in_the_vm() {
+    let dir = Dir::new("testing");
+    let file = dir.program(
+        "import std::testing::{assert_eq, assert_ne};
+fn main() {
+    assert_eq([1, 2], [1, 2]);
+    assert_ne(\"a\", \"b\");
+    println(\"so far so good\");
+    assert_eq(Some(1), None);
+}
+test \"is left out\" { assert(false); }",
+    );
+    same_as_vm(&file, &dir, &[], "");
+}

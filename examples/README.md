@@ -18,6 +18,7 @@ Run any of these with `cargo run -- examples/<name>.aja`.
 | [lists.aja](lists.aja) | Lists: literals, indexing, `get`, `push` and `set` making new lists, `map` / `filter` / `fold`, and sorting |
 | [collections.aja](collections.aja) | `std::collections`: counting words with a `Map` and `update`, ranking them with `sort_by` and `compare(...).then(...)`, `Set` operations, grouping into a `Map` of lists, a `SortedMap` of `SortedSet`s and its `range`, and maps comparing equal however they were built |
 | [defer.aja](defer.aja) | `defer`: cleanup that runs on every way out of a block, `?` included, last first, at the end of each loop iteration, and seeing names as they were at the `defer` |
+| [testing.aja](testing.aja) | `test` blocks beside the code they check, `assert_eq` / `assert_ne` / `fail` from `std::testing`, a test that uses `?`, and running only some tests with a filter. Run `cargo run -- test examples/testing.aja` |
 | [results.aja](results.aja) | `Option` and `Result` from the prelude, and passing errors on with `?` |
 | [iterators.aja](iterators.aja) | `for` loops, ranges, `break` / `continue`, lazy `Iter` methods, an endless iterator, and a tree you can loop over |
 | [methods.aja](methods.aja) | `impl` blocks: methods, associated functions, a generic stack, and the prelude's methods |

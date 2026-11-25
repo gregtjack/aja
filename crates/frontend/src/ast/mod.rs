@@ -82,6 +82,28 @@ impl Program {
     }
 }
 
+/// The name of the function a test, `test "adds" { ... }`, becomes: one
+/// with no parameters, named `test "adds"`. No code can write that name,
+/// so nothing can call a test but the test runner.
+pub fn test_fn_name(name: &str) -> Id {
+    format!("test \"{name}\"").into()
+}
+
+/// If `function` (a name the module resolver may have qualified, as in
+/// `geo::test "area"`) is a test's, the module it is in (`geo`, or `""` for
+/// the file being run) and the test's name (`area`).
+pub fn test_of(function: &str) -> Option<(&str, &str)> {
+    // A module's path has no spaces or quotes, so the first `test "` is
+    // where the test's own name starts.
+    let at = function.find("test \"")?;
+    let module = match &function[..at] {
+        "" => "",
+        prefix => prefix.strip_suffix("::")?,
+    };
+    let name = function[at + "test \"".len()..].strip_suffix('"')?;
+    Some((module, name))
+}
+
 /// `import geo::shapes;`, which makes `shapes::area` available, or
 /// `import geo::shapes::{Shape, area};`, which brings in those names
 /// directly. A path without braces names a module if there is one, and
@@ -440,5 +462,28 @@ impl Display for Op2 {
             Op2::Or => "||",
         };
         write!(f, "{sym}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_names_say_which_module_and_test() {
+        assert_eq!(test_of(&test_fn_name("adds")), Some(("", "adds")));
+        let qualified = format!("geo::shapes::{}", test_fn_name("a \"quoted\" test::name"));
+        assert_eq!(
+            test_of(&qualified),
+            Some(("geo::shapes", "a \"quoted\" test::name"))
+        );
+        // A module named `test` is just a module.
+        assert_eq!(
+            test_of(&format!("test::{}", test_fn_name("x"))),
+            Some(("test", "x"))
+        );
+        assert_eq!(test_of("test"), None);
+        assert_eq!(test_of("geo::test"), None);
+        assert_eq!(test_of("latest \"x\""), None);
     }
 }

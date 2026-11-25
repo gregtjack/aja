@@ -1,0 +1,36 @@
+// Assertions for tests, which `aja test` runs.
+//
+//     import std::testing::{assert_eq};
+//
+//     fn double(x: int) -> int {
+//         x * 2
+//     }
+//
+//     test "double doubles" {
+//         assert_eq(double(21), 42);
+//     }
+//
+// A test is a block at the top level of a file, named by a string. It
+// passes if it runs to its end, and fails at the first assertion that
+// fails, or any other error that would stop a program. One that returns a
+// `Result<void, E>` can use `?`, and fails if it returns an `Err`:
+//
+//     test "reads its own file" -> Result<void, fs::Error> {
+//         let text = fs::read("notes.aja")?;
+//         assert(text.len() > 0);
+//         Ok(void)
+//     }
+//
+// Each failure points at the assertion in the test, not at the code here,
+// and says what each side was.
+
+// Fail unless `actual` equals `expected`, showing both if it doesn't:
+// `assert_eq(add(2, 2), 4)`.
+pub native fn assert_eq<T: Eq>(actual: T, expected: T);
+
+// Fail if `actual` equals `unexpected`, showing the value if it does.
+pub native fn assert_ne<T: Eq>(actual: T, unexpected: T);
+
+// Fail now, with `message`: for a case a test reaches only if what it
+// checks is wrong, such as a `match` arm for the wrong variant.
+pub native fn fail(message: str);

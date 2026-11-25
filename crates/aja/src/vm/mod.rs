@@ -31,7 +31,7 @@ pub use aja_runtime::{
 mod tests;
 
 use bytecode::{Capture, Layout, Literals, Op, Proto};
-pub use compile::{Compiled, Compiler, ReplInput};
+pub use compile::{Compiled, Compiler, ReplInput, Test};
 use heap::{Closure, Gc, Heap, MAX_STR_LEN};
 use scheduler::{Next, Outcome, Scheduler, TaskStack};
 use value::Value;
@@ -161,20 +161,51 @@ impl Vm {
     /// Define a compiled program's functions, then run `main` and return
     /// its result.
     pub fn run_program(&mut self, program: &Compiled) -> Result<Value, RuntimeError> {
+        self.load_program(program);
+        let main = program.main.expect("a program to run has a 'main'");
+        let value = self.run_slot(main)?;
+        match program.main_result {
+            Some(span) => self.check_result(value, span, "main"),
+            None => Ok(value),
+        }
+    }
+
+    /// Define a compiled program's functions, then run its test `test`.
+    /// A VM runs one test, so that each starts from nothing, as a program
+    /// does.
+    pub fn run_test(&mut self, program: &Compiled, test: &Test) -> Result<(), RuntimeError> {
+        self.load_program(program);
+        let value = self.run_slot(test.slot)?;
+        if test.returns_result {
+            self.check_result(value, test.span, "the test")?;
+        }
+        Ok(())
+    }
+
+    fn load_program(&mut self, program: &Compiled) {
         self.library = program.library.clone();
         self.load_literals(&program.literals);
         self.load_functions(&program.functions);
         self.load_natives(&program.natives);
-        let Value::Fn(main) = self.globals[program.main as usize] else {
-            unreachable!("'main' is a function");
+    }
+
+    /// Run the function in global slot `slot`, which takes no arguments.
+    fn run_slot(&mut self, slot: u32) -> Result<Value, RuntimeError> {
+        let Value::Fn(f) = self.globals[slot as usize] else {
+            unreachable!("slot {slot} holds a function");
         };
-        let value = self.run(main)?;
-        if let (Some(span), Value::Data(gc)) = (program.main_result, &value) {
+        self.run(f)
+    }
+
+    /// `value`, a `Result` that `who` (named at `span`) returned, or an
+    /// error if it is an `Err`.
+    fn check_result(&self, value: Value, span: Span, who: &str) -> Result<Value, RuntimeError> {
+        if let Value::Data(gc) = &value {
             let (layout, fields) = self.heap.data(*gc);
             // `Result::Err` is the second variant.
             if layout.tag == 1 {
                 return Err(RuntimeError {
-                    message: format!("main returned an error: {}", self.heap.repr(&fields[0])),
+                    message: format!("{who} returned an error: {}", self.heap.repr(&fields[0])),
                     span: Some(span),
                     trace: Vec::new(),
                     notes: Vec::new(),

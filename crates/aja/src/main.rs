@@ -53,6 +53,14 @@ enum Command {
         /// Source file
         file: PathBuf,
     },
+    /// Run a program's tests: the `test` blocks in it and in the modules
+    /// it imports
+    Test {
+        /// Source file
+        file: PathBuf,
+        /// Run only the tests whose names contain this
+        filter: Option<String>,
+    },
     /// Start an interactive session on the bytecode interpreter
     Repl,
 }
@@ -153,6 +161,104 @@ fn run(file: &Path, args: &[String]) -> ExitCode {
     }
 }
 
+/// `aja test`: run the tests in `file` and the modules it imports, or
+/// those whose names contain `filter`, each on a VM of its own, one after
+/// another. Each is reported as it finishes, a failure with its error, and
+/// then how many passed and failed. Fails if any test did, or if there
+/// were none to run, so a filter that matches nothing isn't taken for a
+/// pass.
+fn test(file: &Path, filter: Option<&str>) -> ExitCode {
+    let (root, name) = root_and_name(file);
+    let (files, program) = module::build_tests(&root, &name);
+    let program = match program {
+        Ok(program) => program,
+        Err(errors) => {
+            report_all(&errors, &files);
+            return ExitCode::FAILURE;
+        }
+    };
+    let tests: Vec<&vm::Test> = program
+        .tests
+        .iter()
+        .filter(|t| filter.is_none_or(|f| t.name.contains(f)))
+        .collect();
+    if tests.is_empty() {
+        let what = match filter {
+            Some(f) => format!("no tests in {} have {f:?} in their names", file.display()),
+            None => format!(
+                "no tests found in {} or the modules it imports",
+                file.display()
+            ),
+        };
+        let help = match filter {
+            Some(_) => "run `aja test` without a filter to see every test's name",
+            None => "add a test at the top level of a file: `test \"adds two numbers\" { ... }`",
+        };
+        report(&Diagnostic::new(what).with_help(Some(help.into())), "", "");
+        return ExitCode::FAILURE;
+    }
+
+    let color = diagnostic::use_color();
+    let paint = |code: &str, text: &str| {
+        if color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    };
+    let started = std::time::Instant::now();
+    let mut failed = Vec::new();
+    for (i, t) in tests.iter().enumerate() {
+        let label = match t.module.as_str() {
+            "" => format!("{:?}", t.name),
+            module => format!("{module}: {:?}", t.name),
+        };
+        let result = Vm::new().run_test(&program, t);
+        // Each line is written once the test has finished, after anything
+        // it printed itself.
+        let mut out = io::stdout();
+        let written = match result {
+            Ok(()) => writeln!(out, "{} {label}", paint("32", "pass")),
+            // Whoever was reading has all they wanted.
+            Err(err) if err.message == vm::OUTPUT_CLOSED => return ExitCode::from(141),
+            Err(err) => {
+                let written = writeln!(out, "{} {label}", paint("1;31", "FAIL"));
+                let _ = out.flush();
+                let mut d = err.to_diagnostic_in(&files);
+                d.notes.push(format!("in test {label}"));
+                eprint!("{}", d.render_in(&files, color));
+                if i + 1 < tests.len() {
+                    eprintln!();
+                }
+                failed.push(label);
+                written
+            }
+        };
+        if written.and_then(|()| out.flush()).is_err() {
+            return ExitCode::from(141);
+        }
+    }
+
+    let passed = tests.len() - failed.len();
+    let skipped = program.tests.len() - tests.len();
+    let mut summary = format!("{passed} passed, {} failed", failed.len());
+    if skipped > 0 {
+        summary.push_str(&format!(", {skipped} filtered out"));
+    }
+    let time = format!("{:.2}s", started.elapsed().as_secs_f64());
+    if failed.is_empty() {
+        println!("\n{} ({time})", paint("32", &summary));
+        ExitCode::SUCCESS
+    } else {
+        println!("\n{} ({time})", paint("1;31", &summary));
+        println!("failed:");
+        for label in &failed {
+            println!("    {label}");
+        }
+        ExitCode::FAILURE
+    }
+}
+
 /// `aja build`: compile `file` to a native executable.
 fn build(file: &Path, output: Option<PathBuf>) -> ExitCode {
     let (files, program) = load(file);
@@ -187,6 +293,7 @@ fn main() -> ExitCode {
         Some(Command::Build { file, output }) => return build(&file, output),
         Some(Command::Run { file, args }) => return run(&file, &args),
         Some(Command::Check { file }) => return check_only(&file),
+        Some(Command::Test { file, filter }) => return test(&file, filter.as_deref()),
         Some(Command::Repl) => {
             run_repl();
             return ExitCode::SUCCESS;

@@ -80,7 +80,9 @@ enum DataDef {
 /// belongs in, the slot of `main`, and its string literals.
 pub struct Compiled {
     pub functions: Vec<(u32, Rc<Proto>)>,
-    pub main: u32,
+    /// The slot of `main`, which only a program compiled for its tests
+    /// (by [`Compiler::tests`]) can be without.
+    pub main: Option<u32>,
     /// Where `main` is named, if it returns a `Result`: an `Err` from it
     /// is then an error.
     pub main_result: Option<Span>,
@@ -90,6 +92,23 @@ pub struct Compiled {
     /// The files of the standard library, which messages about where the
     /// program is look past, to the program's own code.
     pub library: Vec<crate::ast::Source>,
+    /// Its tests, in the order they are defined in.
+    pub tests: Vec<Test>,
+}
+
+/// A test, `test "name" { ... }`, compiled as a function that takes no
+/// arguments.
+#[derive(Debug, Clone)]
+pub struct Test {
+    /// The module it is in, `geo::shapes`, or `""` for the file being run.
+    pub module: String,
+    pub name: String,
+    /// Its function's global slot.
+    pub slot: u32,
+    /// Where `test "name"` is written.
+    pub span: Span,
+    /// Whether it returns a `Result`, whose `Err` fails it.
+    pub returns_result: bool,
 }
 
 /// A compiled REPL input: a function that takes no arguments, and the string
@@ -262,7 +281,23 @@ impl Compiler {
         n
     }
 
+    /// Compile a program to run: it must have a `main`.
     pub fn program(&mut self, program: &Program, types: &Types) -> Result<Compiled, Diagnostic> {
+        let compiled = self.compile(program, types)?;
+        if compiled.main.is_none() {
+            return Err(Diagnostic::new(
+                "no 'main' function found; add `fn main() { ... }` as the entry point",
+            ));
+        }
+        Ok(compiled)
+    }
+
+    /// Compile a program for its tests, which it needn't have a `main` for.
+    pub fn tests(&mut self, program: &Program, types: &Types) -> Result<Compiled, Diagnostic> {
+        self.compile(program, types)
+    }
+
+    fn compile(&mut self, program: &Program, types: &Types) -> Result<Compiled, Diagnostic> {
         // Give every function a slot first, so bodies can refer to functions
         // defined later in the file.
         let mut fns = Vec::new();
@@ -296,8 +331,18 @@ impl Compiler {
 
         let mut main = None;
         let mut main_result = None;
+        let mut tests = Vec::new();
         let mut functions = Vec::new();
         for (slot, name, name_span, params, body, rtype) in fns {
+            if let Some((module, test)) = crate::ast::test_of(name) {
+                tests.push(Test {
+                    module: module.to_string(),
+                    name: test.to_string(),
+                    slot,
+                    span: *name_span,
+                    returns_result: rtype.is_some(),
+                });
+            }
             if name == "main" {
                 if !params.is_empty() {
                     return Err(Diagnostic::new("'main' cannot take parameters")
@@ -323,9 +368,6 @@ impl Compiler {
         if let Some(error) = self.error.take() {
             return Err(error);
         }
-        let main = main.ok_or_else(|| {
-            Diagnostic::new("no 'main' function found; add `fn main() { ... }` as the entry point")
-        })?;
         Ok(Compiled {
             functions,
             main,
@@ -333,6 +375,7 @@ impl Compiler {
             literals: std::mem::take(&mut self.new_literals),
             natives: std::mem::take(&mut self.new_natives),
             library: Vec::new(),
+            tests,
         })
     }
 
