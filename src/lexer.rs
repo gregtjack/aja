@@ -396,6 +396,19 @@ where
     }
 
     fn tok_number(&mut self, c: char, start: Location) -> LexResult {
+        if c == '0' {
+            let radix = match self.inner_peek() {
+                Some('x') => Some((16, "hexadecimal")),
+                Some('o') => Some((8, "octal")),
+                Some('b') => Some((2, "binary")),
+                _ => None,
+            };
+            if let Some((radix, name)) = radix {
+                let prefix = self.inner_next().unwrap();
+                return self.tok_radix_int(prefix, radix, name, start);
+            }
+        }
+
         let mut is_float = false;
         let after_dot = self.after_dot;
         let mut num_str = String::new();
@@ -458,6 +471,63 @@ where
                     i64::MAX
                 ))),
             }
+        }
+    }
+
+    /// An int written with a `0x`, `0o` or `0b` prefix, already read, and
+    /// digits that may be separated by `_`.
+    fn tok_radix_int(
+        &mut self,
+        prefix: char,
+        radix: u32,
+        name: &str,
+        start: Location,
+    ) -> LexResult {
+        let mut digits = String::new();
+        let mut bad_digit = None;
+        // Letters and digits run on in the literal, so `0b12` reports its `2`
+        // rather than lexing as `0b1` then `2`.
+        while let Some(&c) = self.inner_peek() {
+            match c {
+                '_' => {}
+                c if c.is_ascii_alphanumeric() => {
+                    if c.is_digit(radix) {
+                        digits.push(c);
+                    } else if bad_digit.is_none() {
+                        bad_digit = Some(c);
+                    }
+                }
+                _ => break,
+            }
+            self.inner_next();
+        }
+        let end = self.get_location();
+
+        if let Some(c) = bad_digit {
+            return Err(LexicalError::new(
+                start,
+                end,
+                format!("invalid digit '{c}' in {name} literal"),
+            ));
+        }
+        if digits.is_empty() {
+            return Err(
+                LexicalError::new(start, end, format!("{name} literal has no digits"))
+                    .help(format!("write digits after the '0{prefix}' prefix")),
+            );
+        }
+        match i64::from_str_radix(&digits, radix) {
+            Ok(num) => Ok((start, Token::Int(num), end)),
+            Err(_) => Err(LexicalError::new(
+                start,
+                end,
+                format!("integer literal '0{prefix}{digits}' is too large"),
+            )
+            .help(format!(
+                "int values must be between {} and {}",
+                i64::MIN,
+                i64::MAX
+            ))),
         }
     }
 
@@ -580,6 +650,43 @@ mod tests {
         assert_eq!(
             err.help.as_deref(),
             Some("int values must be between -9223372036854775808 and 9223372036854775807")
+        );
+    }
+
+    #[test]
+    fn hex_octal_and_binary_int_literals() {
+        use Token::*;
+        assert_eq!(
+            kinds("0xff 0xDead_Beef 0o17 0b1010_0101 0x0"),
+            [
+                Int(255),
+                Int(0xdead_beef),
+                Int(0o17),
+                Int(0b1010_0101),
+                Int(0),
+                Eof
+            ]
+        );
+        assert_eq!(kinds("0x7fff_ffff_ffff_ffff")[0], Int(i64::MAX));
+        // A `.` or `..` after the digits ends the literal, as for decimals.
+        assert_eq!(
+            kinds("0x10.min(1)")[..3],
+            [Int(16), Dot, Ident("min".into())]
+        );
+        assert_eq!(kinds("0b1..0b11")[..3], [Int(1), DotDot, Int(3)]);
+    }
+
+    #[test]
+    fn bad_hex_octal_and_binary_int_literals() {
+        let msg = |src: &str| tokenize(src).unwrap_err().message;
+        assert_eq!(msg("0b102"), "invalid digit '2' in binary literal");
+        assert_eq!(msg("0o8"), "invalid digit '8' in octal literal");
+        assert_eq!(msg("0xfg"), "invalid digit 'g' in hexadecimal literal");
+        assert_eq!(msg("0x"), "hexadecimal literal has no digits");
+        assert_eq!(msg("0b_"), "binary literal has no digits");
+        assert_eq!(
+            msg("0x8000_0000_0000_0000"),
+            "integer literal '0x8000000000000000' is too large"
         );
     }
 

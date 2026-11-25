@@ -391,10 +391,7 @@ impl Net {
                     (_, true) => "reading from",
                     (_, false) => "writing to",
                 };
-                set_status(
-                    TIMED_OUT,
-                    format!("timed out {what} '{}'", socket.name),
-                );
+                set_status(TIMED_OUT, format!("timed out {what} '{}'", socket.name));
                 return None;
             }
             Some(_) => {}

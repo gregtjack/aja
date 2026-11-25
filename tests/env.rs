@@ -27,7 +27,11 @@ fn main() {
         .output()
         .expect("aja runs");
     std::fs::remove_dir_all(&dir).ok();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "[\"8080\", \"-v\", \"--port=1\"]\nSome(\"hi\") None None\n"

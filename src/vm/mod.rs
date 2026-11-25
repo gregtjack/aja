@@ -369,6 +369,16 @@ impl Vm {
         self.heap.alloc_str(s)
     }
 
+    /// A native function or an intrinsic allocates straight on the heap,
+    /// which never collects, so the VM collects once it has returned, if
+    /// what it allocated calls for that. `result` is what it returned, if
+    /// that isn't in a register yet.
+    fn collect_after_native(&mut self, result: Option<Gc>) {
+        if self.heap.wants_collection(0) {
+            self.collect_garbage_with(result.into_iter().collect());
+        }
+    }
+
     /// Collect, keeping `extra` and everything it reaches alive too.
     fn collect_garbage_with(&mut self, extra: Vec<Gc>) {
         // Every task's registers and frames, the running one's included.
@@ -851,6 +861,8 @@ impl Vm {
                             Ok(v) => reg!(dst) = v,
                             Err(msg) => throw!(msg),
                         }
+                        // The result is in its register by now.
+                        self.collect_after_native(None);
                         safepoint!(Some(ip - 1));
                     }
                     // A cancelled task stops before an intrinsic, which may be
@@ -862,6 +874,7 @@ impl Vm {
                             match self.intrinsic(f, base + callee as usize + 1) {
                                 Outcome::Value(v) => {
                                     reg!(dst) = v;
+                                    self.collect_after_native(None);
                                     stopped!(Some(ip - 1));
                                 }
                                 Outcome::Wait => wait!(),
@@ -894,7 +907,10 @@ impl Vm {
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
                         match f(&mut self.heap, &self.regs[start..start + argc as usize]) {
-                            Ok(v) => ret!(v),
+                            Ok(v) => {
+                                self.collect_after_native(v.handle());
+                                ret!(v)
+                            }
                             Err(msg) => throw!(msg),
                         }
                     }
@@ -902,7 +918,10 @@ impl Vm {
                         if f == Intrinsic::CloseScope || !stopped!(Some(ip - 1)) {
                             self.frames.last_mut().unwrap().ip = ip;
                             match self.intrinsic(f, base + callee as usize + 1) {
-                                Outcome::Value(v) => ret!(v),
+                                Outcome::Value(v) => {
+                                    self.collect_after_native(v.handle());
+                                    ret!(v)
+                                }
                                 Outcome::Wait => wait!(),
                                 Outcome::Error(msg) => throw!(msg),
                             }

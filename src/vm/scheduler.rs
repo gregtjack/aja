@@ -501,7 +501,12 @@ impl Scheduler {
         let task = &mut self.tasks[self.current];
         debug_assert_eq!(task.cancel, Cancel::Requested);
         task.cancel = Cancel::Unwinding;
+        // It may have been woken, then cancelled before its turn: the call
+        // it was woken from never ran again, so what that call left to be
+        // picked up must not reach the next call the deferred code makes.
+        task.done = false;
         self.requested -= 1;
+        self.net.forget(self.current);
     }
 
     /// Cancel scope `s`: each of its tasks, and those in the scopes they

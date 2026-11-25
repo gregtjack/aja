@@ -1042,7 +1042,10 @@ fn if_expressions_can_be_operands() {
     );
     assert_eq!(
         // At the start of a statement, an `if` is a statement, as in Rust.
-        main_value("int", "let c = true; let n = if c { 1 } else { 2 } + 100; n"),
+        main_value(
+            "int",
+            "let c = true; let n = if c { 1 } else { 2 } + 100; n"
+        ),
         "Int(101)"
     );
 }
@@ -3900,5 +3903,77 @@ fn a_value_sent_cant_reach_a_var_of_the_sender() {
     assert!(
         msg.starts_with("cannot make a channel with capacity -1: it must be 0 or more"),
         "{msg}"
+    );
+}
+
+#[test]
+fn allocation_in_native_functions_is_collected() {
+    // The loop allocates only inside a native function, so the VM has to
+    // collect after those calls, not just at its own allocations.
+    let (vm, result) = run_vm(
+        "fn main() -> int {
+             var s = \"\";
+             for i in 0..200_000 { s = i.to_str(); }
+             s.len()
+         }",
+    );
+    assert_eq!(result.map(|v| vm.heap.repr(&v)).unwrap(), "6");
+    assert!(
+        vm.heap.bytes() < 4 << 20,
+        "{} bytes are still allocated",
+        vm.heap.bytes()
+    );
+}
+
+#[test]
+fn a_return_value_is_fixed_before_the_deferred_code_runs() {
+    // `return x` and `x?` give what `x` held there, as a block's value
+    // does, whatever the deferred code then assigns to `x`.
+    let (vm, result) = run_vm(
+        "fn f() -> int { var x = 1; defer { x = 2; } return x; }
+         fn g() -> int { var x = 1; defer { x = 2; } x }
+         fn h() -> Option<int> { var x: Option<int> = None; defer { x = Some(2); } x?; Some(3) }
+         fn main() -> List<Option<int>> { [Some(f()), Some(g()), h()] }",
+    );
+    assert_eq!(
+        result.map(|v| vm.heap.repr(&v)).unwrap(),
+        "[Some(1), Some(1), None]"
+    );
+}
+
+#[test]
+fn a_task_woken_then_cancelled_forgets_what_woke_it() {
+    // The receiver takes the task's value, which wakes the task, and
+    // cancels it before its turn. Its deferred `send` and `sleep` are new
+    // calls: they must not pass for the one it was woken from.
+    let (vm, result) = run_std(
+        "import std::task;
+         import std::channel;
+         fn main() -> (Option<int>, bool) {
+             let (tx, rx) = channel::new(0);
+             let (tx2, rx2) = channel::new(4);
+             let (tx3, rx3) = channel::new(0);
+             let start = clock();
+             task::scope(fn(s) {
+                 s.spawn(fn() {
+                     defer { let _ = tx2.send(99); }
+                     let _ = tx.send(1);
+                 });
+                 s.spawn(fn() {
+                     defer { sleep(50); }
+                     let _ = tx3.send(1);
+                 });
+                 let _ = rx.recv();
+                 let _ = rx3.recv();
+                 s.cancel();
+             });
+             tx2.close();
+             (rx2.recv(), clock() - start >= 50)
+         }",
+        false,
+    );
+    assert_eq!(
+        result.map(|v| vm.heap.repr(&v)).unwrap(),
+        "(Some(99), true)"
     );
 }

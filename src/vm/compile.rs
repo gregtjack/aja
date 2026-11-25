@@ -854,7 +854,7 @@ impl<'a> FnCompiler<'a> {
             Statement::Return(value) => {
                 let mark = self.mark();
                 let src = match value {
-                    Some(e) => self.expr_any(e),
+                    Some(e) => self.expr_leaving(e),
                     None => {
                         let r = self.alloc();
                         self.void(r);
@@ -1349,6 +1349,22 @@ impl<'a> FnCompiler<'a> {
         r
     }
 
+    /// Evaluate `e`, which the function may return after running its
+    /// deferred code, into some register and return it. While code is
+    /// deferred that is never a variable's own register: the deferred code
+    /// may assign to the variable, and the value returned is the one it had
+    /// at the `return`.
+    fn expr_leaving(&mut self, e: &Expr) -> Reg {
+        let f = self.cur();
+        if f.defers.len() > f.defer_floor {
+            let r = self.alloc();
+            self.expr(e, r);
+            r
+        } else {
+            self.expr_any(e)
+        }
+    }
+
     /// Evaluate `e` into `dst`. Temporaries it needs are released afterwards.
     fn expr(&mut self, e: &Expr, dst: Reg) {
         let mark = self.mark();
@@ -1505,7 +1521,7 @@ impl<'a> FnCompiler<'a> {
                 // doesn't depend on its type arguments, so it is also the
                 // function's `Err(e)` or `None`.
                 let mark = self.mark();
-                let value = self.expr_any(inner);
+                let value = self.expr_leaving(inner);
                 let (enum_name, variant) = match self.types.try_on(e) {
                     TryOn::Option => ("Option", "Some"),
                     TryOn::Result => ("Result", "Ok"),
