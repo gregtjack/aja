@@ -1,0 +1,16 @@
+[package]
+name = "aja-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "What a running Aja program needs: the heap, values, native functions, and scheduler"
+
+[dependencies]
+aja-diagnostic = { path = "../diagnostic" }
+corosensei = "0.3.4"
+libc = "0.2"
+polling = "3.7"
+
+[features]
+# What the tests of the `aja` crate read: what a program printed, and which
+# task ran when.
+testing = []

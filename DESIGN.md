@@ -104,6 +104,16 @@ source ─► lexer ─► parser ─► AST ─► type checker ─► typed IR
                                                               └─► Cranelift     (AoT native binary)
 ```
 
+The code is four crates in `crates/`, each depending only on those above
+it:
+
+| Crate | Directory | Holds |
+|---|---|---|
+| `aja-diagnostic` | `crates/diagnostic/` | Places in source (spans, files) and how errors about them are shown. |
+| `aja-frontend` | `crates/frontend/` | The lexer, parser, module loader, and type checker, with the prelude and standard library sources. It runs nothing, so a formatter or language server needs only this. |
+| `aja-runtime` | `crates/runtime/` | What a running program needs: values, the heap and collector, native functions, the scheduler. It has none of the compiler, and is what a native program is linked with. |
+| `aja` | `crates/aja/` | The backends (the bytecode compiler and VM, and Cranelift code generation) and the `aja` tool. |
+
 - **Type checker.** A new pass between parsing and execution. It infers types
   inside function bodies, checks signatures, and reports errors with spans. The
   backends trust its output and do no type checks of their own.
@@ -288,7 +298,10 @@ by a number with a fractional part.
    [the plan](plans/collections.md)) ✅, and methods on
    `str`, `int`, `float`, and `bool` in the prelude, with template strings ✅.
 8. **Tooling**, in four parts. The first three are independent; the
-   language server builds on all of them.
+   language server builds on all of them. Started: the `aja` tool's
+   commands, `run` (compile to native code, run, and remove the
+   executable) ✅, `build` ✅, `check` (stop after type checking) ✅, and
+   `repl` ✅.
    1. **Formatter** (`aja fmt`). One style with no options (rule 10),
       printing from the AST so its output doesn't depend on how the input
       was laid out. Comments must survive, so the lexer keeps them (with
@@ -336,9 +349,9 @@ by a number with a fractional part.
     the VM's heap, collector, and native functions as the runtime ✅;
     guaranteed tail calls ✅; stack overflow as an error ✅; the same
     diagnostics as the VM ✅; tasks, channels, and sockets, each task on a
-    machine stack of its own, with the VM's scheduler ✅. Not yet: values
-    kept in machine registers, and a runtime library without the compiler
-    in it.
+    machine stack of its own, with the VM's scheduler ✅; the runtime as
+    its own crate, built into `aja` ✅. Not yet: values kept in machine
+    registers.
 
 ## Open questions
 

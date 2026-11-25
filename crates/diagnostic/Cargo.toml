@@ -1,0 +1,8 @@
+[package]
+name = "aja-diagnostic"
+version = "0.1.0"
+edition = "2021"
+description = "Where things are in an Aja program's source, and how errors about them are shown"
+
+[dependencies]
+ecow = "0.2.2"

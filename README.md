@@ -42,31 +42,29 @@ provides a dev shell with Rust and `rust-analyzer`.
 cargo build
 ```
 
-Run a source file (executes `main`):
+The `aja` tool has a command for each thing you do with a program
+(`cargo run --` stands in for `aja` here):
+
+| Command | What it does |
+|---|---|
+| `aja run main.aja [args]` | Compiles the program to a native executable, runs it with `args`, and removes the executable afterwards. Needs a C compiler, `cc`, to link. |
+| `aja build main.aja [-o out]` | Compiles the program to a native executable and keeps it. Needs `cc` too. |
+| `aja check main.aja` | Type-checks the program and the modules it imports, and prints the errors. Runs nothing; prints nothing if there are none. |
+| `aja repl` | Starts an interactive session on the bytecode interpreter. |
+| `aja main.aja [args]` | Runs the program on the bytecode interpreter, without compiling it to native code. |
 
 ```bash
-cargo run -- examples/hello.aja
-```
-
-Compile a program to a native executable (needs a C compiler, `cc`, to
-link):
-
-```bash
-cargo run -- build examples/hello.aja -o hello
-./hello
+cargo run -- run examples/hello.aja
+cargo run -- check examples/hello.aja
+cargo run -- build examples/hello.aja -o hello && ./hello
+cargo run -- repl
 ```
 
 [`examples/`](examples) has programs that show off the language, plus
 some that fail on purpose to show the error messages.
 
-Start the REPL (no arguments):
-
-```bash
-cargo run
-```
-
 The REPL accepts single-line statements or expressions; `help` lists
-commands and `exit` / `quit` leaves.
+commands and `exit` / `quit` leaves. `aja` with no arguments starts it too.
 
 Run the tests:
 
@@ -212,7 +210,7 @@ fn area(s: Shape) -> int {
 - In the head of an `if`, `while`, or `match`, a struct literal needs
   parentheses: `if p == (Point { x: 0, y: 0 }) { ... }`, as in Rust.
 
-The checker for these lives in `src/check/data.rs`. In the VM, struct and
+The checker for these lives in `crates/frontend/src/check/data.rs`. In the VM, struct and
 enum values are immutable heap objects: a tag, and the values they hold.
 
 ### Generics
@@ -288,7 +286,7 @@ fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> {
 
 Aja has no null and no exceptions. A value that may be missing is an
 `Option`, and something that can fail returns a `Result`. Both are defined
-in the prelude ([`src/prelude.aja`](src/prelude.aja)), which every program
+in the prelude ([`crates/frontend/src/prelude.aja`](src/prelude.aja)), which every program
 can use without importing it:
 
 ```rust
@@ -563,7 +561,7 @@ is no `any` type: every value has one static type.
 - If a type can't be worked out (e.g. a closure parameter that's never
   used), the checker asks for an annotation rather than guessing.
 
-The checker lives in `src/check/`. It is unification-based, the core of
+The checker lives in `crates/frontend/src/check/`. It is unification-based, the core of
 Hindley–Milner inference, without let-polymorphism. Operators that accept
 several types (`+` on int, float, or str; `==` on int, float, bool, or str) keep
 an unresolved type restricted until it's known, much like Rust's `{integer}`.
@@ -632,14 +630,14 @@ error: mismatched types: function 'one' has no return type, so it returns void, 
 | `assert(cond)`   | Stops execution with an error if `cond` is false |
 
 To add a built-in, declare its name and signature in `BUILTINS`
-(`src/builtins.rs`), which the type checker reads, and implement it in each
-backend (for the VM, `src/vm/native.rs`). A built-in without an
+(`crates/frontend/src/builtins.rs`), which the type checker reads, and implement it in each
+backend (for the VM, `crates/runtime/src/native.rs`). A built-in without an
 implementation fails the tests and stops the VM at startup. Built-ins named
 `std::native::...` are the standard library's intrinsics (see below).
 
 ### The standard library
 
-The standard library is written in Aja (`src/stdlib/`), built into the
+The standard library is written in Aja (`crates/frontend/src/stdlib/`), built into the
 binary, and imported like any module, by paths starting with `std`. So far
 it has `std::channel`, `std::collections`, `std::env`, `std::io`, `std::fs`, `std::http`, `std::net`, `std::task`, and `std::time`.
 
@@ -762,7 +760,7 @@ for (t, e) in by_time.range(15, 35) { ... }     // 20 b, then 30 c
 ```
 
 - **Maps and sets never change**, like lists: `m = m.insert(k, v)` on a
-  `var`. Each is a hash array mapped trie (`src/vm/hamt.rs`), so a new
+  `var`. Each is a hash array mapped trie (`crates/runtime/src/hamt.rs`), so a new
   version shares all but a handful of nodes with the old one, and
   inserting, removing, and looking up take a few steps whatever the size.
 - **Keys must be `Hash`** (see [Bounds](#generics)): ints, strings, bools,
@@ -778,7 +776,7 @@ for (t, e) in by_time.range(15, 35) { ... }     // 20 b, then 30 c
   each set once. Maps and sets aren't `Ord`; sorted maps and sets are,
   entry by entry in key order, as lists of pairs would be.
 - **Use `Map` and `Set` unless order matters.** The sorted ones are
-  weight-balanced binary trees (`src/vm/sorted.rs`), whose steps take
+  weight-balanced binary trees (`crates/runtime/src/sorted.rs`), whose steps take
   about log₂ n comparisons, and need `Ord` keys rather than `Hash` ones.
 
 #### `std::io`
@@ -852,19 +850,19 @@ fn main() -> Result<void, io::Error> {
   handles once there's a way to be sure they get closed.
 - Underneath, the library calls a few **intrinsics** in the module
   `std::native` (`read_line`, `write`, `flush`, ...), in
-  `src/stdlib/native.aja`. Only the standard library can import it.
+  `crates/frontend/src/stdlib/native.aja`. Only the standard library can import it.
   Intrinsics take and return only `int`, `float`, `bool`, `str`, `void`,
   and lists of those, so a backend implements them without knowing Aja's
   types; one
   that can fail records a status, which the library turns into a `Result`.
 - **Native code is declared in Aja.** The prelude and standard library can
   declare `native fn len(self) -> int;` (a function with no body, which each
-  backend implements, in `src/vm/native.rs` for the VM, under the name it
+  backend implements, in `crates/runtime/src/native.rs` for the VM, under the name it
   is compiled as, such as `List::len`) and `native struct List<T>;` (a type
   whose values only native functions make). A test checks that the VM
   implements every one. Programs can't declare either.
-- To add a module, write `src/stdlib/<name>.aja` and list it in `MODULES`
-  in `src/stdlib/mod.rs`.
+- To add a module, write `crates/frontend/src/stdlib/<name>.aja` and list it in `MODULES`
+  in `crates/frontend/src/stdlib/mod.rs`.
 
 #### `std::http`
 
@@ -1100,34 +1098,38 @@ fn main() {
 ## Architecture
 
 ```
-files ──► Loader ──► Lexer ──► Parser ──► Resolver ──► AST ──► Type checker ──► Compiler ──► Bytecode VM
-          module/    lexer.rs  parse.rs   module/      ast/    check/           vm/compile.rs  vm/mod.rs
+files ──► Loader ──► Lexer ──► Parser ──► Resolver ──► AST ──► Type checker ──► Compiler ──┬─► Bytecode VM
+          module/    lexer.rs  parse.rs   module/      ast/    check/           vm/compile.rs │   vm/mod.rs
+                                                                                              └─► Cranelift ──► native executable
+                                                                                                  aot/codegen.rs
 ```
 
 | Path                  | Role |
 |-----------------------|------|
-| `src/main.rs`         | CLI (clap): file mode and REPL |
-| `src/token.rs`        | Token definitions |
-| `src/lexer.rs`        | Hand-written lexer; tracks line/column for errors |
-| `src/parse.rs`        | Recursive-descent parser (plus unit tests) |
-| `src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
-| `src/module/`         | Modules: the loader reads the file being run and every module it imports, rejecting cycles; `resolve.rs` gives each definition a module-qualified name (`geo::shapes::area`), rewrites every use to it, and checks that items used across modules are `pub`. The result is one program for the checker and backends |
-| `src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness, and `methods.rs` checks `impl` blocks and method calls |
-| `src/builtins.rs`     | Built-in function signatures, shared by the checker and backends, including the standard library's intrinsics (`std::native`) |
-| `src/stdlib/`         | The standard library, written in Aja and built into the binary (`io.aja` is `std::io`, `fs.aja` is `std::fs`) |
-| `src/prelude.aja`, `src/prelude.rs` | The prelude (`Option`, `Result`, and their methods), written in Aja and built into the binary. Locations in it are marked as the prelude's, so errors in code it calls point at the right file |
-| `src/vm/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
-| `src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
-| `src/vm/mod.rs`       | The VM: call frames, the dispatch loop, runtime errors |
-| `src/vm/value.rs`     | Runtime values |
-| `src/vm/heap.rs`      | Garbage-collected heap for closures, cells, strings, struct and enum values, and lists |
-| `src/vm/scheduler.rs` | Tasks: the run queue, switching, timers, and waiting on sockets |
-| `src/vm/net.rs`       | TCP for `std::net`: the socket table and the poller |
-| `src/vm/list.rs`      | Lists: persistent vectors that share structure between versions |
-| `src/vm/hamt.rs`      | Maps and sets: hash array mapped tries that share structure between versions |
-| `src/vm/sorted.rs`    | Sorted maps and sets: weight-balanced trees that share structure between versions |
-| `src/vm/native.rs`    | Built-in implementations |
-| `src/diagnostic.rs`   | Error rendering (source snippets, carets, help, color), and the source files each location can point into |
+| `crates/aja/src/main.rs`         | CLI (clap): `run`, `build`, `check`, `repl` |
+| `crates/frontend/src/token.rs`        | Token definitions |
+| `crates/frontend/src/lexer.rs`        | Hand-written lexer; tracks line/column for errors |
+| `crates/frontend/src/parse.rs`        | Recursive-descent parser (plus unit tests) |
+| `crates/frontend/src/ast/`            | AST nodes (`Definition`, `Statement`, `Expression`) and `Type` |
+| `crates/frontend/src/module/`         | Modules: the loader reads the file being run and every module it imports, rejecting cycles; `resolve.rs` gives each definition a module-qualified name (`geo::shapes::area`), rewrites every use to it, and checks that items used across modules are `pub`. The result is one program for the checker and backends |
+| `crates/frontend/src/check/`          | Static type checker with local type inference; `data.rs` checks structs, enums, and `match` exhaustiveness, and `methods.rs` checks `impl` blocks and method calls |
+| `crates/frontend/src/builtins.rs`     | Built-in function signatures, shared by the checker and backends, including the standard library's intrinsics (`std::native`) |
+| `crates/frontend/src/stdlib/`         | The standard library, written in Aja and built into the binary (`io.aja` is `std::io`, `fs.aja` is `std::fs`) |
+| `crates/frontend/src/prelude.aja`, `crates/frontend/src/prelude.rs` | The prelude (`Option`, `Result`, and their methods), written in Aja and built into the binary. Locations in it are marked as the prelude's, so errors in code it calls point at the right file |
+| `crates/runtime/src/bytecode.rs`  | The instruction set and compiled functions (`Proto`) |
+| `crates/aja/src/vm/compile.rs`   | Compiles the type-checked AST to bytecode |
+| `crates/aja/src/vm/mod.rs`       | The VM: call frames, the dispatch loop, runtime errors |
+| `crates/runtime/src/value.rs`     | Runtime values |
+| `crates/runtime/src/heap.rs`      | Garbage-collected heap for closures, cells, strings, struct and enum values, and lists |
+| `crates/runtime/src/scheduler.rs` | Tasks: the run queue, switching, timers, and waiting on sockets |
+| `crates/runtime/src/net.rs`       | TCP for `std::net`: the socket table and the poller |
+| `crates/runtime/src/list.rs`      | Lists: persistent vectors that share structure between versions |
+| `crates/runtime/src/hamt.rs`      | Maps and sets: hash array mapped tries that share structure between versions |
+| `crates/runtime/src/sorted.rs`    | Sorted maps and sets: weight-balanced trees that share structure between versions |
+| `crates/runtime/src/native.rs`    | Built-in implementations |
+| `crates/aja/src/aot/codegen.rs`  | Compiles bytecode to native code with Cranelift, for `aja run` and `aja build` |
+| `crates/runtime/src/rt.rs`   | The runtime of a native program: tasks' stacks, and what compiled code calls |
+| `crates/diagnostic/src/lib.rs`   | Error rendering (source snippets, carets, help, color), and the source files each location can point into |
 
 The VM is register-based. Each call gets a window of registers holding its
 parameters, locals, and temporaries, and instructions name registers
@@ -1155,7 +1157,7 @@ closures see each other's assignments. The compiler finds these variables in
 a pass over each function before compiling it. A closure that calls itself
 through its `let` captures itself, filled in as soon as it is made.
 
-Closures, cells, struct and enum values, and strings live on a garbage-collected heap (`src/vm/heap.rs`). The
+Closures, cells, struct and enum values, and strings live on a garbage-collected heap (`crates/runtime/src/heap.rs`). The
 collector is a precise mark-and-sweep: it starts from the registers in use,
 the globals, and the call frames, marks every object reachable from them, and
 frees the rest, so cycles (such as a closure that calls itself through a
@@ -1229,7 +1231,7 @@ new line of the session, so errors in code from an earlier input still point
 at that input.
 
 Output is colored when stderr is a terminal; set `NO_COLOR` to disable.
-`src/diagnostic.rs` holds the shared renderer.
+`crates/diagnostic/src/lib.rs` holds the shared renderer.
 
 **Known limitations:**
 - The REPL handles one line at a time and can't define top-level functions, structs, or enums.

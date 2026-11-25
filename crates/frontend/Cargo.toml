@@ -1,0 +1,10 @@
+[package]
+name = "aja-frontend"
+version = "0.1.0"
+edition = "2021"
+description = "Reading and checking Aja programs: the lexer, parser, module loader, and type checker"
+
+[dependencies]
+aja-diagnostic = { path = "../diagnostic" }
+color-eyre = "0.6.3"
+ecow = "0.2.2"
