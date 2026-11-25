@@ -9,7 +9,8 @@ of time to native code through Cranelift. See [DESIGN.md](DESIGN.md) for the
 principles, non-goals, and roadmap.
 
 Today, Aja is **statically type-checked** with type inference, and runs on a
-**register-based bytecode VM** with a REPL.
+**register-based bytecode VM** with a REPL. `aja build` compiles programs
+to **native executables** (see [plans/aot.md](plans/aot.md)).
 
 ```rust
 fn fact(n: int) -> int {
@@ -45,6 +46,14 @@ Run a source file (executes `main`):
 
 ```bash
 cargo run -- examples/hello.aja
+```
+
+Compile a program to a native executable (needs a C compiler, `cc`, to
+link):
+
+```bash
+cargo run -- build examples/hello.aja -o hello
+./hello
 ```
 
 [`examples/`](examples) has programs that show off the language, plus

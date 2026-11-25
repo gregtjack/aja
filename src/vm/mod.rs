@@ -24,10 +24,12 @@ pub mod compile;
 pub mod hamt;
 pub mod heap;
 pub mod list;
-mod native;
+pub(crate) mod native;
 mod net;
 pub use native::{set_args, OUTPUT_CLOSED};
-mod scheduler;
+pub(crate) mod intrinsics;
+pub(crate) mod scheduler;
+pub(crate) use scheduler::Intrinsic;
 pub mod sorted;
 pub mod value;
 
@@ -37,7 +39,7 @@ mod tests;
 use bytecode::{Capture, Layout, Literals, Op, Proto};
 pub use compile::{Compiled, Compiler, ReplInput};
 use heap::{Closure, Gc, Heap, MAX_STR_LEN};
-use scheduler::{Intrinsic, Next, Outcome, Scheduler, Wait};
+use scheduler::{Next, Outcome, Scheduler, TaskStack};
 use value::Value;
 
 /// Whether the VM implements the native function `name`.
@@ -151,7 +153,7 @@ impl RuntimeError {
 }
 
 /// A call in progress.
-struct Frame {
+pub(crate) struct Frame {
     closure: Gc,
     /// The closure's code, kept here to avoid a heap lookup per instruction.
     proto: Rc<Proto>,
@@ -168,17 +170,72 @@ struct Frame {
     tail_call: Option<(Rc<Proto>, usize)>,
 }
 
+/// A task's call stack in the VM.
+#[derive(Default)]
+pub(crate) struct Stack {
+    /// The registers, every call's window one after another.
+    regs: Vec<Value>,
+    /// The calls in progress.
+    frames: Vec<Frame>,
+}
+
+impl Stack {
+    /// The stack of a task about to call `closure`, whose code is `proto`
+    /// and which takes no arguments.
+    fn new(closure: Gc, proto: Rc<Proto>) -> Stack {
+        Stack {
+            regs: vec![Value::Void; proto.num_regs as usize],
+            frames: vec![Frame {
+                closure,
+                proto,
+                ip: 0,
+                base: 0,
+                ret: 0,
+                tail_call: None,
+            }],
+        }
+    }
+}
+
+impl TaskStack for Stack {
+    fn waits_in_deferred(&self) -> bool {
+        // A waiting task's innermost frame is at the call it waits in.
+        in_deferred(&self.frames, self.frames.last().map(|f| f.ip))
+    }
+}
+
+impl intrinsics::Host for Vm {
+    type Stack = Stack;
+
+    fn parts(&mut self) -> (&mut Heap, &mut Scheduler<Stack>) {
+        (&mut self.heap, &mut self.scheduler)
+    }
+
+    fn collect_if_wanted(&mut self) {
+        if self.heap.wants_collection(0) {
+            self.collect_garbage_with(Vec::new());
+        }
+    }
+
+    fn call_site(&self) -> Span {
+        let top = self.stack.frames.last().unwrap();
+        top.proto.spans[top.ip - 1]
+    }
+
+    fn new_stack(&mut self, closure: Gc) -> Stack {
+        Stack::new(closure, self.heap.closure(closure).proto.clone())
+    }
+}
+
 pub struct Vm {
     pub heap: Heap,
     globals: Vec<Value>,
     /// The string literals, by number; see [`Literals`]. They are roots.
     literals: Vec<Value>,
-    /// The running task's registers, every call's one window after another.
-    regs: Vec<Value>,
-    /// The running task's calls in progress.
-    frames: Vec<Frame>,
+    /// The running task's registers and calls in progress.
+    stack: Stack,
     /// The other tasks, and which runs next.
-    scheduler: Scheduler,
+    scheduler: Scheduler<Stack>,
     /// The most memory, in bytes, each task's call stack may use.
     pub stack_limit: usize,
     /// The program's standard library files (see [`Compiled::library`]).
@@ -204,8 +261,7 @@ impl Vm {
             heap: Heap::new(),
             globals,
             literals: Vec::new(),
-            regs: Vec::new(),
-            frames: Vec::new(),
+            stack: Stack::default(),
             scheduler: Scheduler::new(),
             stack_limit: DEFAULT_STACK_LIMIT,
             library: Vec::new(),
@@ -385,8 +441,9 @@ impl Vm {
         // Registers above every frame's window hold only dead values; inside
         // one, a register not yet written may hold a stale handle (see
         // `Heap::collect`).
-        let stacks =
-            std::iter::once((&self.regs[..], &self.frames[..])).chain(self.scheduler.stacks());
+        let stacks = std::iter::once(&self.stack)
+            .chain(self.scheduler.stacks())
+            .map(|s| (&s.regs[..], &s.frames[..]));
         let mut regs: Vec<&Value> = Vec::new();
         let mut roots = extra;
         roots.extend(self.scheduler.held());
@@ -425,12 +482,12 @@ impl Vm {
         for &closure in closures {
             let proto = self.heap.closure(closure).proto.clone();
             self.scheduler
-                .spawn(closure, proto, None, None, Rc::from(Vec::new()));
+                .spawn(Stack::new(closure, proto), None, None, Rc::from(Vec::new()));
         }
-        self.scheduler.start(&mut self.regs, &mut self.frames);
+        self.scheduler.start(&mut self.stack);
         let result = self.execute();
-        self.frames.clear();
-        self.regs.clear();
+        self.stack.frames.clear();
+        self.stack.regs.clear();
         match result {
             Ok(()) => Ok(self.scheduler.take_results()),
             Err(e) => {
@@ -443,7 +500,7 @@ impl Vm {
     /// Run the running task, and then the others in turn, until every
     /// task has finished or one fails.
     fn execute(&mut self) -> Result<(), RuntimeError> {
-        let frame = self.frames.last().unwrap();
+        let frame = self.stack.frames.last().unwrap();
         let mut closure = frame.closure;
         let mut proto = frame.proto.clone();
         let mut base = frame.base;
@@ -453,7 +510,7 @@ impl Vm {
         // Pick up where the innermost frame is, after a switch.
         macro_rules! load {
             () => {{
-                let frame = self.frames.last().unwrap();
+                let frame = self.stack.frames.last().unwrap();
                 closure = frame.closure;
                 proto = frame.proto.clone();
                 base = frame.base;
@@ -472,20 +529,15 @@ impl Vm {
             ($at:expr) => {{
                 let mut at: Option<usize> = $at;
                 loop {
-                    let frame = self.frames.last_mut().unwrap();
+                    let frame = self.stack.frames.last_mut().unwrap();
                     if let Some(cleanup) = at.and_then(|a| frame.proto.cleanup_at(a)) {
                         frame.ip = cleanup;
                         load!();
                         break;
                     }
-                    self.frames.pop();
-                    if self.frames.is_empty() {
-                        let next = self.scheduler.finish(
-                            None,
-                            &mut self.heap,
-                            &mut self.regs,
-                            &mut self.frames,
-                        );
+                    self.stack.frames.pop();
+                    if self.stack.frames.is_empty() {
+                        let next = self.scheduler.finish(None, &mut self.heap, &mut self.stack);
                         match next {
                             Next::Switched => {
                                 load!();
@@ -496,7 +548,7 @@ impl Vm {
                         }
                         break;
                     }
-                    at = Some(self.frames.last().unwrap().ip - 1);
+                    at = Some(self.stack.frames.last().unwrap().ip - 1);
                 }
             }};
         }
@@ -506,8 +558,8 @@ impl Vm {
         macro_rules! stopped {
             ($at:expr) => {{
                 let at: Option<usize> = $at;
-                if self.scheduler.cancel_requested() && !in_deferred(&self.frames, at) {
-                    self.frames.last_mut().unwrap().ip = ip;
+                if self.scheduler.cancel_requested() && !in_deferred(&self.stack.frames, at) {
+                    self.stack.frames.last_mut().unwrap().ip = ip;
                     self.scheduler.start_unwinding();
                     unwind!(at);
                     true
@@ -526,8 +578,8 @@ impl Vm {
                     budget -= 1;
                     if budget == 0 {
                         budget = self.scheduler.slice();
-                        self.frames.last_mut().unwrap().ip = ip;
-                        if self.scheduler.end_turn(&mut self.regs, &mut self.frames) {
+                        self.stack.frames.last_mut().unwrap().ip = ip;
+                        if self.scheduler.end_turn(&mut self.stack) {
                             load!();
                         }
                     }
@@ -537,7 +589,7 @@ impl Vm {
 
         macro_rules! reg {
             ($r:expr) => {
-                self.regs[base + $r as usize]
+                self.stack.regs[base + $r as usize]
             };
         }
         macro_rules! get {
@@ -550,7 +602,7 @@ impl Vm {
         }
         macro_rules! throw {
             ($msg:expr) => {{
-                self.frames.last_mut().unwrap().ip = ip;
+                self.stack.frames.last_mut().unwrap().ip = ip;
                 return Err(self.error($msg));
             }};
         }
@@ -577,11 +629,11 @@ impl Vm {
                     throw!(format!(
                         "stack overflow: the call stack has grown past {} MB ({} calls in progress)",
                         self.stack_limit >> 20,
-                        self.frames.len(),
+                        self.stack.frames.len(),
                     ));
                 }
-                if self.regs.len() < needed {
-                    self.regs.resize(needed, Value::Void);
+                if self.stack.regs.len() < needed {
+                    self.stack.regs.resize(needed, Value::Void);
                 }
             }};
         }
@@ -590,14 +642,11 @@ impl Vm {
         macro_rules! ret {
             ($v:expr) => {{
                 let v = $v;
-                let done = self.frames.pop().unwrap();
-                if self.frames.is_empty() {
-                    let next = self.scheduler.finish(
-                        Some(v),
-                        &mut self.heap,
-                        &mut self.regs,
-                        &mut self.frames,
-                    );
+                let done = self.stack.frames.pop().unwrap();
+                if self.stack.frames.is_empty() {
+                    let next = self
+                        .scheduler
+                        .finish(Some(v), &mut self.heap, &mut self.stack);
                     match next {
                         Next::Switched => {
                             load!();
@@ -608,7 +657,7 @@ impl Vm {
                     }
                 } else {
                     load!();
-                    self.regs[done.ret] = v;
+                    self.stack.regs[done.ret] = v;
                 }
             }};
         }
@@ -616,15 +665,15 @@ impl Vm {
         // instruction before `ip`, runs again once the task is woken.
         macro_rules! wait {
             () => {{
-                self.frames.last_mut().unwrap().ip = ip - 1;
-                match self.scheduler.wait(&mut self.regs, &mut self.frames) {
+                self.stack.frames.last_mut().unwrap().ip = ip - 1;
+                match self.scheduler.wait(&mut self.stack) {
                     Next::Switched => {
                         load!();
                         budget = self.scheduler.slice();
                     }
                     Next::Finished | Next::Deadlock => {
                         let mut err = self.deadlock(false);
-                        err.span = self.waiting_at(&self.frames);
+                        err.span = self.waiting_at(&self.stack.frames);
                         return Err(err);
                     }
                 }
@@ -714,14 +763,14 @@ impl Vm {
                     count,
                 } => {
                     let from = base + start as usize;
-                    let fields: Box<[Value]> = self.regs[from..from + count as usize].into();
+                    let fields: Box<[Value]> = self.stack.regs[from..from + count as usize].into();
                     let layout = proto.layouts[layout as usize].clone();
                     let data = self.alloc_data(layout, fields);
                     reg!(dst) = Value::Data(data);
                 }
                 Op::NewList { dst, start, count } => {
                     let from = base + start as usize;
-                    let list: list::List = self.regs[from..from + count as usize]
+                    let list: list::List = self.stack.regs[from..from + count as usize]
                         .iter()
                         .cloned()
                         .collect();
@@ -840,10 +889,10 @@ impl Vm {
                         let new_base = base + callee as usize + 1;
                         reserve!(
                             new_base + callee_proto.num_regs as usize,
-                            self.frames.len() + 1
+                            self.stack.frames.len() + 1
                         );
-                        self.frames.last_mut().unwrap().ip = ip;
-                        self.frames.push(Frame {
+                        self.stack.frames.last_mut().unwrap().ip = ip;
+                        self.stack.frames.push(Frame {
                             closure: f,
                             proto: callee_proto.clone(),
                             ip: 0,
@@ -859,7 +908,10 @@ impl Vm {
                     }
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
-                        match f(&mut self.heap, &self.regs[start..start + argc as usize]) {
+                        match f(
+                            &mut self.heap,
+                            &self.stack.regs[start..start + argc as usize],
+                        ) {
                             Ok(v) => reg!(dst) = v,
                             Err(msg) => throw!(msg),
                         }
@@ -872,8 +924,8 @@ impl Vm {
                     // which waits for the scope's tasks to stop first.
                     Value::Runtime(f) => {
                         if f == Intrinsic::CloseScope || !stopped!(Some(ip - 1)) {
-                            self.frames.last_mut().unwrap().ip = ip;
-                            match self.intrinsic(f, base + callee as usize + 1) {
+                            self.stack.frames.last_mut().unwrap().ip = ip;
+                            match self.intrinsic(f, base + callee as usize + 1, argc) {
                                 Outcome::Value(v) => {
                                     reg!(dst) = v;
                                     self.collect_after_native(None);
@@ -890,14 +942,17 @@ impl Vm {
                     Value::Fn(f) => {
                         let callee_proto = self.heap.closure(f).proto.clone();
                         debug_assert_eq!(callee_proto.arity, argc, "the type checker checks arity");
-                        reserve!(base + callee_proto.num_regs as usize, self.frames.len());
+                        reserve!(
+                            base + callee_proto.num_regs as usize,
+                            self.stack.frames.len()
+                        );
                         // Move the arguments down to the start of this frame's
                         // window, where the callee expects its parameters.
                         let args = base + callee as usize + 1;
                         for i in 0..argc as usize {
-                            self.regs.swap(base + i, args + i);
+                            self.stack.regs.swap(base + i, args + i);
                         }
-                        let frame = self.frames.last_mut().unwrap();
+                        let frame = self.stack.frames.last_mut().unwrap();
                         frame.closure = f;
                         frame.proto = callee_proto.clone();
                         frame.tail_call = Some((proto.clone(), ip - 1));
@@ -908,7 +963,10 @@ impl Vm {
                     }
                     Value::Native(_, f) => {
                         let start = base + callee as usize + 1;
-                        match f(&mut self.heap, &self.regs[start..start + argc as usize]) {
+                        match f(
+                            &mut self.heap,
+                            &self.stack.regs[start..start + argc as usize],
+                        ) {
                             Ok(v) => {
                                 self.collect_after_native(v.handle());
                                 ret!(v)
@@ -918,8 +976,8 @@ impl Vm {
                     }
                     Value::Runtime(f) => {
                         if f == Intrinsic::CloseScope || !stopped!(Some(ip - 1)) {
-                            self.frames.last_mut().unwrap().ip = ip;
-                            match self.intrinsic(f, base + callee as usize + 1) {
+                            self.stack.frames.last_mut().unwrap().ip = ip;
+                            match self.intrinsic(f, base + callee as usize + 1, argc) {
                                 Outcome::Value(v) => {
                                     self.collect_after_native(v.handle());
                                     ret!(v)
@@ -940,262 +998,17 @@ impl Vm {
         }
     }
 
-    /// Call the intrinsic `f`, whose arguments are in the registers from
-    /// `args`.
-    fn intrinsic(&mut self, f: Intrinsic, args: usize) -> Outcome {
-        let arg = |vm: &Self, i: usize| vm.regs[args + i].clone();
-        match f {
-            Intrinsic::OpenScope => {
-                if self.heap.wants_collection(0) {
-                    self.collect_garbage_with(Vec::new());
-                }
-                let owner = self.scheduler.current();
-                Outcome::Value(Value::Scope(self.heap.alloc_scope(owner)))
-            }
-            Intrinsic::CloseScope => {
-                let Value::Scope(s) = arg(self, 0) else {
-                    internal_error("Scope", &arg(self, 0));
-                };
-                let current = self.scheduler.current();
-                let scope = self.heap.scope(s);
-                if scope.live == 0 {
-                    scope.ended = true;
-                    Outcome::Value(Value::Void)
-                } else {
-                    scope.closer = Some(current);
-                    self.scheduler.waiting_for(Wait::Close(s));
-                    Outcome::Wait
-                }
-            }
-            Intrinsic::Spawn => {
-                let (Value::Scope(s), Value::Fn(f)) = (arg(self, 0), arg(self, 1)) else {
-                    internal_error("Scope and Fn", &arg(self, 1));
-                };
-                if self.heap.scope(s).ended {
-                    return Outcome::Error(
-                        "cannot spawn a task in a scope that has ended: a Scope can only be \
-                         used inside the `task::scope` call that made it"
-                            .to_string(),
-                    );
-                }
-                // What the checker can't see: a function from a parameter,
-                // a list, or a call.
-                if self.heap.reaches_cell(&Value::Fn(f)) {
-                    return Outcome::Error(
-                        "cannot spawn this function: it can reach a `var` of the task \
-                         spawning it, and a `var` belongs to one task (give the task copies \
-                         of what it needs, made with `let`)"
-                            .to_string(),
-                    );
-                }
-                // The scope and the function are still in their registers,
-                // so a collection here keeps them.
-                if self.heap.wants_collection(0) {
-                    self.collect_garbage_with(Vec::new());
-                }
-                let handle = self.heap.alloc_task();
-                // In a cancelled scope, a task never starts.
-                if self.heap.scope(s).cancelled {
-                    self.heap.task(handle).cancelled = true;
-                    return Outcome::Value(Value::Task(handle));
-                }
-                self.heap.scope(s).live += 1;
-                let proto = self.heap.closure(f).proto.clone();
-                let top = self.frames.last().unwrap();
-                let at = top.proto.spans[top.ip - 1];
-                let mut origin = self.scheduler.origin().to_vec();
-                origin.push(at);
-                self.scheduler
-                    .spawn(f, proto, Some(handle), Some(s), Rc::from(origin));
-                Outcome::Value(Value::Task(handle))
-            }
-            Intrinsic::ChannelOpen => {
-                let Value::Int(capacity) = arg(self, 0) else {
-                    internal_error("Int", &arg(self, 0));
-                };
-                if capacity < 0 {
-                    return Outcome::Error(format!(
-                        "cannot make a channel with capacity {capacity}: it must be 0 or more"
-                    ));
-                }
-                if self.heap.wants_collection(0) {
-                    self.collect_garbage_with(Vec::new());
-                }
-                Outcome::Value(Value::Channel(self.heap.alloc_channel(capacity as usize)))
-            }
-            Intrinsic::Send => {
-                let (Value::Channel(ch), value) = (arg(self, 0), arg(self, 1)) else {
-                    internal_error("Channel", &arg(self, 0));
-                };
-                // Run again after a receiver took the value.
-                if self.scheduler.take_done() {
-                    native::set_status(native::OK, String::new());
-                    return Outcome::Value(Value::Void);
-                }
-                if self.heap.reaches_cell(&value) {
-                    return Outcome::Error(
-                        "cannot send this value: it can reach a `var` of the task sending it, \
-                         and a `var` belongs to one task (send a copy, made with `let`)"
-                            .to_string(),
-                    );
-                }
-                let current = self.scheduler.current();
-                let c = self.heap.channel(ch);
-                if c.closed {
-                    native::set_status(native::END_OF_INPUT, "the channel is closed".to_string());
-                    return Outcome::Value(Value::Void);
-                }
-                native::set_status(native::OK, String::new());
-                if c.buffer.len() < c.capacity {
-                    c.buffer.push_back(value);
-                    self.scheduler.wake_receiver(&mut c.receivers, ch);
-                    Outcome::Value(Value::Void)
-                } else {
-                    // Waits until a receiver takes it: at once, for a
-                    // receiver already waiting on a channel that holds none.
-                    c.senders.push_back((current, value));
-                    self.scheduler.wake_receiver(&mut c.receivers, ch);
-                    self.scheduler.waiting_for(Wait::Send(ch));
-                    Outcome::Wait
-                }
-            }
-            Intrinsic::Receive => {
-                let Value::Channel(ch) = arg(self, 0) else {
-                    internal_error("Channel", &arg(self, 0));
-                };
-                let current = self.scheduler.current();
-                let c = self.heap.channel(ch);
-                let got = match c.buffer.pop_front() {
-                    // A waiting sender's value takes the room this leaves.
-                    Some(v) => {
-                        if let Some((sender, next)) = c.senders.pop_front() {
-                            c.buffer.push_back(next);
-                            self.scheduler.delivered(sender, ch);
-                        }
-                        Some(v)
-                    }
-                    None => match c.senders.pop_front() {
-                        Some((sender, v)) => {
-                            self.scheduler.delivered(sender, ch);
-                            Some(v)
-                        }
-                        None => None,
-                    },
-                };
-                match got {
-                    Some(v) => {
-                        native::set_status(native::OK, String::new());
-                        Outcome::Value(v)
-                    }
-                    None if c.closed => {
-                        native::set_status(native::END_OF_INPUT, String::new());
-                        Outcome::Value(Value::Void)
-                    }
-                    None => {
-                        c.receivers.push_back(current);
-                        self.scheduler.waiting_for(Wait::Recv(ch));
-                        Outcome::Wait
-                    }
-                }
-            }
-            Intrinsic::CloseChannel => {
-                let Value::Channel(ch) = arg(self, 0) else {
-                    internal_error("Channel", &arg(self, 0));
-                };
-                let c = self.heap.channel(ch);
-                c.closed = true;
-                // Receivers get what is left, then `None`; senders still
-                // waiting find it closed and keep their values.
-                for id in std::mem::take(&mut c.receivers) {
-                    self.scheduler.wake_for(id, Wait::Recv(ch));
-                }
-                for (id, _) in std::mem::take(&mut c.senders) {
-                    self.scheduler.wake_for(id, Wait::Send(ch));
-                }
-                Outcome::Value(Value::Void)
-            }
-            Intrinsic::Cancel => {
-                let Value::Scope(s) = arg(self, 0) else {
-                    internal_error("Scope", &arg(self, 0));
-                };
-                if !self.heap.scope(s).ended {
-                    self.scheduler.cancel_scope(s, &mut self.heap);
-                }
-                Outcome::Value(Value::Void)
-            }
-            Intrinsic::Sleep | Intrinsic::SleepNanos => {
-                let Value::Int(n) = arg(self, 0) else {
-                    internal_error("Int", &arg(self, 0));
-                };
-                let (unit, duration): (_, fn(u64) -> std::time::Duration) = if f == Intrinsic::Sleep
-                {
-                    ("milliseconds", std::time::Duration::from_millis)
-                } else {
-                    ("nanoseconds", std::time::Duration::from_nanos)
-                };
-                if n < 0 {
-                    return Outcome::Error(format!(
-                        "cannot sleep for {n} {unit}: the time must be 0 or more"
-                    ));
-                }
-                // The call runs again when the task wakes, and then returns.
-                if self.scheduler.take_done() || n == 0 {
-                    return Outcome::Value(Value::Void);
-                }
-                self.scheduler.set_timer(duration(n as u64));
-                Outcome::Wait
-            }
-            Intrinsic::Net(op) => {
-                let args = self.regs[args..args + op.arity()].to_vec();
-                let task = self.scheduler.current();
-                let outcome = self.scheduler.net.call(op, task, &mut self.heap, &args);
-                self.scheduler.wake_net_woken();
-                if let Outcome::Wait = outcome {
-                    self.scheduler.waiting_for(Wait::Net);
-                }
-                outcome
-            }
-            Intrinsic::Join => {
-                let Value::Task(t) = arg(self, 0) else {
-                    internal_error("Task", &arg(self, 0));
-                };
-                let current = self.scheduler.current();
-                let task = self.heap.task(t);
-                match &task.result {
-                    Some(v) => Outcome::Value(v.clone()),
-                    None if task.cancelled => Outcome::Error(
-                        "cannot join a task that was cancelled: it stopped before returning a \
-                         value (`try_join` gives `None` for one)"
-                            .to_string(),
-                    ),
-                    None => {
-                        task.joiners.push(current);
-                        self.scheduler.waiting_for(Wait::Join(t));
-                        Outcome::Wait
-                    }
-                }
-            }
-            Intrinsic::Returned => {
-                let Value::Task(t) = arg(self, 0) else {
-                    internal_error("Task", &arg(self, 0));
-                };
-                let current = self.scheduler.current();
-                let task = self.heap.task(t);
-                if task.result.is_some() || task.cancelled {
-                    Outcome::Value(Value::Bool(!task.cancelled))
-                } else {
-                    task.joiners.push(current);
-                    self.scheduler.waiting_for(Wait::Join(t));
-                    Outcome::Wait
-                }
-            }
-        }
+    /// Call the intrinsic `f`, whose `argc` arguments are in the registers
+    /// from `args`.
+    fn intrinsic(&mut self, f: Intrinsic, args: usize, argc: u8) -> Outcome {
+        let args = self.stack.regs[args..args + argc as usize].to_vec();
+        intrinsics::call(self, f, &args)
     }
 
     /// An error at the instruction the innermost frame just ran, with a
     /// trace of the calls in progress. Every frame's `ip` must be up to date.
     fn error(&self, message: String) -> RuntimeError {
-        let top = self.frames.last().unwrap();
+        let top = self.stack.frames.last().unwrap();
         let span = top.proto.spans[top.ip - 1];
 
         // For each frame, innermost first, the call that started it, as the
@@ -1204,19 +1017,20 @@ impl Vm {
         // instruction no longer describes it. The outermost frame has none,
         // unless its function made a tail call. Tail calls are an
         // implementation detail, so the trace doesn't distinguish them.
-        let calls = self
-            .frames
-            .iter()
-            .enumerate()
-            .rev()
-            .filter_map(|(i, frame)| match &frame.tail_call {
-                Some((proto, at)) => Some((proto, *at)),
-                None if i > 0 => {
-                    let caller = &self.frames[i - 1];
-                    Some((&caller.proto, caller.ip - 1))
-                }
-                None => None,
-            });
+        let calls =
+            self.stack
+                .frames
+                .iter()
+                .enumerate()
+                .rev()
+                .filter_map(|(i, frame)| match &frame.tail_call {
+                    Some((proto, at)) => Some((proto, *at)),
+                    None if i > 0 => {
+                        let caller = &self.stack.frames[i - 1];
+                        Some((&caller.proto, caller.ip - 1))
+                    }
+                    None => None,
+                });
 
         let mut trace: Vec<TraceEntry> = Vec::new();
         let mut last: Option<(*const Proto, usize)> = None;
@@ -1287,11 +1101,11 @@ impl Vm {
             describe(
                 self.scheduler.current_wait(),
                 &self.scheduler.origin(),
-                &self.frames,
+                &self.stack.frames,
             );
         }
-        for (what, origin, frames) in self.scheduler.waiting() {
-            describe(what, origin, frames);
+        for (what, origin, stack) in self.scheduler.waiting() {
+            describe(what, origin, &stack.frames);
         }
         RuntimeError {
             message: "deadlock: every task is waiting for another task, so none can go on"

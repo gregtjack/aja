@@ -559,6 +559,7 @@ impl<'a> FnCompiler<'a> {
             call_names: f.call_names,
             cleanups,
             deferred,
+            native: 0,
         }
     }
 

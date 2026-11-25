@@ -35,6 +35,7 @@ use super::{
 
 /// A handle to an object on the heap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct Gc(u32);
 
 impl std::fmt::Display for Gc {

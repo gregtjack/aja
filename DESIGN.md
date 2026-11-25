@@ -331,7 +331,14 @@ by a number with a fractional part.
    operation blocks only its task, and `std::net` over TCP ✅ (see
    [plans/net.md](plans/net.md)).
 10. **Cranelift AoT backend** producing native binaries, with the same runtime
-    semantics as the VM.
+    semantics as the VM (see [the plan](plans/aot.md)). Started:
+    `aja build` compiles the VM's bytecode to native code and links it with
+    the VM's heap, collector, and native functions as the runtime ✅;
+    guaranteed tail calls ✅; stack overflow as an error ✅; the same
+    diagnostics as the VM ✅; tasks, channels, and sockets, each task on a
+    machine stack of its own, with the VM's scheduler ✅. Not yet: values
+    kept in machine registers, and a runtime library without the compiler
+    in it.
 
 ## Open questions
 

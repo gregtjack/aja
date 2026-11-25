@@ -144,6 +144,11 @@ impl Files {
         Source::File(id)
     }
 
+    /// Every file's path and text, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.files.iter().map(|(p, t)| (p.as_str(), t.as_str()))
+    }
+
     /// The path of `source`, as shown in messages.
     pub fn path(&self, source: Source) -> &str {
         match source {

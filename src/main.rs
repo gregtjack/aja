@@ -1,30 +1,26 @@
 use std::{
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use crate::{
-    ast::Statement,
+use aja::{
+    aot,
+    ast::{self, Statement},
+    check, diagnostic,
     diagnostic::Diagnostic,
+    lexer, module,
+    parse::Parser,
+    vm,
     vm::{value::Value, Compiler, Vm},
 };
-use parse::Parser;
-mod ast;
-mod builtins;
-mod check;
-mod diagnostic;
-mod lexer;
-mod module;
-mod parse;
-mod prelude;
-mod stdlib;
-mod token;
-mod vm;
 
 #[derive(clap::Parser)]
 #[command(version, about, long_about = None)]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Source file
     file: Option<PathBuf>,
     /// Arguments for the program, which `std::env::args` gives it
@@ -32,8 +28,65 @@ struct Cli {
     args: Vec<String>,
 }
 
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Compile a program to a native executable
+    Build {
+        /// Source file
+        file: PathBuf,
+        /// Where to write the executable (default: the file's name without
+        /// `.aja`, in the current directory)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+}
+
+/// Load the program in `file` and the modules it imports, from the
+/// directory it is in, and compile it to bytecode.
+fn load(file: &Path) -> (diagnostic::Files, Result<vm::Compiled, Vec<Diagnostic>>) {
+    let root = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from(""), PathBuf::from);
+    let name = file
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    module::build(&module::Dir(root), &name)
+}
+
+/// `aja build`: compile `file` to a native executable.
+fn build(file: &Path, output: Option<PathBuf>) -> ExitCode {
+    let (files, program) = load(file);
+    let program = match program {
+        Ok(program) => program,
+        Err(errors) => {
+            report_all(&errors, &files);
+            return ExitCode::FAILURE;
+        }
+    };
+    let output = output.unwrap_or_else(|| {
+        let name = file.file_stem().unwrap_or(file.as_os_str());
+        // A file with no extension would be its own output.
+        if file.extension().is_some() {
+            PathBuf::from(name)
+        } else {
+            PathBuf::from(name).with_extension("out")
+        }
+    });
+    match aot::build(&program, &files, &output) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            report(&Diagnostic::new(message), "", "");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = <Cli as clap::Parser>::parse();
+    if let Some(Command::Build { file, output }) = cli.command {
+        return build(&file, output);
+    }
 
     vm::set_args(cli.args);
     let Some(file) = cli.file else {
@@ -42,16 +95,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
-    // File mode: load the file and the modules it imports, from the
-    // directory it is in.
-    let root = file
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from(""), PathBuf::from);
-    let name = file
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let (files, program) = module::build(&module::Dir(root), &name);
+    let (files, program) = load(&file);
     let program = match program {
         Ok(program) => program,
         Err(errors) => {

@@ -7,7 +7,12 @@ use super::{heap::Gc, native::NativeFn, scheduler::Intrinsic};
 /// Values carry a tag so that the VM stays memory-safe and so `print` can
 /// format them, but the VM never uses the tag to decide what an instruction
 /// does: the instruction's type says that.
+///
+/// The layout is fixed (`repr(u8)`: a tag byte, then the variant's fields as
+/// a C struct), because code compiled ahead of time reads and writes
+/// registers directly (see `aot::layout`).
 #[derive(Clone)]
+#[repr(u8)]
 pub enum Value {
     Void,
     Int(i64),

@@ -35,12 +35,20 @@ use std::{
 use crate::ast::Span;
 
 use super::{
-    bytecode::Proto,
     heap::{Gc, Heap},
     native, net,
     value::Value,
-    Frame,
 };
+
+/// A task's call stack, however a backend keeps one: the VM's is its
+/// registers and frames, and a native program's a machine stack. The
+/// running task's is lent to the scheduler when it switches tasks, which
+/// leaves an empty one (the default) in its place.
+pub trait TaskStack: Default {
+    /// Whether the task, which is waiting, waits in deferred code that a
+    /// block runs on its way out, so that it mustn't be stopped yet.
+    fn waits_in_deferred(&self) -> bool;
+}
 
 /// How many safepoints a task's turn lasts.
 pub const SLICE: u32 = 2000;
@@ -171,10 +179,9 @@ enum Cancel {
     Unwinding,
 }
 
-struct Task {
-    /// Its registers and frames, while it isn't running.
-    regs: Vec<Value>,
-    frames: Vec<Frame>,
+struct Task<S> {
+    /// Its call stack, while it isn't running.
+    stack: S,
     state: State,
     /// How its last intrinsic that can fail went (see
     /// `std::native::status`), while it isn't running.
@@ -207,9 +214,9 @@ enum State {
     Free,
 }
 
-pub struct Scheduler {
+pub struct Scheduler<S> {
     /// Every task of the current run, by id.
-    tasks: Vec<Task>,
+    tasks: Vec<Task<S>>,
     /// The running task.
     current: TaskId,
     /// The tasks waiting for a turn, in the order they get one.
@@ -234,7 +241,7 @@ pub struct Scheduler {
     pub switches: Vec<TaskId>,
 }
 
-impl Scheduler {
+impl<S: TaskStack> Scheduler<S> {
     pub fn new() -> Self {
         Scheduler {
             tasks: Vec::new(),
@@ -392,29 +399,18 @@ impl Scheduler {
         self.current
     }
 
-    /// A new task that calls `closure`, whose code is `proto` and which
-    /// takes no arguments, in the queue to run. A spawned task has a
+    /// A new task whose call stack is `stack`, set up to call a function
+    /// that takes no arguments, in the queue to run. A spawned task has a
     /// `handle` for its result and the `scope` it belongs to.
     pub fn spawn(
         &mut self,
-        closure: Gc,
-        proto: Rc<Proto>,
+        stack: S,
         handle: Option<Gc>,
         scope: Option<Gc>,
         origin: Rc<[Span]>,
     ) -> TaskId {
-        let regs = vec![Value::Void; proto.num_regs as usize];
-        let frames = vec![Frame {
-            closure,
-            proto,
-            ip: 0,
-            base: 0,
-            ret: 0,
-            tail_call: None,
-        }];
         let task = Task {
-            regs,
-            frames,
+            stack,
             state: State::Runnable,
             status: (0, String::new()),
             handle,
@@ -439,11 +435,11 @@ impl Scheduler {
     }
 
     /// Start running the first task in the queue, putting its stack in
-    /// `regs` and `frames`, which are empty.
-    pub fn start(&mut self, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) {
+    /// `stack`, which is empty.
+    pub fn start(&mut self, stack: &mut S) {
         let first = self.run_queue.pop_front().expect("there is a task to run");
         self.current = first;
-        self.resume(first, regs, frames);
+        self.resume(first, stack);
     }
 
     /// How many safepoints a turn lasts.
@@ -457,9 +453,21 @@ impl Scheduler {
 
     /// End the running task's turn, if another task is waiting for one:
     /// the running task goes to the back of the queue, and the next one's
-    /// stack goes in `regs` and `frames`. Every frame's `ip` must be up to
+    /// stack goes in `stack`. In the VM, every frame's `ip` must be up to
     /// date. Returns whether it switched.
-    pub fn end_turn(&mut self, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) -> bool {
+    pub fn end_turn(&mut self, stack: &mut S) -> bool {
+        if !self.turn_is_wanted() {
+            return false;
+        }
+        let next = self.run_queue.pop_front().expect("a task wants a turn");
+        self.run_queue.push_back(self.current);
+        self.switch(next, stack);
+        true
+    }
+
+    /// Whether another task is waiting for a turn, so that
+    /// [`end_turn`](Self::end_turn) would switch to it.
+    pub fn turn_is_wanted(&mut self) -> bool {
         // Wake the sleepers whose time has come, and the tasks whose
         // sockets are ready, so they get a turn soon even while other tasks
         // compute without waiting.
@@ -467,12 +475,7 @@ impl Scheduler {
         if self.net.is_waiting() {
             self.wake_net(Some(Duration::ZERO));
         }
-        let Some(next) = self.run_queue.pop_front() else {
-            return false;
-        };
-        self.run_queue.push_back(self.current);
-        self.switch(next, regs, frames);
-        true
+        !self.run_queue.is_empty()
     }
 
     /// Put waiting task `id` back in the run queue.
@@ -541,12 +544,9 @@ impl Scheduler {
                     }
                 }
                 let task = &self.tasks[id];
-                // A waiting task's innermost frame is at the call it waits in.
-                let waits_in_deferred =
-                    super::in_deferred(&task.frames, task.frames.last().map(|f| f.ip));
                 if matches!(task.state, State::Waiting)
                     && !matches!(task.waiting_on, Some(Wait::Close(_)))
-                    && !waits_in_deferred
+                    && !task.stack.waits_in_deferred()
                 {
                     self.forget(id, heap);
                     self.wake(id);
@@ -556,12 +556,12 @@ impl Scheduler {
     }
 
     /// Make the running task wait until it is woken, and run the next
-    /// task. Every frame's `ip` must be up to date.
-    pub fn wait(&mut self, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) -> Next {
+    /// task. In the VM, every frame's `ip` must be up to date.
+    pub fn wait(&mut self, stack: &mut S) -> Next {
         self.tasks[self.current].state = State::Waiting;
         match self.next_task() {
             Some(next) => {
-                self.switch(next, regs, frames);
+                self.switch(next, stack);
                 Next::Switched
             }
             None => Next::Deadlock,
@@ -572,15 +572,8 @@ impl Scheduler {
     /// it is done: a spawned task's value goes in its `Task`, which wakes
     /// the tasks joining it, and the last task of a scope wakes the task
     /// waiting to end it. Then the next task runs.
-    pub fn finish(
-        &mut self,
-        value: Option<Value>,
-        heap: &mut Heap,
-        regs: &mut Vec<Value>,
-        frames: &mut Vec<Frame>,
-    ) -> Next {
-        regs.clear();
-        frames.clear();
+    pub fn finish(&mut self, value: Option<Value>, heap: &mut Heap, stack: &mut S) -> Next {
+        *stack = S::default();
         let task = &mut self.tasks[self.current];
         match task.handle.take() {
             None => {
@@ -609,7 +602,7 @@ impl Scheduler {
         }
         match self.next_task() {
             Some(next) => {
-                self.switch(next, regs, frames);
+                self.switch(next, stack);
                 Next::Switched
             }
             None if self.tasks.iter().any(|t| matches!(t.state, State::Waiting)) => Next::Deadlock,
@@ -633,15 +626,15 @@ impl Scheduler {
     }
 
     /// Each waiting task but the running one: what it waits for, where it
-    /// was spawned, and its frames, for a deadlock's report.
-    pub fn waiting(&self) -> impl Iterator<Item = (&'static str, &[Span], &[Frame])> {
+    /// was spawned, and its stack, for a deadlock's report.
+    pub fn waiting(&self) -> impl Iterator<Item = (&'static str, &[Span], &S)> {
         self.tasks
             .iter()
             .enumerate()
             .filter(move |(id, t)| *id != self.current && matches!(t.state, State::Waiting))
             .map(|(_, t)| {
                 let what = t.waiting_on.map_or("waiting", Wait::describe);
-                (what, &t.origin[..], &t.frames[..])
+                (what, &t.origin[..], &t.stack)
             })
     }
 
@@ -652,10 +645,9 @@ impl Scheduler {
             .map_or("waiting", Wait::describe)
     }
 
-    /// The registers and frames of every task but the running one, for the
-    /// collector.
-    pub fn stacks(&self) -> impl Iterator<Item = (&[Value], &[Frame])> {
-        self.tasks.iter().map(|t| (&t.regs[..], &t.frames[..]))
+    /// The stack of every task but the running one, for the collector.
+    pub fn stacks(&self) -> impl Iterator<Item = &S> {
+        self.tasks.iter().map(|t| &t.stack)
     }
 
     /// The results of the finished tasks, which the collector keeps.
@@ -674,23 +666,21 @@ impl Scheduler {
             .flat_map(|t| t.handle.into_iter().chain(t.scope))
     }
 
-    /// Move the running task's stack (from `regs` and `frames`) and status
-    /// into its [`Task`], and run `next` instead.
-    fn switch(&mut self, next: TaskId, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) {
+    /// Move the running task's stack (from `stack`) and status into its
+    /// [`Task`], and run `next` instead.
+    fn switch(&mut self, next: TaskId, stack: &mut S) {
         let task = &mut self.tasks[self.current];
-        std::mem::swap(&mut task.regs, regs);
-        std::mem::swap(&mut task.frames, frames);
+        std::mem::swap(&mut task.stack, stack);
         task.status = native::take_status();
         self.current = next;
-        self.resume(next, regs, frames);
+        self.resume(next, stack);
     }
 
-    /// Move task `id`'s stack into `regs` and `frames`, and its status back
-    /// in place, to run it.
-    fn resume(&mut self, id: TaskId, regs: &mut Vec<Value>, frames: &mut Vec<Frame>) {
+    /// Move task `id`'s stack into `stack`, and its status back in place,
+    /// to run it.
+    fn resume(&mut self, id: TaskId, stack: &mut S) {
         let task = &mut self.tasks[id];
-        std::mem::swap(&mut task.regs, regs);
-        std::mem::swap(&mut task.frames, frames);
+        std::mem::swap(&mut task.stack, stack);
         native::restore_status(std::mem::take(&mut task.status));
         #[cfg(test)]
         self.switches.push(id);

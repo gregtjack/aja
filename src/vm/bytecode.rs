@@ -370,6 +370,9 @@ pub struct Proto {
     /// running them stops once they are done, so deferred code always runs
     /// to its end.
     pub deferred: Vec<(u32, u32)>,
+    /// In a program compiled ahead of time, the address of the function's
+    /// native code (see `aot`); 0 in the VM.
+    pub native: usize,
 }
 
 impl Proto {
